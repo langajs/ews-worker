@@ -646,7 +646,8 @@ async function handleCallback(request, env, ctx) {
     for (const st of (subTasks?.results || [])) await jstUpdateSubTask(env, st.id, { title: product_title });
   }
   if (titles || product_title) {
-    await env.DB.prepare("UPDATE ews_jst_push_plans SET status='done' WHERE task_id=? AND webhook_type='title' AND status='processing'").bind(task_id).run();
+    const PP = idx.platform === 'jst' ? 'ews_jst_' : 'ews_shopee_';
+    await env.DB.prepare(`UPDATE ${PP}push_plans SET status='done' WHERE task_id=? AND webhook_type='title' AND status='processing'`).bind(task_id).run();
   }
 
   // SKU 标题回调
@@ -664,7 +665,8 @@ async function handleCallback(request, env, ctx) {
         if (title) await jstCreateSkuTitle(env, { id: uuid(), sub_task_id: allSubs[si].id, variant_id: variants[vi].id, title: title.slice(0, 30) });
       }
     }
-    await env.DB.prepare("UPDATE ews_jst_push_plans SET status='done' WHERE task_id=? AND webhook_type='sku_title' AND status='processing'").bind(task_id).run();
+    const PP2 = idx.platform === 'jst' ? 'ews_jst_' : 'ews_shopee_';
+    await env.DB.prepare(`UPDATE ${PP2}push_plans SET status='done' WHERE task_id=? AND webhook_type='sku_title' AND status='processing'`).bind(task_id).run();
   }
 
   // 图片回调
