@@ -228,6 +228,33 @@ CREATE TABLE IF NOT EXISTS ews_shopee_variations (
   FOREIGN KEY (product_id) REFERENCES ews_shopee_products(id) ON DELETE CASCADE
 );
 
+-- Shopee 子任务（款式编码，对标 JST sub_tasks）
+CREATE TABLE IF NOT EXISTS ews_shopee_sub_tasks (
+  id TEXT PRIMARY KEY,
+  parent_task_id TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  set_index INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT '',
+  FOREIGN KEY (parent_task_id) REFERENCES ews_tasks(id) ON DELETE CASCADE
+);
+
+-- Shopee 图片记录（对标 JST task_images）
+CREATE TABLE IF NOT EXISTS ews_shopee_task_images (
+  id TEXT PRIMARY KEY,
+  parent_task_id TEXT NOT NULL,
+  sub_task_id TEXT,
+  set_index INTEGER NOT NULL,
+  image_type TEXT NOT NULL,    -- main / sub / detail / sku
+  position INTEGER NOT NULL DEFAULT 1,
+  image_url TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (parent_task_id) REFERENCES ews_tasks(id) ON DELETE CASCADE,
+  FOREIGN KEY (sub_task_id) REFERENCES ews_shopee_sub_tasks(id) ON DELETE SET NULL
+);
+
 -- Shopee 推送计划（结构与 JST 一致）
 CREATE TABLE IF NOT EXISTS ews_shopee_push_plans (
   id TEXT PRIMARY KEY,

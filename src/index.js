@@ -16,6 +16,8 @@ import {
   shopeeCreateVariations, shopeeClearVariations,
   shopeeCreatePushPlans, shopeeGetPushPlans, shopeeGetPendingPlans, shopeeUpdatePlanStatus, shopeeGetPlanStats,
   shopeeCreateExportRecord,
+  shopeeCreateSubTask, shopeeGetSubTasks, shopeeUpdateSubTask,
+  shopeeCreateExpectedImages, shopeeCheckSubTaskImages,
 } from './db.js';
 import { generateToken, hashPassword, verifyPassword, authenticateRequest, DEFAULT_PASSWORD } from './auth.js';
 
@@ -483,6 +485,7 @@ async function handlePushTask(env, ctx, path, request) {
   const idx = await getTaskIndex(env, taskId);
   if (!idx) return error('任务不存在', 404);
   if (idx.platform === 'jst') return jstHandlePush(env, taskId, ctx, request);
+  if (idx.platform === 'shopee') return shopeeHandlePush(env, taskId, ctx, request);
   return error('不支持的平台', 400);
 }
 
@@ -577,6 +580,104 @@ async function jstHandlePush(env, taskId, ctx, request) {
   ctx.waitUntil(jstReleaseTaskQueue(env, taskId, ctx));
   return json({ success: true, task_id: taskId, sub_tasks: subTasks, total_plans: planRecords.length,
     message: '已创建 ' + planRecords.length + ' 个推送计划' });
+}
+
+// ========== Shopee 推送（与 JST 对齐） ==========
+async function shopeeHandlePush(env, taskId, ctx, request) {
+  const body = await parseBody(request).catch(() => ({}));
+  const testMode = body?.test_mode === true;
+  const config = await getConfig(env, 'shopee');
+  const detail = await shopeeGetProduct(env, taskId);
+  if (!detail) return error('商品不存在', 404);
+  if (!config.n8n_title_webhook && !config.n8n_main_webhook && !config.n8n_sub_image_webhook && !config.n8n_detail_webhook)
+    return error('请先在系统配置页配置 Shopee 工作流 Webhook', 400);
+
+  const callbackSecret = config.callback_secret || '';
+  const baseUrl = new URL(request.url).origin + '/api/callback';
+  const mainCount = Math.min(Math.max(detail.main_image_count || 5, 5), 9);
+  const detailCount = Math.min(Math.max(detail.detail_image_count || 5, 5), 9);
+  const mode = detail.mode || 'full';
+  const refImg = detail.reference_image || '';
+  const auxImgs = detail.auxiliary_images || '';
+  const genCount = detail.generate_count || 1;
+
+  // 创建子任务（每个变体组合作为一个子任务）
+  const variantCombos = detail.variations || [];
+  const subTaskIds = [];
+  for (let i = 0; i < Math.max(variantCombos.length, 1); i++) {
+    const subId = uuid(); subTaskIds.push(subId);
+    await shopeeCreateSubTask(env, { id: subId, parent_task_id: taskId, set_index: i });
+    await shopeeCreateExpectedImages(env, taskId, subId, i, mainCount, detailCount);
+  }
+  await updateTaskIndexStatus(env, taskId, 'processing');
+
+  const subTasks = subTaskIds.map((id, i) => ({ sub_task_id: id, set_index: i }));
+  const allJobs = [];
+
+  // title
+  allJobs.push({ webhook_type: 'title', sub_task_id: subTasks[0]?.sub_task_id || '', url: config.n8n_title_webhook,
+    data: { task_id: taskId, name: detail.name, reference_title: '', description: detail.description || '',
+      sub_task_count: subTaskIds.length, callback_secret: callbackSecret, callback_url: baseUrl } });
+  // main_1
+  if (config.n8n_main_webhook) for (const st of subTasks) allJobs.push({ webhook_type: 'main_1', sub_task_id: st.sub_task_id, url: config.n8n_main_webhook,
+    data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: refImg,
+      main_description: detail.main_description || '', auxiliary_images: auxImgs,
+      image_type: 'main', image_position: 1, callback_secret: callbackSecret, callback_url: baseUrl } });
+  // sub_2~N
+  if (config.n8n_sub_image_webhook) for (let p = 2; p <= mainCount; p++) for (const st of subTasks) {
+    allJobs.push({ webhook_type: 'sub_' + p, sub_task_id: st.sub_task_id, url: config.n8n_sub_image_webhook,
+      data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: refImg,
+        main_description: detail.main_description || '', auxiliary_images: auxImgs,
+        image_type: 'sub', image_position: p, callback_secret: callbackSecret, callback_url: baseUrl } });
+  }
+  // detail_1~M
+  if (config.n8n_detail_webhook) for (let p = 1; p <= detailCount; p++) for (const st of subTasks) {
+    allJobs.push({ webhook_type: 'detail_' + p, sub_task_id: st.sub_task_id, url: config.n8n_detail_webhook,
+      data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: refImg,
+        detail_description: detail.detail_description || '', auxiliary_images: auxImgs,
+        image_type: 'detail', image_position: p, callback_secret: callbackSecret, callback_url: baseUrl } });
+  }
+
+  const batchSize = parseInt(config.push_batch_size) || 20;
+  const planRecords = [];
+  for (let bi = 0; bi < allJobs.length; bi++) {
+    const j = allJobs[bi];
+    planRecords.push({ id: uuid(), task_id: taskId, sub_task_id: j.sub_task_id, webhook_type: j.webhook_type,
+      webhook_url: j.url || '', payload: JSON.stringify(j.data), batch_order: Math.floor(bi / batchSize) });
+  }
+  if (planRecords.length > 0) await shopeeCreatePushPlans(env, planRecords);
+
+  if (testMode) return json({ success: true, task_id: taskId, sub_tasks: subTasks, test_mode: true, total_plans: planRecords.length });
+  ctx.waitUntil(shopeeReleaseTaskQueue(env, taskId, ctx));
+  return json({ success: true, task_id: taskId, sub_tasks: subTasks, total_plans: planRecords.length, message: '已创建 ' + planRecords.length + ' 个推送计划' });
+}
+
+async function shopeeReleaseTaskQueue(env, taskId, ctx) {
+  try {
+    const config = await getConfig(env, 'shopee');
+    const batchSize = parseInt(config.push_batch_size) || 20;
+    const processingRow = await getOne(env, "SELECT COUNT(*) as cnt FROM ews_shopee_push_plans WHERE task_id=? AND status='processing'", [taskId]);
+    const slots = batchSize - (processingRow?.cnt || 0);
+    if (slots <= 0) return;
+    const pendingPlans = await shopeeGetPendingPlans(env, taskId, slots);
+    const plans = pendingPlans?.results || [];
+    if (!plans.length) return;
+    const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
+    for (const plan of plans) {
+      let canSend = true;
+      if (taskOwner?.user_id) {
+        const credits = await getUserCredits(env, taskOwner.user_id);
+        if (credits > 0) await updateUserCredits(env, taskOwner.user_id, 1, 'subtract');
+        else canSend = false;
+      }
+      if (canSend) {
+        await shopeeUpdatePlanStatus(env, plan.id, 'processing');
+        ctx.waitUntil(pushToWebhook(plan.webhook_url, JSON.parse(plan.payload)));
+      } else {
+        await env.DB.prepare("UPDATE ews_shopee_push_plans SET status='failed', retry_count=3, error=? WHERE id=?").bind('算力不足', plan.id).run();
+      }
+    }
+  } catch (err) { console.error('shopeeReleaseTaskQueue error:', err.message); }
 }
 
 async function pushToWebhook(url, data) {
