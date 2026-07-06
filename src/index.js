@@ -369,6 +369,34 @@ async function handleUpdateTask(request, env, path) {
   const idx = await getTaskIndex(env, taskId);
   if (!idx) return error('任务不存在', 404);
 
+  if (idx.platform === 'shopee') {
+    const { name, task_description, category_id, brand_id, cover_image, images, weight_kg, length_cm, width_cm, height_cm, gtin, hs_code, tax_code, origin_country, variation_name1, variation_name2, pre_order_dts, shipping_channels, variations } = body || {};
+    if (!name) return error('商品名称不能为空', 400);
+    await env.DB.prepare("UPDATE ews_tasks SET name=?, status='pending', updated_at=datetime('now') WHERE id=?").bind(String(name).slice(0,30), taskId).run();
+    await shopeeCreateProduct(env, {
+      id: taskId, task_id: taskId, name, category_id: category_id || '',
+      description: task_description || '', brand_id: brand_id || '',
+      cover_image: cover_image || '', images: images || '[]',
+      weight_kg: weight_kg || 0, length_cm: length_cm ?? null, width_cm: width_cm ?? null, height_cm: height_cm ?? null,
+      gtin: gtin || '', hs_code: hs_code || '', tax_code: tax_code || '', origin_country: origin_country || '',
+      variation_name1: variation_name1 || '', variation_name2: variation_name2 || '',
+      pre_order_dts: pre_order_dts ?? null,
+      shipping_channels: shipping_channels || '[]',
+    });
+    if (variations && Array.isArray(variations)) {
+      await shopeeClearVariations(env, taskId);
+      for (const v of variations) {
+        await shopeeCreateVariations(env, [{
+          id: v.id || uuid(), product_id: taskId, integration_no: v.integration_no || taskId.slice(0,8),
+          option1: v.option1 || '', image_per_variation: v.image_per_variation || '',
+          option2: v.option2 || '', image_2: v.image_2 || '',
+          price: v.price || 0, stock: v.stock || 0, sku: v.sku || '',
+        }]);
+      }
+    }
+    return json({ success: true, task_id: taskId, message: '商品创建成功' });
+  }
+
   if (idx.platform === 'jst') {
     const { name, topic_items, description, main_description, detail_description, auxiliary_images, reference_image, generate_count, stock, weight, variants, mode, main_image_count, detail_image_count } = body || {};
     if (!name) return error('任务名称不能为空', 400);
