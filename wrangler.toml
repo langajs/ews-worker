@@ -1,0 +1,15 @@
+name = "ews-worker"
+main = "src/index.js"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+# D1 数据库绑定
+[[d1_databases]]
+binding = "DB"
+database_name = "baseapac"
+database_id = "8a323729-e862-4daf-b29d-24eb4f840715"
+
+# R2 存储桶绑定
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "ossapac"

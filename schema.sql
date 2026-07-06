@@ -1,0 +1,255 @@
+-- EWS 聚合系统 - 完整数据库建表脚本
+-- 三层命名：ews_(共享) / ews_jst_(聚水潭) / ews_shopee_(虾皮)
+
+-- ====================================================================
+-- 共享层 ews_
+-- ====================================================================
+
+-- 分平台配置表
+CREATE TABLE IF NOT EXISTS ews_config (
+  key TEXT NOT NULL,
+  value TEXT NOT NULL DEFAULT '',
+  platform TEXT NOT NULL DEFAULT '',  -- ''(通用) / 'jst' / 'shopee'
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (key, platform)
+);
+
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('jwt_secret_name', 'ews_jwt_secret_v1', '');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('r2_public_url', 'https://oss.langaj.work', '');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('admin_password', '$2a$10$EWS_DEFAULT_HASH', '');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('callback_secret', '', '');
+
+-- JST 默认配置
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_title_webhook', '', 'jst');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_title_webhook', '', 'jst');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_main_webhook', '', 'jst');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sub_image_webhook', '', 'jst');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_detail_webhook', '', 'jst');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_image_webhook', '', 'jst');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_batch_size', '20', 'jst');
+
+-- Shopee 默认配置
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_title_webhook', '', 'shopee');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_title_webhook', '', 'shopee');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_main_webhook', '', 'shopee');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sub_image_webhook', '', 'shopee');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_detail_webhook', '', 'shopee');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_image_webhook', '', 'shopee');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_batch_size', '20', 'shopee');
+
+-- 共享用户表
+CREATE TABLE IF NOT EXISTS ews_users (
+  id TEXT PRIMARY KEY,
+  username TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'user',      -- admin / user
+  display_name TEXT DEFAULT '',
+  webhook_config TEXT DEFAULT '{}',       -- JSON: {"jst":{...}, "shopee":{...}}
+  is_active INTEGER NOT NULL DEFAULT 1,
+  credits INTEGER NOT NULL DEFAULT 200,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_by TEXT DEFAULT ''
+);
+INSERT OR IGNORE INTO ews_users (id, username, password_hash, role, created_by)
+  VALUES ('admin', 'admin', '$2a$10$EWS_DEFAULT_HASH', 'admin', 'system');
+
+-- 统一任务索引表
+CREATE TABLE IF NOT EXISTS ews_tasks (
+  id TEXT PRIMARY KEY,
+  platform TEXT NOT NULL,           -- 'jst' / 'shopee'
+  name TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'init',  -- init / pending / processing / completed / failed
+  user_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ews_tasks_platform ON ews_tasks(platform);
+CREATE INDEX IF NOT EXISTS idx_ews_tasks_user ON ews_tasks(user_id);
+
+-- ====================================================================
+-- 聚水潭模块 ews_jst_
+-- ====================================================================
+
+-- JST 任务（扩展信息）
+CREATE TABLE IF NOT EXISTS ews_jst_tasks (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  topic_items TEXT NOT NULL DEFAULT '',
+  description TEXT DEFAULT '',
+  main_description TEXT NOT NULL DEFAULT '',
+  detail_description TEXT NOT NULL DEFAULT '',
+  reference_image TEXT NOT NULL,
+  auxiliary_images TEXT NOT NULL DEFAULT '',
+  generate_count INTEGER NOT NULL DEFAULT 1,
+  stock INTEGER NOT NULL DEFAULT 999,
+  weight REAL NOT NULL DEFAULT 1.0,
+  variant_count INTEGER NOT NULL DEFAULT 1,
+  main_image_count INTEGER NOT NULL DEFAULT 5,
+  detail_image_count INTEGER NOT NULL DEFAULT 5,
+  mode TEXT NOT NULL DEFAULT 'full',       -- full / dedup
+  status TEXT NOT NULL DEFAULT 'pending',
+  queue_mode TEXT NOT NULL DEFAULT 'auto',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- JST 子任务（款式编码）
+CREATE TABLE IF NOT EXISTS ews_jst_sub_tasks (
+  id TEXT PRIMARY KEY,
+  parent_task_id TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  set_index INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT '',
+  FOREIGN KEY (parent_task_id) REFERENCES ews_jst_tasks(id) ON DELETE CASCADE
+);
+
+-- JST 变体（二维规格）
+CREATE TABLE IF NOT EXISTS ews_jst_variants (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  tier1_name TEXT NOT NULL DEFAULT '',      -- 第一层规格名（如"颜色"）
+  tier1_value TEXT NOT NULL,               -- 第一层规格值（如"红色"，旧数据迁移自此）
+  tier2_name TEXT NOT NULL DEFAULT '',      -- 第二层规格名（如"尺码"）
+  tier2_value TEXT NOT NULL DEFAULT '',     -- 第二层规格值（如"M"）
+  white_bg_image TEXT NOT NULL,
+  price REAL,
+  description TEXT NOT NULL DEFAULT '',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (task_id) REFERENCES ews_jst_tasks(id) ON DELETE CASCADE
+);
+
+-- JST SKU 标题
+CREATE TABLE IF NOT EXISTS ews_jst_sku_titles (
+  id TEXT PRIMARY KEY,
+  sub_task_id TEXT NOT NULL,
+  variant_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (sub_task_id) REFERENCES ews_jst_sub_tasks(id) ON DELETE CASCADE,
+  FOREIGN KEY (variant_id) REFERENCES ews_jst_variants(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jst_sku_titles_unique ON ews_jst_sku_titles(sub_task_id, variant_id);
+
+-- JST 图片记录
+CREATE TABLE IF NOT EXISTS ews_jst_task_images (
+  id TEXT PRIMARY KEY,
+  parent_task_id TEXT NOT NULL,
+  sub_task_id TEXT,
+  variant_id TEXT,
+  set_index INTEGER NOT NULL,
+  image_type TEXT NOT NULL,          -- main / sub / detail / sku
+  position INTEGER NOT NULL DEFAULT 1,
+  image_url TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (parent_task_id) REFERENCES ews_jst_tasks(id) ON DELETE CASCADE,
+  FOREIGN KEY (sub_task_id) REFERENCES ews_jst_sub_tasks(id) ON DELETE SET NULL,
+  FOREIGN KEY (variant_id) REFERENCES ews_jst_variants(id) ON DELETE SET NULL
+);
+
+-- JST 推送计划
+CREATE TABLE IF NOT EXISTS ews_jst_push_plans (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  sub_task_id TEXT NOT NULL,
+  webhook_type TEXT NOT NULL,       -- title / sku_title / main_1 / sub_{pos} / detail_{pos} / sku_{pos}
+  webhook_url TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  error TEXT DEFAULT '',
+  batch_order INTEGER NOT NULL DEFAULT 0,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (task_id) REFERENCES ews_jst_tasks(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_jst_plans_status ON ews_jst_push_plans(task_id, status);
+
+-- JST 导出记录
+CREATE TABLE IF NOT EXISTS ews_jst_export_records (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  file_url TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (task_id) REFERENCES ews_jst_tasks(id) ON DELETE CASCADE
+);
+
+-- ====================================================================
+-- 虾皮模块 ews_shopee_
+-- ====================================================================
+
+-- Shopee 商品
+CREATE TABLE IF NOT EXISTS ews_shopee_products (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  category_id TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  parent_sku TEXT NOT NULL DEFAULT '',
+  cover_image TEXT NOT NULL DEFAULT '',
+  images TEXT NOT NULL DEFAULT '[]',         -- JSON: 商品图片 URL 数组
+  weight_kg REAL NOT NULL DEFAULT 0,
+  length_cm REAL,
+  width_cm REAL,
+  height_cm REAL,
+  gtin TEXT NOT NULL DEFAULT '',
+  brand_id TEXT NOT NULL DEFAULT '',
+  hs_code TEXT NOT NULL DEFAULT '',
+  tax_code TEXT NOT NULL DEFAULT '',
+  origin_country TEXT NOT NULL DEFAULT '',
+  variation_name1 TEXT NOT NULL DEFAULT '',  -- 第一层规格名
+  variation_name2 TEXT NOT NULL DEFAULT '',  -- 第二层规格名
+  max_purchase_qty INTEGER,
+  size_chart_template_id TEXT NOT NULL DEFAULT '',
+  size_chart_image TEXT NOT NULL DEFAULT '',
+  pre_order_dts INTEGER,
+  shipping_channels TEXT NOT NULL DEFAULT '[]',  -- JSON: 物流渠道启用列表
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (task_id) REFERENCES ews_tasks(id) ON DELETE CASCADE
+);
+
+-- Shopee 变体（二维规格）
+CREATE TABLE IF NOT EXISTS ews_shopee_variations (
+  id TEXT PRIMARY KEY,
+  product_id TEXT NOT NULL,
+  integration_no TEXT NOT NULL,         -- 变体集成号（同一商品一致）
+  option1 TEXT NOT NULL,                -- 第一层规格值
+  image_per_variation TEXT NOT NULL DEFAULT '',
+  option2 TEXT NOT NULL DEFAULT '',     -- 第二层规格值
+  image_2 TEXT NOT NULL DEFAULT '',
+  price REAL NOT NULL,
+  stock INTEGER NOT NULL DEFAULT 0,
+  sku TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (product_id) REFERENCES ews_shopee_products(id) ON DELETE CASCADE
+);
+
+-- Shopee 推送计划（结构与 JST 一致）
+CREATE TABLE IF NOT EXISTS ews_shopee_push_plans (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  sub_task_id TEXT NOT NULL DEFAULT '',
+  webhook_type TEXT NOT NULL,           -- title / sku_title / main_1 / sub_{pos} / detail_{pos} / sku_{pos}
+  webhook_url TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  error TEXT DEFAULT '',
+  batch_order INTEGER NOT NULL DEFAULT 0,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (task_id) REFERENCES ews_tasks(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_shopee_plans_status ON ews_shopee_push_plans(task_id, status);
+
+-- Shopee 导出记录
+CREATE TABLE IF NOT EXISTS ews_shopee_export_records (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  file_url TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (task_id) REFERENCES ews_tasks(id) ON DELETE CASCADE
+);
