@@ -960,17 +960,93 @@ async function jstHandleExport(env, taskId) {
   return json({ success: true, rows, task_title: detail.name, mode, export_format: 'jst' });
 }
 
+// ========== Shopee 模板校验 ==========
+function validateShopeeRow(product, variations) {
+  var warnings = []; var errors = [];
+  var n = product.name || '';
+  var desc = product.description || '';
+  var weight = parseFloat(product.weight_kg) || 0;
+  var price = variations.length > 0 ? parseFloat(variations[0].price) : 0;
+  var categoryId = product.category_id || '';
+  var hsCode = product.hs_code || '';
+  var gtin = product.gtin || '';
+  var varCount = variations.length;
+
+  // 必填字段
+  if (!n) errors.push('商品名称(Product Name)不能为空');
+  if (!desc) errors.push('商品描述(Product Description)不能为空');
+  if (varCount > 0) {
+    if (!variations[0].price || parseFloat(variations[0].price) <= 0) errors.push('价格(Price)必须为正数');
+  } else {
+    errors.push('至少需要一个变体');
+  }
+  if (weight <= 0 || weight > 100000) errors.push('重量(Weight)必须在0~100000kg之间（当前: ' + weight + 'kg）');
+
+  // 变体校验
+  if (varCount > 0) {
+    var hasTier2 = variations.some(function(v) { return v.option2 && v.option2.trim(); });
+    if (varCount > 50) errors.push('变体数量超过50上限（当前: ' + varCount + '）');
+    if (!hasTier2 && varCount > 20) errors.push('一维规格变体超过20上限（当前: ' + varCount + '）');
+
+    // 检查变体组合是否重复
+    var combos = {};
+    for (var i = 0; i < variations.length; i++) {
+      var key = (variations[i].option1 || '') + '|' + (variations[i].option2 || '');
+      if (combos[key]) { warnings.push('变体组合 "' + key + '" 重复（第' + (i+1) + '行）'); }
+      combos[key] = true;
+      // 检查价格
+      var p = parseFloat(variations[i].price);
+      if (isNaN(p) || p <= 0) errors.push('变体#' + (i+1) + ' 价格无效（当前: ' + variations[i].price + '）');
+    }
+  }
+
+  // 分类ID
+  if (categoryId && !/^\d+$/.test(categoryId)) warnings.push('分类ID(Category)应为数字（当前: ' + categoryId + '）');
+
+  // HS Code
+  if (hsCode && !/^\d{4,8}$/.test(hsCode)) warnings.push('HS Code应为4/6/8位数字（当前: ' + hsCode + '）');
+
+  // GTIN
+  if (gtin && !/^\d{8,14}$/.test(gtin)) warnings.push('GTIN应为8~14位数字（当前: ' + gtin + '）');
+
+  // 重量单位提示
+  if (weight > 100) warnings.push('重量较大(' + weight + 'kg)，请确认单位是否正确（模板要求kg）');
+
+  // 图片校验（仅URL格式检查）
+  var images = [];
+  try { images = JSON.parse(product.images || '[]'); } catch(e) {}
+  if (images.length > 8) warnings.push('商品图片最多8张（当前: ' + images.length + '张）');
+
+  // Parent SKU / SKU 重复检查
+  var skuSet = {};
+  for (var vi = 0; vi < variations.length; vi++) {
+    var sku = variations[vi].sku || '';
+    if (sku) {
+      if (skuSet[sku]) warnings.push('SKU "' + sku + '" 重复（变体#' + (vi+1) + '），店内不可重复');
+      skuSet[sku] = true;
+    }
+  }
+
+  return { errors: errors, warnings: warnings, valid: errors.length === 0 };
+}
+
 async function shopeeHandleExport(env, taskId) {
   const product = await shopeeGetProduct(env, taskId);
   if (!product) return error('商品不存在', 404);
   const variations = product.variations || [];
-  const config = await getConfig(env);
-  const baseUrl = (config.r2_public_url || '').replace(/\/+$/, '');
 
+  // 校验
+  var validation = validateShopeeRow(product, variations);
+  // 有错误则拒绝导出，有警告则附带
+  if (!validation.valid) {
+    return json({ success: false, error: '数据校验失败', errors: validation.errors, warnings: validation.warnings }, 400);
+  }
+
+  const config = await getConfig(env);
   const rows = [];
   const integrationNo = taskId.slice(0, 8);
 
-  // 第一行：商品基础信息
+  // 第一行
   const baseRow = {
     'Category': product.category_id || '',
     'Product Name': product.name,
@@ -994,8 +1070,7 @@ async function shopeeHandleExport(env, taskId) {
     'GTIN': product.gtin || '',
     'Pre-order DTS': product.pre_order_dts ?? '',
   };
-  // 填充图片
-  const images = product.images ? JSON.parse(product.images) : [];
+  const images = product.images ? JSON.parse(product.images||'[]') : [];
   for (let i = 0; i < Math.min(images.length, 8); i++) {
     baseRow['Item Image ' + (i + 1)] = images[i];
   }
@@ -1015,7 +1090,8 @@ async function shopeeHandleExport(env, taskId) {
     });
   }
 
-  return json({ success: true, rows, task_title: product.name, export_format: 'shopee' });
+  return json({ success: true, rows, task_title: product.name, export_format: 'shopee',
+    validation: { warnings: validation.warnings } });
 }
 
 // ========== 上传 ==========
