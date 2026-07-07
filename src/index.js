@@ -1046,51 +1046,47 @@ async function shopeeHandleExport(env, taskId) {
   const rows = [];
   const integrationNo = taskId.slice(0, 8);
 
-  // 第一行
-  const baseRow = {
-    'Category': product.category_id || '',
-    'Product Name': product.name,
-    'Product Description': product.description || '',
-    'Parent SKU': product.parent_sku || integrationNo,
-    'Variation Integration No.': integrationNo,
-    'Variation Name1': product.variation_name1 || '',
-    'Option for Variation 1': variations[0]?.option1 || '',
-    'Image per Variation': variations[0]?.image_per_variation || '',
-    'Variation Name2': product.variation_name2 || '',
-    'Option for Variation 2': variations[0]?.option2 || '',
-    'Price': variations[0]?.price ?? '',
-    'Stock': variations[0]?.stock ?? '',
-    'SKU': variations[0]?.sku || '',
-    'Cover image': product.cover_image || '',
-    'Item Image 1': '',
-    'Weight': product.weight_kg || '',
-    'Length': product.length_cm ?? '',
-    'Width': product.width_cm ?? '',
-    'Height': product.height_cm ?? '',
-    'GTIN': product.gtin || '',
-    'Pre-order DTS': product.pre_order_dts ?? '',
-  };
-  const images = product.images ? JSON.parse(product.images||'[]') : [];
-  for (let i = 0; i < Math.min(images.length, 8); i++) {
-    baseRow['Item Image ' + (i + 1)] = images[i];
-  }
-  rows.push(baseRow);
-
-  // 其余变体行（仅变体差异字段）
-  for (let v = 1; v < variations.length; v++) {
-    rows.push({
-      'Category': '', 'Product Name': '', 'Product Description': '', 'Parent SKU': '',
-      'Variation Integration No.': integrationNo,
-      'Variation Name1': '', 'Option for Variation 1': variations[v].option1,
-      'Image per Variation': variations[v].image_per_variation || '',
-      'Variation Name2': '', 'Option for Variation 2': variations[v].option2 || '',
-      'Price': variations[v].price ?? '', 'Stock': variations[v].stock ?? '', 'SKU': variations[v].sku || '',
-      'Cover image': '', 'Item Image 1': '', 'Weight': '', 'Length': '', 'Width': '', 'Height': '',
-      'GTIN': '', 'Pre-order DTS': '',
-    });
+  // 列顺序必须匹配 Shopee 模板 (A~AP)
+  function makeRow(firstRow, variationsIdx) {
+    var v = variationsIdx >= 0 ? variations[variationsIdx] : null;
+    var images = [];
+    if (firstRow) { try { images = JSON.parse(product.images || '[]'); } catch(e) {} }
+    return [
+      product.category_id || '',                          // A Category
+      firstRow ? product.name : '',                       // B Product Name
+      firstRow ? product.description || '' : '',          // C Product Description
+      '', '', '', '',                                     // D-G MaxPQ (保留空位)
+      product.parent_sku || integrationNo,                // H Parent SKU
+      integrationNo,                                      // I Variation Integration No.
+      product.variation_name1 || '',                      // J Variation Name1
+      v ? v.option1 || '' : (variations[0]?.option1 || ''), // K Option for Variation 1
+      v ? v.image_per_variation || '' : (variations[0]?.image_per_variation || ''), // L Image per Variation
+      product.variation_name2 || '',                      // M Variation Name2
+      v ? v.option2 || '' : (variations[0]?.option2 || ''), // N Option for Variation 2
+      v ? (v.price ?? '') : (variations[0]?.price ?? ''),  // O Price
+      v ? (v.stock ?? '') : (variations[0]?.stock ?? ''),  // P Stock
+      v ? (v.sku || '') : (variations[0]?.sku || ''),      // Q SKU
+      '', '',                                             // R-S Size Chart
+      product.gtin || '',                                 // T GTIN
+      product.cover_image || '',                          // U Cover image
+      images[0] || '', images[1] || '', images[2] || '',  // V-X Item Image 1~3
+      images[3] || '', images[4] || '', images[5] || '',  // Y-AA Item Image 4~6
+      images[6] || '', images[7] || '',                   // AB-AC Item Image 7~8
+      product.weight_kg || '',                            // AD Weight
+      product.length_cm ?? '',                            // AE Length
+      product.width_cm ?? '',                             // AF Width
+      product.height_cm ?? '',                            // AG Height
+      '', '', '', '', '', '', '',                          // AH-AN Shipping (保留空位)
+      product.pre_order_dts ?? '',                        // AO Pre-order DTS
+      '',                                                 // AP Fail Reason
+    ];
   }
 
-  return json({ success: true, rows, task_title: product.name, export_format: 'shopee',
+  rows.push(makeRow(true, -1));
+  for (let vi = 1; vi < variations.length; vi++) rows.push(makeRow(false, vi));
+
+  var shopeeColumns = ['Category','Product Name','Product Description','Max Purchase Qty','MaxPQ Start Date','MaxPQ Time Period','MaxPQ End Date','Parent SKU','Variation Integration No.','Variation Name1','Option for Variation 1','Image per Variation','Variation Name2','Option for Variation 2','Price','Stock','SKU','Size Chart Template','Size Chart Image','GTIN','Cover image','Item Image 1','Item Image 2','Item Image 3','Item Image 4','Item Image 5','Item Image 6','Item Image 7','Item Image 8','Weight','Length','Width','Height','Shipping(5000)','Shipping(5001)','Shipping(5004)','Shipping(5012)','Shipping(5115)','Shipping(50039)','Shipping(50052)','Pre-order DTS','Fail Reason'];
+  return json({ success: true, rows, columns: shopeeColumns, task_title: product.name, export_format: 'shopee',
     validation: { warnings: validation.warnings } });
 }
 
