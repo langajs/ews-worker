@@ -637,6 +637,17 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
         detail_description: detail.detail_description || '', auxiliary_images: auxImgs,
         image_type: 'detail', image_position: p, callback_secret: callbackSecret, callback_url: baseUrl } });
   }
+  // sku_1~V (每个变体的SKU参考图)
+  if (config.n8n_sku_image_webhook) for (const st of subTasks) {
+    for (let vi = 0; vi < variantCombos.length; vi++) {
+      allJobs.push({ webhook_type: 'sku_' + (vi+1), sub_task_id: st.sub_task_id, url: config.n8n_sku_image_webhook,
+        data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: refImg,
+          variant_name: variantCombos[vi].option1 || '',
+          variant_option2: variantCombos[vi].option2 || '',
+          sku_image: variantCombos[vi].image_per_variation || '',
+          image_type: 'sku', image_position: vi+1, callback_secret: callbackSecret, callback_url: baseUrl } });
+    }
+  }
 
   const batchSize = parseInt(config.push_batch_size) || 20;
   const planRecords = [];
