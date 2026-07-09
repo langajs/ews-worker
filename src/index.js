@@ -519,7 +519,7 @@ async function handleUpdateTask(request, env, path) {
           tier1_value: v.tier1_value || v.name || '',
           tier2_name: v.tier2_name || '',
           tier2_value: v.tier2_value || '',
-          white_bg_image: v.white_bg_image || v.white_bg_image,
+          white_bg_image: v.sku_image || v.white_bg_image || '',
           price: pricing.price, price_float_enabled: pricing.price_float_enabled,
           price_min: pricing.price_min, price_max: pricing.price_max, price_precision: pricing.price_precision,
           description: v.sku_description || '', sort_order: i,
@@ -648,7 +648,7 @@ async function jstHandlePush(env, taskId, ctx, request) {
     for (let v = 0; v < (detail.variants||[]).length; v++) {
       allJobs.push({ webhook_type: 'sku_' + (v+1), sub_task_id: st.sub_task_id, url: config.n8n_sku_image_webhook,
         data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: detail.reference_image,
-          variant_name: detail.variants[v].tier1_value, white_bg_image: detail.variants[v].white_bg_image,
+          variant_name: detail.variants[v].tier1_value, sku_image: detail.variants[v].white_bg_image || '',
           sku_description: detail.variants[v].description || '', image_type: 'sku', image_position: v+1, callback_secret: callbackSecret, callback_url: baseUrl } });
     }
   }
@@ -764,7 +764,7 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
         data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: refImg,
           variant_name: variantCombos[vi].option1 || '',
           variant_option2: variantCombos[vi].option2 || '',
-          sku_image: variantCombos[vi].image_per_variation || '', white_bg_image: variantCombos[vi].image_per_variation || '',
+          sku_image: variantCombos[vi].image_per_variation || '',
           image_type: 'sku', image_position: vi+1, callback_secret: callbackSecret, callback_url: baseUrl } });
     }
   }
