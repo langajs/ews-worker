@@ -956,12 +956,17 @@ async function handleCallback(request, env, ctx) {
   const receivedSecret = body.secret ?? body.callback_secret;
   if (config.callback_secret && receivedSecret !== config.callback_secret) return error('回调密钥无效', 403);
 
-  await ensureCallbackQueueTable(env);
-  const queueId = uuid(16);
-  await env.DB.prepare("INSERT INTO ews_callback_queue (id, task_id, platform, payload, status, received_at, updated_at) VALUES (?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))")
-    .bind(queueId, task_id, idx.platform || '', JSON.stringify(body)).run();
-  ctx.waitUntil(processCallbackQueue(env, ctx, queueId));
-  return json({ success: true, queued: true, queue_id: queueId, message: '回调已入队' });
+  try {
+    await ensureCallbackQueueTable(env);
+    const queueId = uuid(16);
+    await env.DB.prepare("INSERT INTO ews_callback_queue (id, task_id, platform, payload, status, received_at, updated_at) VALUES (?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))")
+      .bind(queueId, task_id, idx.platform || '', JSON.stringify(body)).run();
+    ctx.waitUntil(processCallbackQueue(env, ctx, queueId));
+    return json({ success: true, queued: true, queue_id: queueId, message: '回调已入队' });
+  } catch (err) {
+    console.error('callback enqueue failed:', err.message);
+    return json({ success: false, queued: false, retryable: true, error: '回调队列写入失败，请稍后重试' }, 503);
+  }
 }
 
 async function processCallbackQueue(env, ctx, preferredId) {
