@@ -156,7 +156,7 @@ export default {
 
       // --- 配置 (支持 ?platform=jst|shopee) ---
       if (path === '/api/config' && method === 'GET')
-        return requireAuth(request, env, () => handleGetConfig(env, url));
+        return requireAuth(request, env, () => handleGetConfig(request, env, url));
       if (path === '/api/config' && method === 'PUT')
         return requireAuth(request, env, () => handleUpdateConfig(request, env));
 
@@ -290,7 +290,8 @@ async function handleChangePassword(request, env) {
 
 // ========== 配置 ==========
 
-async function handleGetConfig(env, url) {
+async function handleGetConfig(request, env, url) {
+  if (request.auth?.role !== 'admin') return error('无权访问', 403);
   const platform = url.searchParams.get('platform') || '';
   const config = await getConfig(env, platform);
   const safe = { ...config };
@@ -300,6 +301,7 @@ async function handleGetConfig(env, url) {
 }
 
 async function handleUpdateConfig(request, env) {
+  if (request.auth?.role !== 'admin') return error('无权访问', 403);
   const body = await parseBody(request);
   if (!body || typeof body !== 'object') return error('无效的配置数据', 400);
   const platform = body._platform || '';
@@ -563,6 +565,7 @@ async function handleUpdateTaskStatus(request, env, path) {
   const idx = await getTaskIndex(env, taskId);
   if (!idx) return error('任务不存在', 404);
   if (idx.platform === 'jst') await jstUpdateTaskStatus(env, taskId, status);
+  if (idx.platform === 'shopee') await env.DB.prepare("UPDATE ews_shopee_products SET status=?, updated_at=datetime('now') WHERE id=?").bind(status, taskId).run();
   await updateTaskIndexStatus(env, taskId, status);
   return json({ success: true, message: '状态更新成功' });
 }
