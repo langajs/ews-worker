@@ -82,6 +82,27 @@ CREATE TABLE IF NOT EXISTS ews_callback_queue (
 CREATE INDEX IF NOT EXISTS idx_callback_queue_status ON ews_callback_queue(status, received_at);
 CREATE INDEX IF NOT EXISTS idx_callback_queue_task ON ews_callback_queue(task_id);
 
+-- 共享图片处理队列：限制图片下载/R2写入并发，成功处理后删除
+CREATE TABLE IF NOT EXISTS ews_image_queue (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  platform TEXT NOT NULL DEFAULT '',
+  sub_task_id TEXT NOT NULL DEFAULT '',
+  set_index INTEGER NOT NULL DEFAULT 0,
+  image_type TEXT NOT NULL,
+  image_position INTEGER NOT NULL DEFAULT 1,
+  image_url TEXT DEFAULT '',
+  error_message TEXT DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending', -- pending / processing / failed
+  attempts INTEGER NOT NULL DEFAULT 0,
+  error TEXT DEFAULT '',
+  received_at TEXT NOT NULL DEFAULT (datetime('now')),
+  processing_at TEXT DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_image_queue_status ON ews_image_queue(status, received_at);
+CREATE INDEX IF NOT EXISTS idx_image_queue_task ON ews_image_queue(task_id);
+
 -- ====================================================================
 -- 聚水潭模块 ews_jst_
 -- ====================================================================

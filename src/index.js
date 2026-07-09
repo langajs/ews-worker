@@ -878,6 +878,7 @@ async function jstReleaseTaskQueue(env, taskId, ctx) {
 async function processPendingQueue(env, ctx) {
   try {
     await processCallbackQueue(env, ctx);
+    await processImageQueue(env, ctx);
     const jstRows = await query(env, "SELECT DISTINCT p.task_id FROM ews_jst_push_plans p LEFT JOIN ews_jst_tasks t ON t.id = p.task_id WHERE p.status='pending' AND COALESCE(t.queue_mode, 'auto') != 'manual'");
     for (const row of (jstRows?.results || [])) ctx.waitUntil(jstReleaseTaskQueue(env, row.task_id, ctx));
     const shopeeRows = await query(env, "SELECT DISTINCT p.task_id FROM ews_shopee_push_plans p LEFT JOIN ews_tasks t ON t.id = p.task_id WHERE p.status='pending' AND t.status='processing'");
@@ -889,7 +890,11 @@ async function processPendingQueue(env, ctx) {
 
 const CALLBACK_QUEUE_BATCH_SIZE = 3;
 const CALLBACK_QUEUE_MAX_ATTEMPTS = 5;
+const IMAGE_QUEUE_BATCH_SIZE = 3;
+const IMAGE_QUEUE_MAX_ACTIVE = 3;
+const IMAGE_QUEUE_MAX_ATTEMPTS = 5;
 let callbackQueueReady = false;
+let imageQueueReady = false;
 
 function callbackPermanentError(message) {
   const err = new Error(message);
@@ -914,6 +919,30 @@ async function ensureCallbackQueueTable(env) {
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_callback_queue_status ON ews_callback_queue(status, received_at)").run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_callback_queue_task ON ews_callback_queue(task_id)").run();
   callbackQueueReady = true;
+}
+
+async function ensureImageQueueTable(env) {
+  if (imageQueueReady) return;
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS ews_image_queue (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    platform TEXT NOT NULL DEFAULT '',
+    sub_task_id TEXT NOT NULL DEFAULT '',
+    set_index INTEGER NOT NULL DEFAULT 0,
+    image_type TEXT NOT NULL,
+    image_position INTEGER NOT NULL DEFAULT 1,
+    image_url TEXT DEFAULT '',
+    error_message TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    error TEXT DEFAULT '',
+    received_at TEXT NOT NULL DEFAULT (datetime('now')),
+    processing_at TEXT DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_image_queue_status ON ews_image_queue(status, received_at)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_image_queue_task ON ews_image_queue(task_id)").run();
+  imageQueueReady = true;
 }
 
 async function handleCallback(request, env, ctx) {
@@ -973,6 +1002,111 @@ async function processCallbackQueueRow(env, ctx, row) {
     await env.DB.prepare("UPDATE ews_callback_queue SET status=?, error=?, updated_at=datetime('now') WHERE id=?")
       .bind(failed ? 'failed' : 'pending', err.message || '回调处理失败', row.id).run();
     console.error('callback queue item failed:', row.id, err.message);
+  }
+}
+
+async function enqueueImageCallback(env, idx, body) {
+  await ensureImageQueueTable(env);
+  const imageId = uuid(16);
+  await env.DB.prepare(`INSERT INTO ews_image_queue
+    (id, task_id, platform, sub_task_id, set_index, image_type, image_position, image_url, error_message, status, received_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))`)
+    .bind(
+      imageId,
+      body.task_id,
+      idx.platform || '',
+      body.sub_task_id || '',
+      body.set_index ?? 0,
+      body.image_type,
+      parseInt(body.image_position) || 1,
+      body.image_url || '',
+      body.error || ''
+    ).run();
+  return imageId;
+}
+
+async function processImageQueue(env, ctx) {
+  try {
+    await ensureImageQueueTable(env);
+    const candidates = await query(env, `SELECT * FROM ews_image_queue
+      WHERE attempts < ? AND (status='pending' OR (status='processing' AND processing_at < datetime('now', '-5 minutes')))
+      ORDER BY received_at ASC LIMIT ?`, [IMAGE_QUEUE_MAX_ATTEMPTS, IMAGE_QUEUE_BATCH_SIZE]);
+    for (const row of (candidates?.results || [])) await processImageQueueRow(env, ctx, row);
+  } catch (err) {
+    console.error('processImageQueue error:', err.message);
+  }
+}
+
+async function processImageQueueRow(env, ctx, row) {
+  const claim = await env.DB.prepare(`UPDATE ews_image_queue
+    SET status='processing', attempts=attempts+1, processing_at=datetime('now'), updated_at=datetime('now'), error=''
+    WHERE id=? AND attempts < ?
+      AND (status='pending' OR (status='processing' AND processing_at < datetime('now', '-5 minutes')))
+      AND (SELECT COUNT(*) FROM ews_image_queue WHERE status='processing' AND processing_at >= datetime('now', '-5 minutes')) < ?`)
+    .bind(row.id, IMAGE_QUEUE_MAX_ATTEMPTS, IMAGE_QUEUE_MAX_ACTIVE).run();
+  const attempts = (row.attempts || 0) + 1;
+  const claimedChanges = claim.meta && typeof claim.meta.changes === 'number' ? claim.meta.changes : 1;
+  if (claimedChanges < 1) return;
+  try {
+    await processImageQueuePayload(env, ctx, row);
+    await env.DB.prepare("DELETE FROM ews_image_queue WHERE id=?").bind(row.id).run();
+  } catch (err) {
+    const failed = err.permanent || attempts >= IMAGE_QUEUE_MAX_ATTEMPTS;
+    await env.DB.prepare("UPDATE ews_image_queue SET status=?, error=?, updated_at=datetime('now') WHERE id=?")
+      .bind(failed ? 'failed' : 'pending', err.message || '图片处理失败', row.id).run();
+    console.error('image queue item failed:', row.id, err.message);
+  } finally {
+    if (ctx) ctx.waitUntil(processImageQueue(env, ctx));
+  }
+}
+
+async function processImageQueuePayload(env, ctx, row) {
+  const task_id = row.task_id;
+  const idx = await getTaskIndex(env, task_id);
+  if (!idx) throw callbackPermanentError('任务不存在');
+  const config = await getConfig(env, idx.platform || '');
+  const publicUrl = config.r2_public_url || '';
+  const isShopee = idx.platform === 'shopee';
+  const updateSubTask = isShopee ? shopeeUpdateSubTask : jstUpdateSubTask;
+  const checkSubTaskImages = isShopee ? shopeeCheckSubTaskImages : jstCheckSubTaskImages;
+  const checkParentCompletion = isShopee ? shopeeCheckParentCompletion : jstCheckParentCompletion;
+  const refundCredits = isShopee ? shopeeRefundCredits : jstRefundCredits;
+  const planTable = isShopee ? 'ews_shopee_push_plans' : 'ews_jst_push_plans';
+  const sub_task_id = row.sub_task_id || '';
+  const image_type = row.image_type;
+  const image_position = parseInt(row.image_position) || 1;
+  const whType = `${image_type}_${image_position}`;
+  const result = row.image_url ? await processOneImage(env, idx.platform, task_id, sub_task_id, row.set_index ?? 0, image_type, image_position, row.image_url, publicUrl) : null;
+
+  if (result) {
+    await env.DB.prepare(`UPDATE ${planTable} SET status='done' WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`)
+      .bind(task_id, sub_task_id, whType).run();
+  } else {
+    const planInfo = await env.DB.prepare(`SELECT id, webhook_url, payload, retry_count FROM ${planTable} WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`)
+      .bind(task_id, sub_task_id, whType).first();
+    if (planInfo && planInfo.webhook_url && (planInfo.retry_count||0) < 3) {
+      const newCount = (planInfo.retry_count||0) + 1;
+      await env.DB.prepare(`UPDATE ${planTable} SET status='processing', retry_count=?, error=? WHERE id=?`).bind(newCount, `${row.error_message || '下载失败'}，重试第${newCount}次`, planInfo.id).run();
+      ctx.waitUntil(dispatchPushPlan(env, planTable, task_id, planInfo));
+    } else {
+      const reason = planInfo?.retry_count >= 3 ? '已重试3次失败' : (row.error_message || '下载失败');
+      await env.DB.prepare(`UPDATE ${planTable} SET status='failed', error=? WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`).bind(reason, task_id, sub_task_id, whType).run();
+      if (planInfo?.retry_count >= 3) await refundCredits(env, task_id);
+    }
+  }
+
+  if (sub_task_id) {
+    const imgStatus = await checkSubTaskImages(env, sub_task_id);
+    if (imgStatus.total > 0 && imgStatus.total === imgStatus.completed) await updateSubTask(env, sub_task_id, { status: 'completed' });
+  }
+  await checkParentCompletion(env, task_id);
+
+  if (isShopee) {
+    const taskInfo = await getOne(env, "SELECT status FROM ews_tasks WHERE id=?", [task_id]);
+    if (taskInfo?.status === 'processing') ctx.waitUntil(shopeeReleaseTaskQueue(env, task_id, ctx));
+  } else {
+    const taskInfo = await getOne(env, "SELECT queue_mode FROM ews_jst_tasks WHERE id=?", [task_id]);
+    if (taskInfo?.queue_mode !== 'manual') ctx.waitUntil(jstReleaseTaskQueue(env, task_id, ctx));
   }
 }
 
@@ -1047,51 +1181,33 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
     }
   }
 
-  // 图片回调
-  const savedImages = [];
+  // 图片回调先进入图片队列，避免回调并发直接放大 R2/D1 压力
+  let imageQueued = false;
   if (image_type && image_position && (image_url || errMsg)) {
     if (!['main','sub','detail','sku'].includes(image_type)) throw callbackPermanentError('无效的图片类型');
-    const result = image_url ? await processOneImage(env, idx.platform, task_id, sub_task_id, set_index ?? 0, image_type, image_position, image_url, publicUrl) : null;
-    const whType = `${image_type}_${image_position}`;
-    if (result) {
-      savedImages.push(result);
-      // 根据平台更新对应推送计划
-      const planTable = idx.platform === 'jst' ? 'ews_jst_push_plans' : 'ews_shopee_push_plans';
-      await env.DB.prepare(`UPDATE ${planTable} SET status='done' WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`)
-        .bind(task_id, sub_task_id, whType).run();
+    await enqueueImageCallback(env, idx, body);
+    ctx.waitUntil(processImageQueue(env, ctx));
+    imageQueued = true;
+  }
+
+  if (!imageQueued) {
+    // 检查子任务完成
+    if (sub_task_id) {
+      const imgStatus = await checkSubTaskImages(env, sub_task_id);
+      if (imgStatus.total > 0 && imgStatus.total === imgStatus.completed) await updateSubTask(env, sub_task_id, { status: 'completed' });
+    }
+    await checkParentCompletion(env, task_id);
+
+    if (isShopee) {
+      const taskInfo = await getOne(env, "SELECT status FROM ews_tasks WHERE id=?", [task_id]);
+      if (taskInfo?.status === 'processing') ctx.waitUntil(shopeeReleaseTaskQueue(env, task_id, ctx));
     } else {
-      // 重试
-      const planTable = idx.platform === 'jst' ? 'ews_jst_push_plans' : 'ews_shopee_push_plans';
-      const planInfo = await env.DB.prepare(`SELECT id, webhook_url, payload, retry_count FROM ${planTable} WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`)
-        .bind(task_id, sub_task_id, whType).first();
-      if (planInfo && planInfo.webhook_url && (planInfo.retry_count||0) < 3) {
-        const newCount = (planInfo.retry_count||0) + 1;
-        await env.DB.prepare(`UPDATE ${planTable} SET status='processing', retry_count=?, error=? WHERE id=?`).bind(newCount, `${errMsg || '下载失败'}，重试第${newCount}次`, planInfo.id).run();
-        ctx.waitUntil(dispatchPushPlan(env, planTable, task_id, planInfo));
-      } else {
-        const reason = planInfo?.retry_count >= 3 ? '已重试3次失败' : (errMsg || '下载失败');
-        await env.DB.prepare(`UPDATE ${planTable} SET status='failed', error=? WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`).bind(reason, task_id, sub_task_id, whType).run();
-        if (planInfo?.retry_count >= 3) await refundCredits(env, task_id);
-      }
+      const taskInfo = await getOne(env, "SELECT queue_mode FROM ews_jst_tasks WHERE id=?", [task_id]);
+      if (taskInfo?.queue_mode !== 'manual') ctx.waitUntil(jstReleaseTaskQueue(env, task_id, ctx));
     }
   }
 
-  // 检查子任务完成
-  if (sub_task_id) {
-    const imgStatus = await checkSubTaskImages(env, sub_task_id);
-    if (imgStatus.total > 0 && imgStatus.total === imgStatus.completed) await updateSubTask(env, sub_task_id, { status: 'completed' });
-  }
-  await checkParentCompletion(env, task_id);
-
-  if (isShopee) {
-    const taskInfo = await getOne(env, "SELECT status FROM ews_tasks WHERE id=?", [task_id]);
-    if (taskInfo?.status === 'processing') ctx.waitUntil(shopeeReleaseTaskQueue(env, task_id, ctx));
-  } else {
-    const taskInfo = await getOne(env, "SELECT queue_mode FROM ews_jst_tasks WHERE id=?", [task_id]);
-    if (taskInfo?.queue_mode !== 'manual') ctx.waitUntil(jstReleaseTaskQueue(env, task_id, ctx));
-  }
-
-  return { success: true, sub_task_id, images_saved: savedImages.length };
+  return { success: true, sub_task_id, image_queued: imageQueued };
 }
 
 async function processOneImage(env, platform, task_id, sub_task_id, set_index, image_type, image_position, image_url, publicUrl) {
