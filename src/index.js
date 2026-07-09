@@ -376,6 +376,7 @@ async function handleUpdateTask(request, env, path) {
     const { name, description, task_description, main_description, detail_description, reference_title, reference_image, auxiliary_images, generate_count, main_image_count, detail_image_count, mode, category_id, brand_id, cover_image, images, weight_kg, length_cm, width_cm, height_cm, gtin, hs_code, tax_code, origin_country, variation_name1, variation_name2, pre_order_dts, shipping_channels, variations } = body || {};
     if (!name) return error('商品名称不能为空', 400);
     if (!reference_image) return error('核心参考图不能为空', 400);
+    const shopeeDetailCount = parseInt(detail_image_count);
     await env.DB.prepare("UPDATE ews_tasks SET name=?, status='pending', updated_at=datetime('now') WHERE id=?").bind(String(name).slice(0,30), taskId).run();
     await shopeeCreateProduct(env, {
       id: taskId, task_id: taskId, name, category_id: category_id || '',
@@ -385,7 +386,7 @@ async function handleUpdateTask(request, env, path) {
       generate_count: Math.max(1, parseInt(generate_count) || 1),
       mode: mode === 'dedup' ? 'dedup' : 'full',
       main_image_count: Math.min(Math.max(parseInt(main_image_count) || 5, 5), 9),
-      detail_image_count: Math.min(Math.max(parseInt(detail_image_count) || 5, 5), 9),
+      detail_image_count: Math.min(Math.max(Number.isNaN(shopeeDetailCount) ? 0 : shopeeDetailCount, 0), 9),
       brand_id: brand_id || '',
       cover_image: cover_image || '', images: images || '[]',
       weight_kg: weight_kg || 0, length_cm: length_cm ?? null, width_cm: width_cm ?? null, height_cm: height_cm ?? null,
@@ -602,14 +603,16 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
   }
   const detail = await shopeeGetProduct(env, taskId);
   if (!detail) return error('商品不存在', 404);
+  const rawDetailCount = parseInt(detail.detail_image_count);
+  const detailCount = Math.min(Math.max(Number.isNaN(rawDetailCount) ? 0 : rawDetailCount, 0), 9);
   const requiredShopeeWebhooks = [
     ['n8n_title_webhook', '商品标题'],
     ['n8n_sku_title_webhook', 'SKU标题'],
     ['n8n_main_webhook', '封面图'],
     ['n8n_sub_image_webhook', '附图'],
-    ['n8n_detail_webhook', '详情图'],
     ['n8n_sku_image_webhook', 'SKU变体图'],
   ];
+  if (detailCount > 0) requiredShopeeWebhooks.push(['n8n_detail_webhook', '详情图']);
   const missingShopeeWebhooks = requiredShopeeWebhooks.filter(([key]) => !config[key]).map(([, label]) => label);
   if (missingShopeeWebhooks.length)
     return error('请先在系统配置页配置 Shopee 必需工作流 Webhook: ' + missingShopeeWebhooks.join('、'), 400);
@@ -617,7 +620,6 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
   const callbackSecret = config.callback_secret || '';
   const baseUrl = new URL(request.url).origin + '/api/callback';
   const mainCount = Math.min(Math.max(detail.main_image_count || 5, 5), 9);
-  const detailCount = Math.min(Math.max(detail.detail_image_count || 5, 5), 9);
   const refImg = detail.reference_image || '';
   const auxImgs = detail.auxiliary_images || '';
   const generateCount = detail.generate_count || 1;

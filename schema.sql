@@ -195,7 +195,7 @@ CREATE TABLE IF NOT EXISTS ews_shopee_products (
   generate_count INTEGER NOT NULL DEFAULT 1,
   mode TEXT NOT NULL DEFAULT 'full',
   main_image_count INTEGER NOT NULL DEFAULT 5,
-  detail_image_count INTEGER NOT NULL DEFAULT 5,
+  detail_image_count INTEGER NOT NULL DEFAULT 0,
   parent_sku TEXT NOT NULL DEFAULT '',
   cover_image TEXT NOT NULL DEFAULT '',
   images TEXT NOT NULL DEFAULT '[]',         -- JSON: 商品图片 URL 数组
