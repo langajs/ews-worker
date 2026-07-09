@@ -1075,12 +1075,10 @@ async function handleExportTask(env, path) {
 async function jstHandleExport(env, taskId) {
   const detail = await jstGetTask(env, taskId);
   if (!detail) return error('任务不存在', 404);
-  const config = await getConfig(env);
   const variants = detail.variants || [];
   const images = detail.images || [];
   const generateCount = detail.generate_count || 1;
   const mode = detail.mode || 'full';
-  const baseUrl = (config.r2_public_url || '').replace(/\/+$/, '');
   const mainImgTotal = Math.min(Math.max(detail.main_image_count || 5, 5), 9);
   const detailImgTotal = Math.min(Math.max(detail.detail_image_count || 5, 5), 9);
   const subTasks = await jstGetSubTasks(env, taskId);
@@ -1094,33 +1092,54 @@ async function jstHandleExport(env, taskId) {
     for (const st of (skuRows?.results || [])) skuTitleMap[st.sub_task_id + '_' + st.variant_id] = st.title;
   }
 
-  function getImg(setIdx, type, pos) {
+  function recordedImg(setIdx, type, pos) {
     const found = images.find(img => img.set_index === setIdx && img.image_type === type && img.position === pos);
-    if (found?.image_url) return found.image_url;
+    return found?.image_url || '';
+  }
+  function getImg(setIdx, type, pos) {
+    const direct = recordedImg(setIdx, type, pos);
+    if (direct) return direct;
     if (mode === 'dedup' && setIdx > 0 && type !== 'main') {
-      const refSubId = subTaskIds[0];
-      if (refSubId) {
-        const refFound = images.find(img => img.set_index === 0 && img.image_type === type && img.position === pos);
-        if (refFound?.image_url) return refFound.image_url;
-        return `${baseUrl}/ews/${taskId}/${refSubId}/${type}_${pos}.jpg`;
-      }
+      return recordedImg(0, type, pos);
     }
-    const ownSubId = subTaskIds[setIdx];
-    return ownSubId ? `${baseUrl}/ews/${taskId}/${ownSubId}/${type}_${pos}.jpg` : '';
+    return '';
   }
   function getSkuUrl(setIdx, vIdx) {
-    const found = images.find(img => img.set_index === setIdx && img.image_type === 'sku' && img.position === (vIdx + 1));
-    if (found?.image_url) return found.image_url;
-    if (mode === 'dedup' && setIdx > 0) {
-      const refSubId = subTaskIds[0];
-      if (refSubId) {
-        const refFound = images.find(img => img.set_index === 0 && img.image_type === 'sku' && img.position === (vIdx + 1));
-        if (refFound?.image_url) return refFound.image_url;
-        return `${baseUrl}/ews/${taskId}/${refSubId}/sku_${vIdx + 1}.jpg`;
-      }
+    const direct = recordedImg(setIdx, 'sku', vIdx + 1);
+    if (direct) return direct;
+    if (mode === 'dedup' && setIdx > 0) return recordedImg(0, 'sku', vIdx + 1);
+    return '';
+  }
+
+  const exportErrors = [];
+  function addExportError(msg) {
+    if (exportErrors.length < 80) exportErrors.push(msg);
+  }
+  if (variants.length === 0) addExportError('至少需要一个变体');
+  if (subTaskIds.length === 0) addExportError('请先推送并完成AI生成任务，当前没有商品套图子任务');
+  if (subTaskIds.length > 0 && subTaskIds.length < generateCount) addExportError('AI商品套图数量不足: ' + subTaskIds.length + '/' + generateCount);
+  for (let setIdx = 0; setIdx < generateCount; setIdx++) {
+    const subTaskId = subTaskIds[setIdx] || '';
+    const subTask = (detail.sub_tasks || []).find(st => st.id === subTaskId);
+    const setLabel = '第' + (setIdx + 1) + '套';
+    if (!subTaskId) { addExportError(setLabel + ' 缺少子任务'); continue; }
+    if (!(subTask?.title || '').trim()) addExportError(setLabel + ' 缺少AI商品标题');
+    if (!getImg(setIdx, 'main', 1)) addExportError(setLabel + ' 缺少AI主图main_1');
+    for (let p = 2; p <= mainImgTotal; p++) {
+      if (!getImg(setIdx, 'sub', p)) addExportError(setLabel + ' 缺少AI附图sub_' + p);
     }
-    const ownSubId = subTaskIds[setIdx];
-    return ownSubId ? `${baseUrl}/ews/${taskId}/${ownSubId}/sku_${vIdx + 1}.jpg` : '';
+    for (let p = 1; p <= detailImgTotal; p++) {
+      if (!getImg(setIdx, 'detail', p)) addExportError(setLabel + ' 缺少AI详情图detail_' + p);
+    }
+    for (let vIdx = 0; vIdx < variants.length; vIdx++) {
+      const variant = variants[vIdx];
+      const skuTitle = skuTitleMap[subTaskId + '_' + variant.id] || '';
+      if (!skuTitle.trim()) addExportError(setLabel + ' 变体#' + (vIdx + 1) + ' 缺少AI SKU标题');
+      if (!getSkuUrl(setIdx, vIdx)) addExportError(setLabel + ' 变体#' + (vIdx + 1) + ' 缺少AI SKU变体图');
+    }
+  }
+  if (exportErrors.length) {
+    return json({ success: false, error: 'JST资源未生成完成，已阻止导出', errors: exportErrors }, 400);
   }
 
   const rows = [];
