@@ -50,6 +50,76 @@ async function parseBody(request) {
   return null;
 }
 
+function parseNumberOrNull(value) {
+  const n = parseFloat(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function isEnabled(value) {
+  return value === true || value === 1 || value === '1' || value === 'true';
+}
+
+function clampPricePrecision(value) {
+  const n = parseInt(value);
+  if (Number.isNaN(n)) return 0;
+  return Math.min(Math.max(n, -2), 2);
+}
+
+function normalizeVariantPricing(variant, requiredPrice) {
+  const enabled = isEnabled(variant?.price_float_enabled);
+  const precision = clampPricePrecision(variant?.price_precision);
+  const price = parseNumberOrNull(variant?.price);
+  if (!enabled) {
+    return {
+      price: requiredPrice ? (price ?? 0) : price,
+      price_float_enabled: 0,
+      price_min: null,
+      price_max: null,
+      price_precision: precision,
+    };
+  }
+  const min = parseNumberOrNull(variant?.price_min);
+  const max = parseNumberOrNull(variant?.price_max);
+  if (min === null || max === null) return { error: '价格浮动区间不能为空' };
+  if (max < min) return { error: '价格浮动最高价不能小于最低价' };
+  return {
+    price: min,
+    price_float_enabled: 1,
+    price_min: min,
+    price_max: max,
+    price_precision: precision,
+  };
+}
+
+function stableUnit(seed) {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0) / 0x100000000;
+}
+
+function formatExportPrice(value, precision) {
+  if (!Number.isFinite(value)) return '';
+  if (precision > 0) return Number(value.toFixed(precision));
+  return Math.round(value);
+}
+
+function exportPriceForVariant(variant, taskId, setIdx, variantIdx) {
+  if (!isEnabled(variant?.price_float_enabled)) return variant?.price ?? '';
+  const min = parseNumberOrNull(variant?.price_min);
+  const max = parseNumberOrNull(variant?.price_max);
+  if (min === null || max === null || max < min) return variant?.price ?? '';
+  const precision = clampPricePrecision(variant?.price_precision);
+  const step = Math.pow(10, -precision);
+  const lo = Math.ceil(min / step);
+  const hi = Math.floor(max / step);
+  if (hi < lo) return formatExportPrice(min, precision);
+  const unit = stableUnit([taskId, setIdx, variant?.id || variantIdx, min, max, precision].join('|'));
+  return formatExportPrice((lo + Math.floor(unit * (hi - lo + 1))) * step, precision);
+}
+
 async function requireAuth(request, env, handler) {
   const auth = await authenticateRequest(request, env);
   if (!auth.valid) return error('未登录或登录已过期', 401);
@@ -385,7 +455,7 @@ async function handleUpdateTask(request, env, path) {
       reference_image: reference_image || '', auxiliary_images: auxiliary_images || '[]',
       generate_count: Math.max(1, parseInt(generate_count) || 1),
       mode: mode === 'dedup' ? 'dedup' : 'full',
-      main_image_count: Math.min(Math.max(parseInt(main_image_count) || 5, 5), 9),
+      main_image_count: Math.min(Math.max(parseInt(main_image_count) || 9, 5), 9),
       detail_image_count: Math.min(Math.max(Number.isNaN(shopeeDetailCount) ? 0 : shopeeDetailCount, 0), 9),
       brand_id: brand_id || '',
       cover_image: cover_image || '', images: images || '[]',
@@ -397,12 +467,17 @@ async function handleUpdateTask(request, env, path) {
     });
     if (variations && Array.isArray(variations)) {
       await shopeeClearVariations(env, taskId);
-      for (const v of variations) {
+      for (let i = 0; i < variations.length; i++) {
+        const v = variations[i];
+        const pricing = normalizeVariantPricing(v, true);
+        if (pricing.error) return error('变体#' + (i + 1) + pricing.error, 400);
         await shopeeCreateVariations(env, [{
           id: v.id || uuid(), product_id: taskId, integration_no: v.integration_no || taskId.slice(0,8),
           option1: v.option1 || '', image_per_variation: v.image_per_variation || '',
           option2: v.option2 || '', image_2: v.image_2 || '',
-          price: v.price || 0, stock: v.stock || 0, sku: v.sku || '',
+          price: pricing.price, price_float_enabled: pricing.price_float_enabled,
+          price_min: pricing.price_min, price_max: pricing.price_max, price_precision: pricing.price_precision,
+          stock: v.stock || 0, sku: v.sku || '',
         }]);
       }
     }
@@ -434,6 +509,8 @@ async function handleUpdateTask(request, env, path) {
       await jstClearVariants(env, taskId);
       for (let i = 0; i < variants.length; i++) {
         const v = variants[i];
+        const pricing = normalizeVariantPricing(v, false);
+        if (pricing.error) return error('变体#' + (i + 1) + pricing.error, 400);
         await jstCreateVariant(env, {
           id: uuid(), task_id: taskId,
           tier1_name: v.tier1_name || '',
@@ -441,7 +518,9 @@ async function handleUpdateTask(request, env, path) {
           tier2_name: v.tier2_name || '',
           tier2_value: v.tier2_value || '',
           white_bg_image: v.white_bg_image || v.white_bg_image,
-          price: v.price ?? null, description: v.sku_description || '', sort_order: i,
+          price: pricing.price, price_float_enabled: pricing.price_float_enabled,
+          price_min: pricing.price_min, price_max: pricing.price_max, price_precision: pricing.price_precision,
+          description: v.sku_description || '', sort_order: i,
         });
       }
     }
@@ -619,7 +698,7 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
 
   const callbackSecret = config.callback_secret || '';
   const baseUrl = new URL(request.url).origin + '/api/callback';
-  const mainCount = Math.min(Math.max(detail.main_image_count || 5, 5), 9);
+  const mainCount = Math.min(Math.max(detail.main_image_count || 9, 5), 9);
   const refImg = detail.reference_image || '';
   const auxImgs = detail.auxiliary_images || '';
   const generateCount = detail.generate_count || 1;
@@ -1029,13 +1108,14 @@ async function jstHandleExport(env, taskId) {
       for (let p = 1; p <= detailImgTotal; p++) detailUrls.push(getImg(setIdx, 'detail', p));
       const skuUrl = getSkuUrl(setIdx, vIdx);
       const skuTitle = skuTitleMap[subTaskId + '_' + variant.id] || '';
+      const exportPrice = exportPriceForVariant(variant, taskId, setIdx, vIdx);
       rows.push({
         '款式编码': styleCode, '商品编码': skuCode, '颜色': skuTitle, '规格': '',
         '商品主图': JSON.stringify(mainUrls.filter(u => u)),
         '商品详情图': JSON.stringify(detailUrls.filter(u => u)),
         '图片地址': skuUrl, '商品名称': productTitle, '推荐文案': '', '商品描述': '', '宝贝链接': '',
-        '库存': detail.stock ?? 999, '重量(kg)': detail.weight ?? 1.0, '基本售价': variant.price ?? '',
-        '市场|吊牌价': variant.price ?? '', '最低分销控价': '', '最高分销控价': '', '供应商名': '',
+        '库存': detail.stock ?? 999, '重量(kg)': detail.weight ?? 1.0, '基本售价': exportPrice,
+        '市场|吊牌价': exportPrice, '最低分销控价': '', '最高分销控价': '', '供应商名': '',
         '3:4主图': '', '长图': '', '透明素材图': '', '白底图': '',
       });
     }
@@ -1084,8 +1164,15 @@ function validateShopeeRow(product, variations) {
       if (variations[i].option1 && variations[i].option1.length > 20) errors.push('变体#' + (i+1) + ' 规格值1(Option for Variation 1)必须为1~20字符（当前: ' + variations[i].option1.length + '）');
       if (hasTier2 && (!variations[i].option2 || !variations[i].option2.trim())) errors.push('变体#' + (i+1) + ' 规格值2不能为空');
       if (variations[i].option2 && variations[i].option2.length > 20) errors.push('变体#' + (i+1) + ' 规格值2(Option for Variation 2)必须为1~20字符（当前: ' + variations[i].option2.length + '）');
-      var p = parseFloat(variations[i].price);
-      if (isNaN(p) || p < 1000 || p > 120000000) errors.push('变体#' + (i+1) + ' 价格(Price)必须为1000~120000000（当前: ' + variations[i].price + '）');
+      if (isEnabled(variations[i].price_float_enabled)) {
+        var minPrice = parseFloat(variations[i].price_min);
+        var maxPrice = parseFloat(variations[i].price_max);
+        if (isNaN(minPrice) || isNaN(maxPrice) || maxPrice < minPrice) errors.push('变体#' + (i+1) + ' 价格浮动区间无效');
+        else if (minPrice < 1000 || maxPrice > 120000000) errors.push('变体#' + (i+1) + ' 价格浮动区间必须在1000~120000000');
+      } else {
+        var p = parseFloat(variations[i].price);
+        if (isNaN(p) || p < 1000 || p > 120000000) errors.push('变体#' + (i+1) + ' 价格(Price)必须为1000~120000000（当前: ' + variations[i].price + '）');
+      }
       var stock = parseInt(variations[i].stock);
       if (isNaN(stock) || stock < 0 || stock > 10000000) errors.push('变体#' + (i+1) + ' 库存(Stock)必须为0~10000000（当前: ' + variations[i].stock + '）');
       if (variations[i].sku && variations[i].sku.length >= 100) errors.push('变体#' + (i+1) + ' SKU必须小于100字符（当前: ' + variations[i].sku.length + '）');
@@ -1131,7 +1218,7 @@ async function shopeeHandleExport(env, taskId) {
 
   const rows = [];
   const mode = product.mode || 'full';
-  const mainImgTotal = Math.min(Math.max(product.main_image_count || 5, 5), 9);
+  const mainImgTotal = Math.min(Math.max(product.main_image_count || 9, 5), 9);
   const expectedSetCount = Math.max(parseInt(product.generate_count) || 1, 1);
   const subTasks = (product.sub_tasks && product.sub_tasks.length) ? product.sub_tasks : [];
   var shippingChannels = [];
@@ -1223,6 +1310,7 @@ async function shopeeHandleExport(env, taskId) {
     var parentSku = parentSkuFor(subTask, setIdx);
     var skuTitle = skuTitleMap[(subTask.id || '') + '_' + v.id] || '';
     var skuCode = skuCodeFor(subTask, setIdx, v, variationsIdx);
+    var exportPrice = exportPriceForVariant(v, taskId, setIdx, variationsIdx);
     return [
       product.category_id || '',                          // A Category
       subTask.title || '',                                // B Product Name
@@ -1235,7 +1323,7 @@ async function shopeeHandleExport(env, taskId) {
       getSkuUrl(setIdx, subTask.id || '', variationsIdx, v), // L Image per Variation
       product.variation_name2 || '',                      // M Variation Name2
       v.option2 || '',                                    // N Option for Variation 2
-      v.price ?? '',                                      // O Price
+      exportPrice,                                       // O Price
       v.stock ?? '',                                      // P Stock
       skuCode,                                            // Q SKU
       product.size_chart_template_id || '',               // R Size Chart Template
