@@ -798,6 +798,10 @@ async function shopeeReleaseTaskQueue(env, taskId, ctx) {
     if (!plans.length) return;
     const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
     for (const plan of plans) {
+      if (!plan.webhook_url) {
+        await markPushPlanFailed(env, 'ews_shopee_push_plans', plan.id, 'Webhook地址未配置');
+        continue;
+      }
       let canSend = true;
       if (taskOwner?.user_id) {
         const credits = await getUserCredits(env, taskOwner.user_id);
@@ -806,7 +810,7 @@ async function shopeeReleaseTaskQueue(env, taskId, ctx) {
       }
       if (canSend) {
         await shopeeUpdatePlanStatus(env, plan.id, 'processing');
-        ctx.waitUntil(pushToWebhook(plan.webhook_url, JSON.parse(plan.payload)));
+        ctx.waitUntil(dispatchPushPlan(env, 'ews_shopee_push_plans', taskId, plan));
       } else {
         await env.DB.prepare("UPDATE ews_shopee_push_plans SET status='failed', retry_count=3, error=? WHERE id=?").bind('算力不足', plan.id).run();
       }
@@ -815,9 +819,28 @@ async function shopeeReleaseTaskQueue(env, taskId, ctx) {
 }
 
 async function pushToWebhook(url, data) {
-  if (!url) return;
+  if (!url) throw new Error('Webhook地址未配置');
   const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-  return resp.ok;
+  if (!resp.ok) throw new Error('Webhook响应异常: HTTP ' + resp.status);
+  return true;
+}
+
+async function markPushPlanFailed(env, planTable, planId, message) {
+  await env.DB.prepare(`UPDATE ${planTable} SET status='failed', retry_count=3, error=? WHERE id=?`).bind(message || '推送失败', planId).run();
+}
+
+async function refundTaskCredit(env, taskId) {
+  const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
+  if (taskOwner?.user_id) await updateUserCredits(env, taskOwner.user_id, 1, 'add');
+}
+
+async function dispatchPushPlan(env, planTable, taskId, plan) {
+  try {
+    await pushToWebhook(plan.webhook_url, JSON.parse(plan.payload));
+  } catch (err) {
+    await markPushPlanFailed(env, planTable, plan.id, err.message);
+    await refundTaskCredit(env, taskId);
+  }
 }
 
 async function jstReleaseTaskQueue(env, taskId, ctx) {
@@ -832,6 +855,10 @@ async function jstReleaseTaskQueue(env, taskId, ctx) {
     if (!plans.length) return;
     const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
     for (const plan of plans) {
+      if (!plan.webhook_url) {
+        await markPushPlanFailed(env, 'ews_jst_push_plans', plan.id, 'Webhook地址未配置');
+        continue;
+      }
       let canSend = true;
       if (taskOwner?.user_id) {
         const credits = await getUserCredits(env, taskOwner.user_id);
@@ -840,7 +867,7 @@ async function jstReleaseTaskQueue(env, taskId, ctx) {
       }
       if (canSend) {
         await jstUpdatePlanStatus(env, plan.id, 'processing');
-        ctx.waitUntil(pushToWebhook(plan.webhook_url, JSON.parse(plan.payload)));
+        ctx.waitUntil(dispatchPushPlan(env, 'ews_jst_push_plans', taskId, plan));
       } else {
         await env.DB.prepare("UPDATE ews_jst_push_plans SET status='failed', retry_count=3, error=? WHERE id=?").bind('算力不足', plan.id).run();
       }
@@ -949,7 +976,7 @@ async function handleCallback(request, env, ctx) {
       if (planInfo && planInfo.webhook_url && (planInfo.retry_count||0) < 3) {
         const newCount = (planInfo.retry_count||0) + 1;
         await env.DB.prepare(`UPDATE ${planTable} SET status='processing', retry_count=?, error=? WHERE id=?`).bind(newCount, `${errMsg || '下载失败'}，重试第${newCount}次`, planInfo.id).run();
-        ctx.waitUntil(pushToWebhook(planInfo.webhook_url, JSON.parse(planInfo.payload)));
+        ctx.waitUntil(dispatchPushPlan(env, planTable, task_id, planInfo));
       } else {
         const reason = planInfo?.retry_count >= 3 ? '已重试3次失败' : (errMsg || '下载失败');
         await env.DB.prepare(`UPDATE ${planTable} SET status='failed', error=? WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`).bind(reason, task_id, sub_task_id, whType).run();
