@@ -189,6 +189,7 @@ CREATE TABLE IF NOT EXISTS ews_shopee_products (
   description TEXT NOT NULL DEFAULT '',
   main_description TEXT NOT NULL DEFAULT '',
   detail_description TEXT NOT NULL DEFAULT '',
+  reference_title TEXT NOT NULL DEFAULT '',
   reference_image TEXT NOT NULL DEFAULT '',
   auxiliary_images TEXT NOT NULL DEFAULT '[]',
   generate_count INTEGER NOT NULL DEFAULT 1,
@@ -247,6 +248,18 @@ CREATE TABLE IF NOT EXISTS ews_shopee_sub_tasks (
   updated_at TEXT NOT NULL DEFAULT '',
   FOREIGN KEY (parent_task_id) REFERENCES ews_tasks(id) ON DELETE CASCADE
 );
+
+-- Shopee SKU 标题
+CREATE TABLE IF NOT EXISTS ews_shopee_sku_titles (
+  id TEXT PRIMARY KEY,
+  sub_task_id TEXT NOT NULL,
+  variation_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (sub_task_id) REFERENCES ews_shopee_sub_tasks(id) ON DELETE CASCADE,
+  FOREIGN KEY (variation_id) REFERENCES ews_shopee_variations(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_shopee_sku_titles_unique ON ews_shopee_sku_titles(sub_task_id, variation_id);
 
 -- Shopee 图片记录（对标 JST task_images）
 CREATE TABLE IF NOT EXISTS ews_shopee_task_images (
