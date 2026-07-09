@@ -66,6 +66,22 @@ CREATE TABLE IF NOT EXISTS ews_tasks (
 CREATE INDEX IF NOT EXISTS idx_ews_tasks_platform ON ews_tasks(platform);
 CREATE INDEX IF NOT EXISTS idx_ews_tasks_user ON ews_tasks(user_id);
 
+-- 共享回调队列：工作流回调先入队备份，处理成功后删除，失败保留重试/排查
+CREATE TABLE IF NOT EXISTS ews_callback_queue (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  platform TEXT NOT NULL DEFAULT '',
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending', -- pending / processing / failed
+  attempts INTEGER NOT NULL DEFAULT 0,
+  error TEXT DEFAULT '',
+  received_at TEXT NOT NULL DEFAULT (datetime('now')),
+  processing_at TEXT DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_callback_queue_status ON ews_callback_queue(status, received_at);
+CREATE INDEX IF NOT EXISTS idx_callback_queue_task ON ews_callback_queue(task_id);
+
 -- ====================================================================
 -- 聚水潭模块 ews_jst_
 -- ====================================================================

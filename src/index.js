@@ -877,6 +877,7 @@ async function jstReleaseTaskQueue(env, taskId, ctx) {
 
 async function processPendingQueue(env, ctx) {
   try {
+    await processCallbackQueue(env, ctx);
     const jstRows = await query(env, "SELECT DISTINCT p.task_id FROM ews_jst_push_plans p LEFT JOIN ews_jst_tasks t ON t.id = p.task_id WHERE p.status='pending' AND COALESCE(t.queue_mode, 'auto') != 'manual'");
     for (const row of (jstRows?.results || [])) ctx.waitUntil(jstReleaseTaskQueue(env, row.task_id, ctx));
     const shopeeRows = await query(env, "SELECT DISTINCT p.task_id FROM ews_shopee_push_plans p LEFT JOIN ews_tasks t ON t.id = p.task_id WHERE p.status='pending' AND t.status='processing'");
@@ -886,17 +887,107 @@ async function processPendingQueue(env, ctx) {
 
 // ========== 回调 ==========
 
+const CALLBACK_QUEUE_BATCH_SIZE = 3;
+const CALLBACK_QUEUE_MAX_ATTEMPTS = 5;
+let callbackQueueReady = false;
+
+function callbackPermanentError(message) {
+  const err = new Error(message);
+  err.permanent = true;
+  return err;
+}
+
+async function ensureCallbackQueueTable(env) {
+  if (callbackQueueReady) return;
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS ews_callback_queue (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    platform TEXT NOT NULL DEFAULT '',
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    error TEXT DEFAULT '',
+    received_at TEXT NOT NULL DEFAULT (datetime('now')),
+    processing_at TEXT DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_callback_queue_status ON ews_callback_queue(status, received_at)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_callback_queue_task ON ews_callback_queue(task_id)").run();
+  callbackQueueReady = true;
+}
+
 async function handleCallback(request, env, ctx) {
   const body = await parseBody(request);
-  if (!body) return error('无效的请求体', 400);
-  const { task_id, sub_task_id, set_index, titles, product_title, sku_selling_points, image_type, image_position, image_url, error: errMsg } = body;
+  if (!body || typeof body !== 'object' || typeof body.get === 'function') return error('无效的请求体', 400);
+  const { task_id } = body;
   if (!task_id) return error('缺少 task_id', 400);
   const idx = await getTaskIndex(env, task_id);
   if (!idx) return error('任务不存在', 404);
-
   const config = await getConfig(env, idx.platform || '');
   const receivedSecret = body.secret ?? body.callback_secret;
   if (config.callback_secret && receivedSecret !== config.callback_secret) return error('回调密钥无效', 403);
+
+  await ensureCallbackQueueTable(env);
+  const queueId = uuid(16);
+  await env.DB.prepare("INSERT INTO ews_callback_queue (id, task_id, platform, payload, status, received_at, updated_at) VALUES (?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))")
+    .bind(queueId, task_id, idx.platform || '', JSON.stringify(body)).run();
+  ctx.waitUntil(processCallbackQueue(env, ctx, queueId));
+  return json({ success: true, queued: true, queue_id: queueId, message: '回调已入队' });
+}
+
+async function processCallbackQueue(env, ctx, preferredId) {
+  try {
+    await ensureCallbackQueueTable(env);
+    const rows = [];
+    if (preferredId) {
+      const preferred = await getOne(env, "SELECT * FROM ews_callback_queue WHERE id=?", [preferredId]);
+      if (preferred) rows.push(preferred);
+    }
+    const remaining = CALLBACK_QUEUE_BATCH_SIZE - rows.length;
+    if (remaining > 0) {
+      const pending = await query(env, `SELECT * FROM ews_callback_queue
+        WHERE id != ? AND attempts < ? AND (status='pending' OR (status='processing' AND processing_at < datetime('now', '-5 minutes')))
+        ORDER BY received_at ASC LIMIT ?`, [preferredId || '', CALLBACK_QUEUE_MAX_ATTEMPTS, remaining]);
+      rows.push(...(pending?.results || []));
+    }
+    for (const row of rows) await processCallbackQueueRow(env, ctx, row);
+  } catch (err) {
+    console.error('processCallbackQueue error:', err.message);
+  }
+}
+
+async function processCallbackQueueRow(env, ctx, row) {
+  const claim = await env.DB.prepare(`UPDATE ews_callback_queue
+    SET status='processing', attempts=attempts+1, processing_at=datetime('now'), updated_at=datetime('now'), error=''
+    WHERE id=? AND attempts < ? AND (status='pending' OR (status='processing' AND processing_at < datetime('now', '-5 minutes')))`)
+    .bind(row.id, CALLBACK_QUEUE_MAX_ATTEMPTS).run();
+  const attempts = (row.attempts || 0) + 1;
+  const claimedChanges = claim.meta && typeof claim.meta.changes === 'number' ? claim.meta.changes : 1;
+  if (claimedChanges < 1) return;
+  try {
+    const payload = JSON.parse(row.payload || '{}');
+    await processCallbackPayload(env, ctx, payload, true);
+    await env.DB.prepare("DELETE FROM ews_callback_queue WHERE id=?").bind(row.id).run();
+  } catch (err) {
+    const failed = err.permanent || attempts >= CALLBACK_QUEUE_MAX_ATTEMPTS;
+    await env.DB.prepare("UPDATE ews_callback_queue SET status=?, error=?, updated_at=datetime('now') WHERE id=?")
+      .bind(failed ? 'failed' : 'pending', err.message || '回调处理失败', row.id).run();
+    console.error('callback queue item failed:', row.id, err.message);
+  }
+}
+
+async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
+  if (!body || typeof body !== 'object') throw callbackPermanentError('无效的请求体');
+  const { task_id, sub_task_id, set_index, titles, product_title, image_type, image_position, image_url, error: errMsg } = body;
+  if (!task_id) throw callbackPermanentError('缺少 task_id');
+  const idx = await getTaskIndex(env, task_id);
+  if (!idx) throw callbackPermanentError('任务不存在');
+
+  const config = await getConfig(env, idx.platform || '');
+  if (!trustedQueuePayload) {
+    const receivedSecret = body.secret ?? body.callback_secret;
+    if (config.callback_secret && receivedSecret !== config.callback_secret) throw callbackPermanentError('回调密钥无效');
+  }
 
   const publicUrl = config.r2_public_url || '';
   const isShopee = idx.platform === 'shopee';
@@ -910,7 +1001,7 @@ async function handleCallback(request, env, ctx) {
   if (titles && Array.isArray(titles)) {
     const subTasks = await getSubTasks(env, task_id);
     const allSubs = (subTasks?.results || []).sort((a,b) => a.set_index - b.set_index);
-    if (titles.length !== allSubs.length) return error(`标题数量不匹配: ${titles.length} vs ${allSubs.length}`, 400);
+    if (titles.length !== allSubs.length) throw callbackPermanentError(`标题数量不匹配: ${titles.length} vs ${allSubs.length}`);
     for (let i = 0; i < allSubs.length; i++) await updateSubTask(env, allSubs[i].id, { title: titles[i] });
   } else if (product_title) {
     const subTasks = await getSubTasks(env, task_id);
@@ -930,7 +1021,7 @@ async function handleCallback(request, env, ctx) {
       const allSubs = (subTasks?.results || []).sort((a,b) => a.set_index - b.set_index);
       const vCount = variants.length;
       const expected = allSubs.length * vCount;
-      if (body.sku_titles.length !== expected) return error(`SKU标题数量不匹配: ${body.sku_titles.length} vs ${expected}`, 400);
+      if (body.sku_titles.length !== expected) throw callbackPermanentError(`SKU标题数量不匹配: ${body.sku_titles.length} vs ${expected}`);
       for (let si = 0; si < allSubs.length; si++) {
         for (let vi = 0; vi < vCount; vi++) {
           const title = body.sku_titles[si * vCount + vi];
@@ -945,7 +1036,7 @@ async function handleCallback(request, env, ctx) {
       const allSubs = (subTasks?.results || []).sort((a,b) => a.set_index - b.set_index);
       const vCount = variants.length;
       const expected = allSubs.length * vCount;
-      if (body.sku_titles.length !== expected) return error(`SKU标题数量不匹配: ${body.sku_titles.length} vs ${expected}`, 400);
+      if (body.sku_titles.length !== expected) throw callbackPermanentError(`SKU标题数量不匹配: ${body.sku_titles.length} vs ${expected}`);
       for (let si = 0; si < allSubs.length; si++) {
         for (let vi = 0; vi < vCount; vi++) {
           const title = body.sku_titles[si * vCount + vi];
@@ -959,7 +1050,7 @@ async function handleCallback(request, env, ctx) {
   // 图片回调
   const savedImages = [];
   if (image_type && image_position && (image_url || errMsg)) {
-    if (!['main','sub','detail','sku'].includes(image_type)) return error('无效的图片类型', 400);
+    if (!['main','sub','detail','sku'].includes(image_type)) throw callbackPermanentError('无效的图片类型');
     const result = image_url ? await processOneImage(env, idx.platform, task_id, sub_task_id, set_index ?? 0, image_type, image_position, image_url, publicUrl) : null;
     const whType = `${image_type}_${image_position}`;
     if (result) {
@@ -1000,7 +1091,7 @@ async function handleCallback(request, env, ctx) {
     if (taskInfo?.queue_mode !== 'manual') ctx.waitUntil(jstReleaseTaskQueue(env, task_id, ctx));
   }
 
-  return json({ success: true, sub_task_id, images_saved: savedImages.length, message: '回调处理完成' });
+  return { success: true, sub_task_id, images_saved: savedImages.length };
 }
 
 async function processOneImage(env, platform, task_id, sub_task_id, set_index, image_type, image_position, image_url, publicUrl) {
