@@ -1,5 +1,6 @@
 // EWS - Cloudflare Worker 主入口（统一路由 + 分平台分发）
 
+import { PhotonImage, SamplingFilter, crop, resize } from '@cf-wasm/photon/workerd';
 import {
   query, getOne, getConfig, updateConfig, getPlatformConfig,
   createUser, getUserByUsername, getUserList, updateUserPassword,
@@ -1215,15 +1216,85 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
   return { success: true, sub_task_id, image_queued: imageQueued };
 }
 
+const SHOPEE_ITEM_IMAGE_LIMIT_BYTES = 2 * 1024 * 1024;
+const SHOPEE_ITEM_IMAGE_MAX_SIDE = 1200;
+const SHOPEE_JPEG_QUALITIES = [90, 86, 82, 78, 74, 70, 66, 62, 58, 54, 50];
+const SHOPEE_FALLBACK_SIDES = [1100, 1000, 900, 800, 700, 600];
+
+function isShopeeItemImage(platform, imageType) {
+  return platform === 'shopee' && (imageType === 'main' || imageType === 'sub');
+}
+
+function freePhotonImage(img) {
+  if (img) img.free();
+}
+
+function candidateShopeeSides(side) {
+  const first = Math.min(side, SHOPEE_ITEM_IMAGE_MAX_SIDE);
+  const sides = [first, ...SHOPEE_FALLBACK_SIDES.filter(s => s < first)];
+  return [...new Set(sides)].filter(s => s > 0);
+}
+
+function encodeShopeeJpegUnderLimit(image) {
+  let best = null;
+  for (const quality of SHOPEE_JPEG_QUALITIES) {
+    const bytes = image.get_bytes_jpeg(quality);
+    if (!best || bytes.byteLength < best.byteLength) best = bytes;
+    if (bytes.byteLength <= SHOPEE_ITEM_IMAGE_LIMIT_BYTES) return bytes;
+  }
+  return best;
+}
+
+function normalizeShopeeItemImage(buffer) {
+  let input = null;
+  let square = null;
+  const resizedImages = [];
+  try {
+    input = PhotonImage.new_from_byteslice(new Uint8Array(buffer));
+    const width = input.get_width();
+    const height = input.get_height();
+    if (!width || !height) throw new Error('Invalid image dimensions');
+
+    const side = Math.min(width, height);
+    let working = input;
+    if (width !== height) {
+      const left = Math.floor((width - side) / 2);
+      const top = Math.floor((height - side) / 2);
+      square = crop(input, left, top, left + side, top + side);
+      working = square;
+    }
+
+    for (const targetSide of candidateShopeeSides(side)) {
+      let candidate = working;
+      if (working.get_width() !== targetSide || working.get_height() !== targetSide) {
+        candidate = resize(working, targetSide, targetSide, SamplingFilter.Lanczos3);
+        resizedImages.push(candidate);
+      }
+      const bytes = encodeShopeeJpegUnderLimit(candidate);
+      if (bytes && bytes.byteLength <= SHOPEE_ITEM_IMAGE_LIMIT_BYTES) return bytes;
+    }
+    throw new Error('Shopee image remains above 2MB after compression');
+  } finally {
+    for (const img of resizedImages) freePhotonImage(img);
+    freePhotonImage(square);
+    freePhotonImage(input);
+  }
+}
+
 async function processOneImage(env, platform, task_id, sub_task_id, set_index, image_type, image_position, image_url, publicUrl) {
   try {
     const resp = await fetch(image_url);
     if (!resp.ok) return null;
-    const buffer = await resp.arrayBuffer();
+    let buffer = await resp.arrayBuffer();
+    let contentType = resp.headers.get('content-type') || 'image/jpeg';
+    if (isShopeeItemImage(platform, image_type)) {
+      buffer = normalizeShopeeItemImage(buffer);
+      contentType = 'image/jpeg';
+    }
     const ext = 'jpg';
     const fileName = `${image_type}_${image_position}.${ext}`;
     const r2Key = `ews/${task_id}/${sub_task_id}/${fileName}`;
-    await env.R2.put(r2Key, buffer, { httpMetadata: { contentType: resp.headers.get('content-type') || 'image/jpeg' } });
+    await env.R2.put(r2Key, buffer, { httpMetadata: { contentType } });
     const fullUrl = publicUrl ? `${publicUrl.replace(/\/+$/, '')}/${r2Key}` : r2Key;
     if (platform === 'shopee') await shopeeSaveImage(env, { parent_task_id: task_id, sub_task_id, set_index, image_type, position: image_position, image_url: fullUrl });
     else await jstSaveImage(env, { id: '', parent_task_id: task_id, sub_task_id, variant_id: null, set_index, image_type, position: image_position, image_url: fullUrl });
