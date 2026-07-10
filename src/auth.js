@@ -101,7 +101,7 @@ async function authenticateRequest(request, env) {
     } catch (_) {}
     if (!user || user.is_active === 0) return { valid: false };
 
-    return { valid: true, username: payload.sub, role: payload.role || 'user' };
+    return { valid: true, username: payload.sub, role: payload.role || 'user', platform_access: user.platform_access || 'allow' };
   } catch {
     return { valid: false };
   }

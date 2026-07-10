@@ -22,11 +22,21 @@ async function updateConfig(env, key, value, platform = '') {
 }
 async function getPlatformConfig(env, platform) { return getConfig(env, platform); }
 
-async function createUser(env, user) { await env.DB.prepare("INSERT INTO ews_users (id, username, password_hash, role, display_name, created_by) VALUES (?, ?, ?, ?, ?, ?)").bind(user.id, user.username, user.password_hash, user.role || 'user', user.display_name || '', user.created_by || '').run(); }
-async function getUserByUsername(env, username) { return await getOne(env, "SELECT * FROM ews_users WHERE username = ?", [username]); }
-async function getUserList(env) { return await query(env, "SELECT id, username, role, display_name, is_active, credits, created_at FROM ews_users ORDER BY created_at ASC"); }
+let userColumnsReady = false;
+async function ensureUserColumns(env) {
+  if (userColumnsReady) return;
+  try { await env.DB.prepare("ALTER TABLE ews_users ADD COLUMN platform_access TEXT NOT NULL DEFAULT 'allow'").run(); } catch (_) {}
+  userColumnsReady = true;
+}
+function normalizePlatformAccess(value) {
+  return ['allow','jst','shopee'].includes(value) ? value : 'allow';
+}
+async function createUser(env, user) { await ensureUserColumns(env); await env.DB.prepare("INSERT INTO ews_users (id, username, password_hash, role, display_name, platform_access, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(user.id, user.username, user.password_hash, user.role || 'user', user.display_name || '', normalizePlatformAccess(user.platform_access), user.created_by || '').run(); }
+async function getUserByUsername(env, username) { await ensureUserColumns(env); return await getOne(env, "SELECT * FROM ews_users WHERE username = ?", [username]); }
+async function getUserList(env) { await ensureUserColumns(env); return await query(env, "SELECT id, username, role, display_name, platform_access, is_active, credits, created_at FROM ews_users ORDER BY created_at ASC"); }
 async function updateUserPassword(env, userId, pw) { await env.DB.prepare("UPDATE ews_users SET password_hash = ? WHERE id = ?").bind(pw, userId).run(); }
 async function toggleUserActive(env, userId, a) { await env.DB.prepare("UPDATE ews_users SET is_active = ? WHERE id = ?").bind(a ? 1 : 0, userId).run(); }
+async function updateUserPlatformAccess(env, userId, access) { await ensureUserColumns(env); await env.DB.prepare("UPDATE ews_users SET platform_access = ? WHERE id = ?").bind(normalizePlatformAccess(access), userId).run(); }
 async function updateUserWebhook(env, userId, cfg) { await env.DB.prepare("UPDATE ews_users SET webhook_config = ? WHERE id = ?").bind(cfg, userId).run(); }
 async function getUserCredits(env, userId) { const r = await getOne(env, "SELECT credits FROM ews_users WHERE id = ?", [userId]); return r?.credits ?? 0; }
 async function updateUserCredits(env, userId, amount, mode) {
@@ -191,7 +201,7 @@ async function shopeeCreateExportRecord(env, r) { await env.DB.prepare("INSERT I
 export {
   query, getOne,
   getConfig, updateConfig, getPlatformConfig,
-  createUser, getUserByUsername, getUserList, updateUserPassword, toggleUserActive, updateUserWebhook,
+  createUser, getUserByUsername, getUserList, updateUserPassword, toggleUserActive, updateUserPlatformAccess, updateUserWebhook,
   getUserCredits, updateUserCredits,
   createTaskIndex, updateTaskIndexStatus, getTaskIndex, getTaskList, deleteTaskIndex,
   jstCreateTask, jstUpdateTask, jstGetTask, jstUpdateTaskStatus,

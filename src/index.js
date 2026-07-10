@@ -4,7 +4,7 @@ import { PhotonImage, SamplingFilter, crop, resize } from '@cf-wasm/photon/worke
 import {
   query, getOne, getConfig, updateConfig, getPlatformConfig,
   createUser, getUserByUsername, getUserList, updateUserPassword,
-  toggleUserActive, updateUserWebhook, getUserCredits, updateUserCredits,
+  toggleUserActive, updateUserPlatformAccess, updateUserWebhook, getUserCredits, updateUserCredits,
   createTaskIndex, updateTaskIndexStatus, getTaskIndex, getTaskList, deleteTaskIndex,
   jstCreateTask, jstUpdateTask, jstGetTask, jstUpdateTaskStatus,
   jstCreateVariant, jstClearVariants,
@@ -64,6 +64,16 @@ function clampPricePrecision(value) {
   const n = parseInt(value);
   if (Number.isNaN(n)) return 0;
   return Math.min(Math.max(n, -2), 2);
+}
+
+function normalizePlatformAccess(value) {
+  return ['allow','jst','shopee'].includes(value) ? value : 'allow';
+}
+
+function canUsePlatform(auth, platform) {
+  if (auth?.role === 'admin') return true;
+  const access = normalizePlatformAccess(auth?.platform_access);
+  return access === 'allow' || access === platform;
 }
 
 function normalizeVariantPricing(variant, requiredPrice) {
@@ -198,6 +208,8 @@ export default {
         return requireAuth(request, env, () => handleCreateUser(request, env));
       if (path.match(/^\/api\/users\/[^\/]+\/toggle$/) && method === 'PUT')
         return requireAuth(request, env, () => handleToggleUser(request, env, path));
+      if (path.match(/^\/api\/users\/[^\/]+\/platform$/) && method === 'PUT')
+        return requireAuth(request, env, () => handleUpdateUserPlatform(request, env, path));
       if (path === '/api/users/me/credits' && method === 'GET')
         return requireAuth(request, env, () => handleGetMyCredits(request, env));
       if (path.match(/^\/api\/users\/[^\/]+\/webhook$/) && method === 'GET')
@@ -253,7 +265,7 @@ async function handleLogin(request, env) {
   const token = await generateToken(env, user.username, user.role);
   return json({
     success: true, token,
-    user: { username: user.username, role: user.role, display_name: user.display_name },
+    user: { username: user.username, role: user.role, display_name: user.display_name, platform_access: user.role === 'admin' ? 'allow' : normalizePlatformAccess(user.platform_access) },
     is_default_password: password === DEFAULT_PASSWORD,
     message: password === DEFAULT_PASSWORD ? '请及时修改默认密码' : '登录成功',
   });
@@ -271,7 +283,7 @@ async function handleLogin(request, env) {
 
 async function handleVerify(request, env) {
   const auth = await authenticateRequest(request, env);
-  return json({ success: auth.valid, username: auth.username || null, role: auth.role || null });
+  return json({ success: auth.valid, username: auth.username || null, role: auth.role || null, platform_access: auth.role === 'admin' ? 'allow' : normalizePlatformAccess(auth.platform_access) });
 }
 
 async function handleChangePassword(request, env) {
@@ -322,6 +334,7 @@ async function handleGetUsers(request, env) {
   const result = await getUserList(env);
   return json({ success: true, users: (result?.results || []).map(u => ({
     id: u.id, username: u.username, role: u.role, display_name: u.display_name,
+    platform_access: u.role === 'admin' ? 'allow' : normalizePlatformAccess(u.platform_access),
     is_active: u.is_active, credits: u.credits ?? 0, created_at: u.created_at
   })) });
 }
@@ -335,7 +348,7 @@ async function handleCreateUser(request, env) {
   const existing = await getUserByUsername(env, username);
   if (existing) return error('用户名已存在', 400);
   const pwdHash = await hashPassword(password);
-  await createUser(env, { id: username, username, password_hash: pwdHash, role: role === 'admin' ? 'admin' : 'user', created_by: request.auth.username });
+  await createUser(env, { id: username, username, password_hash: pwdHash, role: role === 'admin' ? 'admin' : 'user', platform_access: normalizePlatformAccess(body?.platform_access), created_by: request.auth.username });
   return json({ success: true, message: '用户创建成功' }, 201);
 }
 
@@ -347,6 +360,17 @@ async function handleToggleUser(request, env, path) {
   if (user.id === 'admin') return error('不能禁用管理员', 400);
   await toggleUserActive(env, user.id, !user.is_active);
   return json({ success: true, message: user.is_active ? '用户已禁用' : '用户已启用' });
+}
+
+async function handleUpdateUserPlatform(request, env, path) {
+  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  const userId = path.split('/')[3];
+  const body = await parseBody(request);
+  const user = await getUserByUsername(env, userId);
+  if (!user) return error('用户不存在', 404);
+  const access = normalizePlatformAccess(body?.platform_access);
+  await updateUserPlatformAccess(env, user.id, user.role === 'admin' ? 'allow' : access);
+  return json({ success: true, platform_access: user.role === 'admin' ? 'allow' : access, message: '平台权限已更新' });
 }
 
 async function handleGetUserWebhook(request, env, path) {
@@ -399,13 +423,13 @@ async function resetGeneratedTaskArtifacts(env, taskId, platform) {
   await env.DB.prepare(`DELETE FROM ${prefix}_sub_tasks WHERE parent_task_id=?`).bind(taskId).run();
 }
 
-async function getTaskSummaryRows(env, sqlPrefix, ids) {
+async function getTaskSummaryRows(env, sqlPrefix, ids, sqlSuffix = '') {
   const rows = [];
   for (let i = 0; i < ids.length; i += 80) {
     const part = ids.slice(i, i + 80);
     if (!part.length) continue;
     const ph = part.map(() => '?').join(',');
-    const result = await query(env, `${sqlPrefix} (${ph})`, part);
+    const result = await query(env, `${sqlPrefix} (${ph})${sqlSuffix}`, part);
     rows.push(...(result?.results || []));
   }
   return rows;
@@ -419,14 +443,18 @@ async function handleGetTasks(env, ctx, auth) {
 
   const jstIds = tasks.filter(t => t.platform === 'jst').map(t => t.id);
   const shopeeIds = tasks.filter(t => t.platform === 'shopee').map(t => t.id);
-  const [jstRows, shopeeRows] = await Promise.all([
+  const [jstRows, shopeeRows, jstPlanRows, shopeePlanRows] = await Promise.all([
     getTaskSummaryRows(env, 'SELECT id, name, mode FROM ews_jst_tasks WHERE id IN', jstIds),
     getTaskSummaryRows(env, 'SELECT task_id, name FROM ews_shopee_products WHERE task_id IN', shopeeIds),
+    getTaskSummaryRows(env, 'SELECT task_id, COUNT(*) as cnt FROM ews_jst_push_plans WHERE task_id IN', jstIds, ' GROUP BY task_id'),
+    getTaskSummaryRows(env, 'SELECT task_id, COUNT(*) as cnt FROM ews_shopee_push_plans WHERE task_id IN', shopeeIds, ' GROUP BY task_id'),
   ]);
   const jstMap = new Map(jstRows.map(row => [row.id, row]));
   const shopeeMap = new Map(shopeeRows.map(row => [row.task_id, row]));
+  const planCountMap = new Map([...jstPlanRows, ...shopeePlanRows].map(row => [row.task_id, row.cnt || 0]));
 
   for (const t of tasks) {
+    t.plan_count = planCountMap.get(t.id) || 0;
     if (t.platform === 'jst') {
       const jst = jstMap.get(t.id);
       if (jst) { t.name = jst.name; t._mode = jst.mode; }
@@ -441,6 +469,8 @@ async function handleGetTasks(env, ctx, auth) {
 async function handleInitTask(request, env) {
   const body = await parseBody(request);
   const platform = body?.platform || 'jst';
+  if (!['jst','shopee'].includes(platform)) return error('不支持的平台', 400);
+  if (!canUsePlatform(request.auth, platform)) return error('当前用户无权创建该平台任务', 403);
   const taskId = uuid();
   await createTaskIndex(env, taskId, platform, '', request.auth?.username || '');
   // 初始化平台数据

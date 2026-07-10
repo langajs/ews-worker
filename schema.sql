@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS ews_users (
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'user',      -- admin / user
   display_name TEXT DEFAULT '',
+  platform_access TEXT NOT NULL DEFAULT 'allow', -- allow / jst / shopee
   webhook_config TEXT DEFAULT '{}',       -- JSON: {"jst":{...}, "shopee":{...}}
   is_active INTEGER NOT NULL DEFAULT 1,
   credits INTEGER NOT NULL DEFAULT 200,
