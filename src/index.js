@@ -389,18 +389,39 @@ async function handleUpdateUserCredits(request, env, path) {
 
 function getTaskId(path) { return path.split('/')[3]; }
 
+async function getTaskSummaryRows(env, sqlPrefix, ids) {
+  const rows = [];
+  for (let i = 0; i < ids.length; i += 80) {
+    const part = ids.slice(i, i + 80);
+    if (!part.length) continue;
+    const ph = part.map(() => '?').join(',');
+    const result = await query(env, `${sqlPrefix} (${ph})`, part);
+    rows.push(...(result?.results || []));
+  }
+  return rows;
+}
+
 async function handleGetTasks(env, ctx, auth) {
   ctx.waitUntil(processPendingQueue(env, ctx));
   const result = await getTaskList(env, '', auth.username, auth.role);
   let tasks = result.results || [];
   if (auth.role !== 'admin') tasks = tasks.filter(t => t.user_id === auth.username);
-  // 附加平台特定信息
+
+  const jstIds = tasks.filter(t => t.platform === 'jst').map(t => t.id);
+  const shopeeIds = tasks.filter(t => t.platform === 'shopee').map(t => t.id);
+  const [jstRows, shopeeRows] = await Promise.all([
+    getTaskSummaryRows(env, 'SELECT id, name, mode FROM ews_jst_tasks WHERE id IN', jstIds),
+    getTaskSummaryRows(env, 'SELECT task_id, name FROM ews_shopee_products WHERE task_id IN', shopeeIds),
+  ]);
+  const jstMap = new Map(jstRows.map(row => [row.id, row]));
+  const shopeeMap = new Map(shopeeRows.map(row => [row.task_id, row]));
+
   for (const t of tasks) {
     if (t.platform === 'jst') {
-      const jst = await getOne(env, "SELECT name, status, mode FROM ews_jst_tasks WHERE id = ?", [t.id]);
+      const jst = jstMap.get(t.id);
       if (jst) { t.name = jst.name; t._mode = jst.mode; }
     } else if (t.platform === 'shopee') {
-      const sp = await getOne(env, "SELECT name FROM ews_shopee_products WHERE task_id = ?", [t.id]);
+      const sp = shopeeMap.get(t.id);
       if (sp) t.name = sp.name;
     }
   }
