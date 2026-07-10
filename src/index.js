@@ -686,13 +686,15 @@ async function jstHandlePush(env, taskId, ctx, request) {
   if (planRecords.length > 0) await jstCreatePushPlans(env, planRecords);
 
   if (testMode) {
-    await env.DB.prepare("UPDATE ews_jst_tasks SET queue_mode='manual' WHERE id=?").bind(taskId).run();
+    await env.DB.prepare("UPDATE ews_jst_tasks SET status='pending', queue_mode='manual', updated_at=datetime('now') WHERE id=?").bind(taskId).run();
+    await updateTaskIndexStatus(env, taskId, 'pending');
     return json({ success: true, task_id: taskId, sub_tasks: subTasks, test_mode: true,
-      total_plans: planRecords.length,
+      total_plans: planRecords.length, jobs_count: planRecords.length,
       message: '测试模式：已创建 ' + subTasks.length + ' 个子任务、' + planRecords.length + ' 个推送计划' });
   }
+  await updateTaskIndexStatus(env, taskId, 'processing');
   ctx.waitUntil(jstReleaseTaskQueue(env, taskId, ctx));
-  return json({ success: true, task_id: taskId, sub_tasks: subTasks, total_plans: planRecords.length,
+  return json({ success: true, task_id: taskId, sub_tasks: subTasks, total_plans: planRecords.length, jobs_count: planRecords.length,
     message: '已创建 ' + planRecords.length + ' 个推送计划' });
 }
 
@@ -802,10 +804,12 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
 
   if (testMode) {
     await updateTaskIndexStatus(env, taskId, 'pending');
-    return json({ success: true, task_id: taskId, sub_tasks: subTasks, test_mode: true, total_plans: planRecords.length });
+    await env.DB.prepare("UPDATE ews_shopee_products SET status='pending', updated_at=datetime('now') WHERE id=?").bind(taskId).run();
+    return json({ success: true, task_id: taskId, sub_tasks: subTasks, test_mode: true, total_plans: planRecords.length, jobs_count: planRecords.length,
+      message: '测试模式：已创建 ' + subTasks.length + ' 个子任务、' + planRecords.length + ' 个推送计划' });
   }
   ctx.waitUntil(shopeeReleaseTaskQueue(env, taskId, ctx));
-  return json({ success: true, task_id: taskId, sub_tasks: subTasks, total_plans: planRecords.length, message: '已创建 ' + planRecords.length + ' 个推送计划' });
+  return json({ success: true, task_id: taskId, sub_tasks: subTasks, total_plans: planRecords.length, jobs_count: planRecords.length, message: '已创建 ' + planRecords.length + ' 个推送计划' });
 }
 
 async function shopeeReleaseTaskQueue(env, taskId, ctx) {
