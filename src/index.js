@@ -389,6 +389,16 @@ async function handleUpdateUserCredits(request, env, path) {
 
 function getTaskId(path) { return path.split('/')[3]; }
 
+async function resetGeneratedTaskArtifacts(env, taskId, platform) {
+  const prefix = platform === 'shopee' ? 'ews_shopee' : 'ews_jst';
+  await env.DB.prepare("DELETE FROM ews_callback_queue WHERE task_id=?").bind(taskId).run().catch(() => {});
+  await env.DB.prepare("DELETE FROM ews_image_queue WHERE task_id=?").bind(taskId).run().catch(() => {});
+  await env.DB.prepare(`DELETE FROM ${prefix}_push_plans WHERE task_id=?`).bind(taskId).run();
+  await env.DB.prepare(`DELETE FROM ${prefix}_task_images WHERE parent_task_id=?`).bind(taskId).run();
+  await env.DB.prepare(`DELETE FROM ${prefix}_sku_titles WHERE sub_task_id IN (SELECT id FROM ${prefix}_sub_tasks WHERE parent_task_id=?)`).bind(taskId).run();
+  await env.DB.prepare(`DELETE FROM ${prefix}_sub_tasks WHERE parent_task_id=?`).bind(taskId).run();
+}
+
 async function getTaskSummaryRows(env, sqlPrefix, ids) {
   const rows = [];
   for (let i = 0; i < ids.length; i += 80) {
@@ -626,6 +636,8 @@ async function jstHandlePush(env, taskId, ctx, request) {
   if (!config.n8n_title_webhook && !config.n8n_sku_title_webhook && !mainWebhookUrl && !subImageWebhookUrl && !detailWebhookUrl && !config.n8n_sku_image_webhook)
     return error('请先在系统配置页配置 JST 工作流 Webhook 地址后再推送', 400);
 
+  await resetGeneratedTaskArtifacts(env, taskId, 'jst');
+
   const generateCount = detail.generate_count || 1;
   const variantCount = detail.variants?.length || 1;
   const subTaskIds = [];
@@ -641,11 +653,11 @@ async function jstHandlePush(env, taskId, ctx, request) {
   // title
   allJobs.push({ webhook_type: 'title', sub_task_id: subTasks[0]?.sub_task_id || "", url: config.n8n_title_webhook,
     data: { task_id: taskId, name: detail.name, reference_title: detail.topic_items || '', description: detail.description || '',
-      sub_task_count: generateCount, callback_secret: callbackSecret, callback_url: baseUrl } });
+      sub_task_count: generateCount, sub_tasks: subTasks, callback_secret: callbackSecret, callback_url: baseUrl } });
   // sku_title
   allJobs.push({ webhook_type: 'sku_title', sub_task_id: subTasks[0]?.sub_task_id || "", url: config.n8n_sku_title_webhook,
     data: { task_id: taskId, name: detail.name, reference_title: detail.topic_items || '', description: detail.description || '',
-      sub_task_count: generateCount, variants: (detail.variants||[]).map(v=>({id:v.id,name:v.tier1_value})), callback_secret: callbackSecret, callback_url: baseUrl } });
+      sub_task_count: generateCount, sub_tasks: subTasks, variants: (detail.variants||[]).map(v=>({id:v.id,name:v.tier1_value})), callback_secret: callbackSecret, callback_url: baseUrl } });
   // main_1
   if (mainWebhookUrl) for (const st of subTasks) allJobs.push({ webhook_type: 'main_1', sub_task_id: st.sub_task_id, url: mainWebhookUrl,
     data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: detail.reference_image,
@@ -709,6 +721,7 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
   }
   const detail = await shopeeGetProduct(env, taskId);
   if (!detail) return error('商品不存在', 404);
+  if (detail.status !== 'pending') return error('只能推送等待中的任务', 400);
   const rawDetailCount = parseInt(detail.detail_image_count);
   const detailCount = Math.min(Math.max(Number.isNaN(rawDetailCount) ? 0 : rawDetailCount, 0), 9);
   const requiredShopeeWebhooks = [
@@ -722,6 +735,8 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
   const missingShopeeWebhooks = requiredShopeeWebhooks.filter(([key]) => !config[key]).map(([, label]) => label);
   if (missingShopeeWebhooks.length)
     return error('请先在系统配置页配置 Shopee 必需工作流 Webhook: ' + missingShopeeWebhooks.join('、'), 400);
+
+  await resetGeneratedTaskArtifacts(env, taskId, 'shopee');
 
   const callbackSecret = config.callback_secret || '';
   const baseUrl = new URL(request.url).origin + '/api/callback';
@@ -753,11 +768,11 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
   // title
   if (config.n8n_title_webhook) allJobs.push({ webhook_type: 'title', sub_task_id: subTasks[0]?.sub_task_id || '', url: config.n8n_title_webhook,
     data: { task_id: taskId, name: detail.name, reference_title: detail.reference_title || detail.name || '', description: detail.description || '',
-      sub_task_count: generateCount, callback_secret: callbackSecret, callback_url: baseUrl } });
+      sub_task_count: generateCount, sub_tasks: subTasks, callback_secret: callbackSecret, callback_url: baseUrl } });
   // sku_title
   if (config.n8n_sku_title_webhook) allJobs.push({ webhook_type: 'sku_title', sub_task_id: subTasks[0]?.sub_task_id || '', url: config.n8n_sku_title_webhook,
     data: { task_id: taskId, name: detail.name, reference_title: detail.reference_title || detail.name || '', description: detail.description || '',
-      sub_task_count: generateCount, variants: variantCombos.map(v => ({ id: v.id, name: v.option1 || '', option2: v.option2 || '' })),
+      sub_task_count: generateCount, sub_tasks: subTasks, variants: variantCombos.map(v => ({ id: v.id, name: v.option1 || '', option2: v.option2 || '' })),
       callback_secret: callbackSecret, callback_url: baseUrl } });
   // main_1
   if (config.n8n_main_webhook) for (const st of subTasks) allJobs.push({ webhook_type: 'main_1', sub_task_id: st.sub_task_id, url: config.n8n_main_webhook,
