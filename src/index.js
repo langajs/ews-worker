@@ -4,7 +4,7 @@ import { PhotonImage, SamplingFilter, crop, resize } from '@cf-wasm/photon/worke
 import {
   query, getOne, getConfig, updateConfig, getPlatformConfig,
   createUser, getUserByUsername, getUserList, updateUserPassword,
-  toggleUserActive, updateUserPlatformAccess, updateUserWebhook, getUserCredits, updateUserCredits,
+  toggleUserActive, deleteUser, updateUserPlatformAccess, updateUserWebhook, getUserCredits, updateUserCredits,
   createTaskIndex, updateTaskIndexStatus, getTaskIndex, getTaskList, deleteTaskIndex,
   jstCreateTask, jstUpdateTask, jstGetTask, jstUpdateTaskStatus,
   jstCreateVariant, jstClearVariants,
@@ -218,6 +218,10 @@ export default {
         return requireAuth(request, env, () => handleUpdateUserWebhook(request, env, path));
       if (path.match(/^\/api\/users\/[^\/]+\/credits$/) && method === 'PUT')
         return requireAuth(request, env, () => handleUpdateUserCredits(request, env, path));
+      if (path.match(/^\/api\/users\/[^\/]+\/reset-password$/) && method === 'PUT')
+        return requireAuth(request, env, () => handleResetUserPassword(request, env, path));
+      if (path.match(/^\/api\/users\/[^\/]+$/) && method === 'DELETE')
+        return requireAuth(request, env, () => handleDeleteUser(request, env, path));
 
       // --- R2 ---
       if (path.startsWith('/r2/')) return handleR2File(path, env);
@@ -407,6 +411,26 @@ async function handleUpdateUserCredits(request, env, path) {
   if (!user) return error('用户不存在', 404);
   await updateUserCredits(env, userId, amount, action);
   return json({ success: true, credits: await getUserCredits(env, userId), message: '算力已更新' });
+}
+
+async function handleResetUserPassword(request, env, path) {
+  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  const userId = path.split('/')[3];
+  const user = await getUserByUsername(env, userId);
+  if (!user) return error('用户不存在', 404);
+  const defaultHash = await hashPassword('user123');
+  await updateUserPassword(env, user.id, defaultHash);
+  return json({ success: true, message: `用户 ${user.username} 密码已重置为 user123` });
+}
+
+async function handleDeleteUser(request, env, path) {
+  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  const userId = path.split('/')[3];
+  if (userId === 'admin' || userId === request.auth.username) return error('不能删除管理员或当前登录用户', 400);
+  const user = await getUserByUsername(env, userId);
+  if (!user) return error('用户不存在', 404);
+  await deleteUser(env, user.id);
+  return json({ success: true, message: `用户 ${user.username} 已删除` });
 }
 
 // ========== 任务路由分发 ==========
