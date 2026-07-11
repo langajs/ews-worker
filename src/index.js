@@ -697,23 +697,24 @@ async function jstHandlePush(env, taskId, ctx, request) {
   await resetGeneratedTaskArtifacts(env, taskId, 'jst');
 
   const generateCount = detail.generate_count || 1;
-  const variantCount = detail.variants?.length || 1;
+  const variantCount = detail.variants?.length || 0;
   const subTaskIds = [];
   for (let i = 0; i < generateCount; i++) {
     const subId = uuid(); subTaskIds.push(subId);
     await jstCreateSubTask(env, { id: subId, parent_task_id: taskId, set_index: i });
-    await jstCreateExpectedImages(env, taskId, subId, i, variantCount, detail.mode || 'full', mainImageCount, detailImageCount);
+    await jstCreateExpectedImages(env, taskId, subId, i, variantCount, detail.mode || 'full', mainImageCount, detailImageCount,
+      !!mainWebhookUrl, !!subImageWebhookUrl, !!detailWebhookUrl, !!config.n8n_sku_image_webhook);
   }
   await jstUpdateTaskStatus(env, taskId, 'processing');
   const subTasks = subTaskIds.map((id, i) => ({ sub_task_id: id, set_index: i, style_code: id.slice(0, 8) }));
   const allJobs = [];
 
   // title
-  allJobs.push({ webhook_type: 'title', sub_task_id: subTasks[0]?.sub_task_id || "", url: config.n8n_title_webhook,
+  if (config.n8n_title_webhook) allJobs.push({ webhook_type: 'title', sub_task_id: subTasks[0]?.sub_task_id || "", url: config.n8n_title_webhook,
     data: { task_id: taskId, name: detail.name, reference_title: detail.topic_items || '', description: detail.description || '',
       sub_task_count: generateCount, sub_tasks: subTasks, callback_secret: callbackSecret, callback_url: baseUrl } });
   // sku_title
-  allJobs.push({ webhook_type: 'sku_title', sub_task_id: subTasks[0]?.sub_task_id || "", url: config.n8n_sku_title_webhook,
+  if (config.n8n_sku_title_webhook && variantCount > 0) allJobs.push({ webhook_type: 'sku_title', sub_task_id: subTasks[0]?.sub_task_id || "", url: config.n8n_sku_title_webhook,
     data: { task_id: taskId, name: detail.name, reference_title: detail.topic_items || '', description: detail.description || '',
       sub_task_count: generateCount, sub_tasks: subTasks, variants: (detail.variants||[]).map(v=>({id:v.id,name:v.tier1_value})), callback_secret: callbackSecret, callback_url: baseUrl } });
   // main_1
@@ -735,7 +736,7 @@ async function jstHandlePush(env, taskId, ctx, request) {
         detail_description: detail.detail_description || '', auxiliary_images: detail.auxiliary_images || '', image_type: 'detail', image_position: pos, callback_secret: callbackSecret, callback_url: baseUrl } });
   }
   // sku
-  for (const st of subTasks) {
+  if (config.n8n_sku_image_webhook) for (const st of subTasks) {
     if ((detail.mode||'full') === 'dedup' && st.set_index > 0) continue;
     for (let v = 0; v < (detail.variants||[]).length; v++) {
       allJobs.push({ webhook_type: 'sku_' + (v+1), sub_task_id: st.sub_task_id, url: config.n8n_sku_image_webhook,
@@ -887,6 +888,7 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
 
 async function shopeeReleaseTaskQueue(env, taskId, ctx) {
   try {
+    await ensurePushPlanRuntimeColumns(env);
     const config = await getConfig(env, 'shopee');
     const batchSize = parseInt(config.push_batch_size) || 20;
     const release = await getPushReleaseWindow(env, 'ews_shopee_push_plans', taskId, batchSize);
@@ -923,7 +925,12 @@ async function pushToWebhook(url, data) {
 }
 
 async function markPushPlanFailed(env, planTable, planId, message) {
-  await env.DB.prepare(`UPDATE ${planTable} SET status='failed', retry_count=3, error=? WHERE id=?`).bind(message || '推送失败', planId).run();
+  await ensurePushPlanRuntimeColumns(env);
+  const safeTable = normalizePushPlanTable(planTable);
+  const plan = await getOne(env, `SELECT task_id FROM ${safeTable} WHERE id=?`, [planId]);
+  const result = await env.DB.prepare(`UPDATE ${safeTable} SET status='failed', retry_count=3, error=?, processing_at='', updated_at=datetime('now') WHERE id=?`)
+    .bind(message || '推送失败', planId).run();
+  if (d1Changes(result) > 0 && plan?.task_id) await failTaskForPushPlan(env, safeTable, plan.task_id, message || '推送失败');
 }
 
 async function refundTaskCredit(env, taskId) {
@@ -937,13 +944,15 @@ async function getGlobalPushMaxActive(env) {
 }
 
 async function getGlobalPushActiveCount(env) {
+  await ensurePushPlanRuntimeColumns(env);
   const jst = await getOne(env, "SELECT COUNT(*) as cnt FROM ews_jst_push_plans WHERE status='processing'");
   const shopee = await getOne(env, "SELECT COUNT(*) as cnt FROM ews_shopee_push_plans WHERE status='processing'");
   return (jst?.cnt || 0) + (shopee?.cnt || 0);
 }
 
 async function getPushReleaseWindow(env, planTable, taskId, taskBatchSize) {
-  const safeTable = planTable === 'ews_jst_push_plans' ? 'ews_jst_push_plans' : 'ews_shopee_push_plans';
+  await ensurePushPlanRuntimeColumns(env);
+  const safeTable = normalizePushPlanTable(planTable);
   const globalMax = await getGlobalPushMaxActive(env);
   const taskActive = await getOne(env, `SELECT COUNT(*) as cnt FROM ${safeTable} WHERE task_id=? AND status='processing'`, [taskId]);
   const globalActive = await getGlobalPushActiveCount(env);
@@ -951,9 +960,10 @@ async function getPushReleaseWindow(env, planTable, taskId, taskBatchSize) {
 }
 
 async function claimPushPlan(env, planTable, planId, taskId, taskBatchSize, globalMaxActive) {
-  const safeTable = planTable === 'ews_jst_push_plans' ? 'ews_jst_push_plans' : 'ews_shopee_push_plans';
+  await ensurePushPlanRuntimeColumns(env);
+  const safeTable = normalizePushPlanTable(planTable);
   const claim = await env.DB.prepare(`UPDATE ${safeTable}
-    SET status='processing', error=''
+    SET status='processing', error='', processing_at=datetime('now'), updated_at=datetime('now')
     WHERE id=? AND task_id=? AND status='pending'
       AND (SELECT COUNT(*) FROM ${safeTable} WHERE task_id=? AND status='processing') < ?
       AND ((SELECT COUNT(*) FROM ews_jst_push_plans WHERE status='processing')
@@ -973,6 +983,7 @@ async function dispatchPushPlan(env, planTable, taskId, plan) {
 
 async function jstReleaseTaskQueue(env, taskId, ctx) {
   try {
+    await ensurePushPlanRuntimeColumns(env);
     const config = await getConfig(env, 'jst');
     const batchSize = parseInt(config.push_batch_size) || 20;
     const release = await getPushReleaseWindow(env, 'ews_jst_push_plans', taskId, batchSize);
@@ -1003,9 +1014,11 @@ async function jstReleaseTaskQueue(env, taskId, ctx) {
 
 async function processPendingQueue(env, ctx) {
   try {
+    await ensurePushPlanRuntimeColumns(env);
+    await recoverStalePushPlans(env);
     await processCallbackQueue(env, ctx);
     await processImageQueue(env, ctx);
-    const jstRows = await query(env, "SELECT DISTINCT p.task_id FROM ews_jst_push_plans p LEFT JOIN ews_jst_tasks t ON t.id = p.task_id WHERE p.status='pending' AND COALESCE(t.queue_mode, 'auto') != 'manual'");
+    const jstRows = await query(env, "SELECT DISTINCT p.task_id FROM ews_jst_push_plans p LEFT JOIN ews_jst_tasks t ON t.id = p.task_id WHERE p.status='pending' AND t.status='processing' AND COALESCE(t.queue_mode, 'auto') != 'manual'");
     for (const row of (jstRows?.results || [])) ctx.waitUntil(jstReleaseTaskQueue(env, row.task_id, ctx));
     const shopeeRows = await query(env, "SELECT DISTINCT p.task_id FROM ews_shopee_push_plans p LEFT JOIN ews_tasks t ON t.id = p.task_id WHERE p.status='pending' AND t.status='processing'");
     for (const row of (shopeeRows?.results || [])) ctx.waitUntil(shopeeReleaseTaskQueue(env, row.task_id, ctx));
@@ -1022,8 +1035,11 @@ const IMAGE_QUEUE_MAX_ACTIVE = 3;
 const IMAGE_QUEUE_MAX_ATTEMPTS = 5;
 const DEFAULT_GLOBAL_PUSH_MAX_ACTIVE = 20;
 const MAX_GLOBAL_PUSH_MAX_ACTIVE = 200;
+const DEFAULT_PUSH_PLAN_TIMEOUT_MINUTES = 30;
+const MAX_PUSH_PLAN_TIMEOUT_MINUTES = 1440;
 let callbackQueueReady = false;
 let imageQueueReady = false;
+let pushPlanColumnsReady = false;
 
 function parseQueueLimit(value, fallback, max) {
   const n = parseInt(value);
@@ -1038,6 +1054,76 @@ function d1Changes(result) {
   if (meta.changed_db === true) return 1;
   if (meta.changed_db === false) return 0;
   return result?.success === true ? 1 : 0;
+}
+
+function normalizePushPlanTable(planTable) {
+  if (planTable === 'ews_jst_push_plans' || planTable === 'ews_shopee_push_plans') return planTable;
+  throw new Error('Invalid push plan table');
+}
+
+function pushPlanPlatform(planTable) {
+  return normalizePushPlanTable(planTable) === 'ews_jst_push_plans' ? 'jst' : 'shopee';
+}
+
+function parsePushPlanTimeoutMinutes(value) {
+  const n = parseInt(value);
+  if (Number.isNaN(n)) return DEFAULT_PUSH_PLAN_TIMEOUT_MINUTES;
+  return Math.min(Math.max(n, 5), MAX_PUSH_PLAN_TIMEOUT_MINUTES);
+}
+
+async function getPushPlanTimeoutMinutes(env) {
+  const config = await getConfig(env);
+  return parsePushPlanTimeoutMinutes(config.push_plan_timeout_minutes);
+}
+
+async function ensurePushPlanRuntimeColumns(env) {
+  if (pushPlanColumnsReady) return;
+  for (const table of ['ews_jst_push_plans', 'ews_shopee_push_plans']) {
+    const indexName = table === 'ews_jst_push_plans' ? 'idx_jst_plans_processing' : 'idx_shopee_plans_processing';
+    try { await env.DB.prepare(`ALTER TABLE ${table} ADD COLUMN processing_at TEXT NOT NULL DEFAULT ''`).run(); } catch (_) {}
+    try { await env.DB.prepare(`ALTER TABLE ${table} ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''`).run(); } catch (_) {}
+    try { await env.DB.prepare(`CREATE INDEX IF NOT EXISTS ${indexName} ON ${table}(status, processing_at)`).run(); } catch (_) {}
+    await env.DB.prepare(`UPDATE ${table}
+      SET processing_at=datetime('now'), updated_at=datetime('now')
+      WHERE status='processing' AND (processing_at IS NULL OR processing_at='')`).run();
+    await env.DB.prepare(`UPDATE ${table}
+      SET updated_at=COALESCE(NULLIF(updated_at, ''), created_at, datetime('now'))
+      WHERE updated_at IS NULL OR updated_at=''`).run();
+  }
+  pushPlanColumnsReady = true;
+}
+
+async function failTaskForPushPlan(env, planTable, taskId, message) {
+  const platform = pushPlanPlatform(planTable);
+  if (platform === 'jst') {
+    await env.DB.prepare("UPDATE ews_jst_tasks SET status='failed', updated_at=datetime('now') WHERE id=?").bind(taskId).run();
+  } else {
+    await env.DB.prepare("UPDATE ews_shopee_products SET status='failed', updated_at=datetime('now') WHERE id=?").bind(taskId).run();
+  }
+  await updateTaskIndexStatus(env, taskId, 'failed');
+  console.error('push plan task failed:', taskId, message || 'push plan failed');
+}
+
+async function recoverStalePushPlans(env) {
+  await ensurePushPlanRuntimeColumns(env);
+  const timeoutMinutes = await getPushPlanTimeoutMinutes(env);
+  const staleModifier = `-${timeoutMinutes} minutes`;
+  for (const table of ['ews_jst_push_plans', 'ews_shopee_push_plans']) {
+    const rows = await query(env, `SELECT id, task_id FROM ${table}
+      WHERE status='processing' AND processing_at < datetime('now', ?)
+      ORDER BY processing_at ASC LIMIT 50`, [staleModifier]);
+    for (const row of (rows?.results || [])) {
+      const message = `Push plan timed out after ${timeoutMinutes} minutes without callback`;
+      const result = await env.DB.prepare(`UPDATE ${table}
+        SET status='failed', retry_count=3, error=?, processing_at='', updated_at=datetime('now')
+        WHERE id=? AND status='processing' AND processing_at < datetime('now', ?)`)
+        .bind(message, row.id, staleModifier).run();
+      if (d1Changes(result) > 0) {
+        await refundTaskCredit(env, row.task_id);
+        await failTaskForPushPlan(env, table, row.task_id, message);
+      }
+    }
+  }
 }
 
 function callbackPermanentError(message) {
@@ -1225,6 +1311,7 @@ async function processImageQueuePayload(env, ctx, row) {
   const checkParentCompletion = isShopee ? shopeeCheckParentCompletion : jstCheckParentCompletion;
   const refundCredits = isShopee ? shopeeRefundCredits : jstRefundCredits;
   const planTable = isShopee ? 'ews_shopee_push_plans' : 'ews_jst_push_plans';
+  await ensurePushPlanRuntimeColumns(env);
   const sub_task_id = row.sub_task_id || '';
   const image_type = row.image_type;
   const image_position = parseInt(row.image_position) || 1;
@@ -1232,18 +1319,18 @@ async function processImageQueuePayload(env, ctx, row) {
   const result = row.image_url ? await processOneImage(env, idx.platform, task_id, sub_task_id, row.set_index ?? 0, image_type, image_position, row.image_url, publicUrl) : null;
 
   if (result) {
-    await env.DB.prepare(`UPDATE ${planTable} SET status='done' WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`)
+    await env.DB.prepare(`UPDATE ${planTable} SET status='done', updated_at=datetime('now') WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`)
       .bind(task_id, sub_task_id, whType).run();
   } else {
     const planInfo = await env.DB.prepare(`SELECT id, webhook_url, payload, retry_count FROM ${planTable} WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`)
       .bind(task_id, sub_task_id, whType).first();
     if (planInfo && planInfo.webhook_url && (planInfo.retry_count||0) < 3) {
       const newCount = (planInfo.retry_count||0) + 1;
-      await env.DB.prepare(`UPDATE ${planTable} SET status='processing', retry_count=?, error=? WHERE id=?`).bind(newCount, `${row.error_message || '下载失败'}，重试第${newCount}次`, planInfo.id).run();
+      await env.DB.prepare(`UPDATE ${planTable} SET status='processing', retry_count=?, error=?, processing_at=datetime('now'), updated_at=datetime('now') WHERE id=?`).bind(newCount, `${row.error_message || '下载失败'}，重试第${newCount}次`, planInfo.id).run();
       ctx.waitUntil(dispatchPushPlan(env, planTable, task_id, planInfo));
     } else {
       const reason = planInfo?.retry_count >= 3 ? '已重试3次失败' : (row.error_message || '下载失败');
-      await env.DB.prepare(`UPDATE ${planTable} SET status='failed', error=? WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`).bind(reason, task_id, sub_task_id, whType).run();
+      await env.DB.prepare(`UPDATE ${planTable} SET status='failed', retry_count=3, error=?, processing_at='', updated_at=datetime('now') WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`).bind(reason, task_id, sub_task_id, whType).run();
       if (planInfo?.retry_count >= 3) await refundCredits(env, task_id);
     }
   }
@@ -1283,6 +1370,7 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
   const checkSubTaskImages = isShopee ? shopeeCheckSubTaskImages : jstCheckSubTaskImages;
   const checkParentCompletion = isShopee ? shopeeCheckParentCompletion : jstCheckParentCompletion;
   const refundCredits = isShopee ? shopeeRefundCredits : jstRefundCredits;
+  await ensurePushPlanRuntimeColumns(env);
 
   // 标题回调
   if (titles && Array.isArray(titles)) {
@@ -1296,7 +1384,7 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
   }
   if (titles || product_title) {
     const PP = idx.platform === 'jst' ? 'ews_jst_' : 'ews_shopee_';
-    await env.DB.prepare(`UPDATE ${PP}push_plans SET status='done' WHERE task_id=? AND webhook_type='title' AND status='processing'`).bind(task_id).run();
+    await env.DB.prepare(`UPDATE ${PP}push_plans SET status='done', updated_at=datetime('now') WHERE task_id=? AND webhook_type='title' AND status='processing'`).bind(task_id).run();
   }
 
   // SKU 标题回调
@@ -1315,7 +1403,7 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
           if (title) await shopeeCreateSkuTitle(env, { id: uuid(), sub_task_id: allSubs[si].id, variation_id: variants[vi].id, title: title.slice(0, 20) });
         }
       }
-      await env.DB.prepare("UPDATE ews_shopee_push_plans SET status='done' WHERE task_id=? AND webhook_type='sku_title' AND status='processing'").bind(task_id).run();
+      await env.DB.prepare("UPDATE ews_shopee_push_plans SET status='done', updated_at=datetime('now') WHERE task_id=? AND webhook_type='sku_title' AND status='processing'").bind(task_id).run();
     } else {
       const skuDetail = await jstGetTask(env, task_id);
       const variants = (skuDetail?.variants || []).sort((a,b) => a.sort_order - b.sort_order);
@@ -1330,7 +1418,7 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
           if (title) await jstCreateSkuTitle(env, { id: uuid(), sub_task_id: allSubs[si].id, variant_id: variants[vi].id, title: title.slice(0, 30) });
         }
       }
-      await env.DB.prepare("UPDATE ews_jst_push_plans SET status='done' WHERE task_id=? AND webhook_type='sku_title' AND status='processing'").bind(task_id).run();
+      await env.DB.prepare("UPDATE ews_jst_push_plans SET status='done', updated_at=datetime('now') WHERE task_id=? AND webhook_type='sku_title' AND status='processing'").bind(task_id).run();
     }
   }
 
@@ -1475,6 +1563,7 @@ async function handleRetryPlan(env, path, request, ctx) {
   const idx = await getTaskIndex(env, taskId);
   if (!idx) return error('任务不存在', 404);
   const plansTable = idx.platform === 'jst' ? 'ews_jst_push_plans' : 'ews_shopee_push_plans';
+  await ensurePushPlanRuntimeColumns(env);
   const plan = await getOne(env, `SELECT * FROM ${plansTable} WHERE id=?`, [planId]);
   if (!plan) return error('计划不存在', 404);
   const globalMax = await getGlobalPushMaxActive(env);
@@ -1484,10 +1573,11 @@ async function handleRetryPlan(env, path, request, ctx) {
     if ((await getUserCredits(env, taskOwner.user_id)) <= 0) return error('算力不足', 400);
     await updateUserCredits(env, taskOwner.user_id, 1, 'subtract');
   }
-  await env.DB.prepare(`UPDATE ${plansTable} SET status='processing', retry_count=0 WHERE id=?`).bind(planId).run();
+  await env.DB.prepare(`UPDATE ${plansTable} SET status='processing', retry_count=0, error='', processing_at=datetime('now'), updated_at=datetime('now') WHERE id=?`).bind(planId).run();
   try { await pushToWebhook(plan.webhook_url, JSON.parse(plan.payload)); return json({ success: true, message: '计划已重新推送' }); }
   catch (err) {
-    await env.DB.prepare(`UPDATE ${plansTable} SET status='failed', error=? WHERE id=?`).bind(err.message, planId).run();
+    await env.DB.prepare(`UPDATE ${plansTable} SET status='failed', retry_count=3, error=?, processing_at='', updated_at=datetime('now') WHERE id=?`).bind(err.message, planId).run();
+    await failTaskForPushPlan(env, plansTable, taskId, err.message);
     if (taskOwner?.user_id) await updateUserCredits(env, taskOwner.user_id, 1, 'add');
     return error('推送失败: ' + err.message, 500);
   }

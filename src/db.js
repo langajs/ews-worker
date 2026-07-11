@@ -110,20 +110,27 @@ async function jstDeleteSubTasks(env, tid) { await env.DB.prepare("DELETE FROM e
 async function jstCreateSkuTitle(env, s) { await env.DB.prepare("INSERT OR IGNORE INTO ews_jst_sku_titles (id, sub_task_id, variant_id, title, created_at) VALUES (?, ?, ?, ?, datetime('now'))").bind(s.id, s.sub_task_id, s.variant_id, s.title).run(); }
 async function jstSaveImage(env, img) { var pk = img.sub_task_id + '_' + img.image_type + '_' + img.position + '_' + (img.variant_id || ''); await env.DB.prepare("INSERT OR REPLACE INTO ews_jst_task_images (id, parent_task_id, sub_task_id, variant_id, set_index, image_type, position, image_url, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completed', datetime('now'))").bind(pk, img.parent_task_id, img.sub_task_id, img.variant_id, img.set_index, img.image_type, img.position, img.image_url).run(); }
 async function jstClearImages(env, tid) { await env.DB.prepare("DELETE FROM ews_jst_task_images WHERE parent_task_id = ?").bind(tid).run(); }
-async function jstCreateExpectedImages(env, tid, sid, si, vc, mode, mic, dic) {
+async function jstCreateExpectedImages(env, tid, sid, si, vc, mode, mic, dic, includeMain = true, includeSub = true, includeDetail = true, includeSku = true) {
   mic = mic || 5; dic = dic || 5;
   var types = [];
-  if (mode === 'dedup' && si > 0) { types.push({ type: 'main', pos: 1 }); }
+  if (mode === 'dedup' && si > 0) {
+    if (includeMain) types.push({ type: 'main', pos: 1 });
+  }
   else {
-    types.push({ type: 'main', pos: 1 });
-    for (let p = 2; p <= mic; p++) types.push({ type: 'sub', pos: p });
-    for (let p = 1; p <= dic; p++) types.push({ type: 'detail', pos: p });
-    for (let v = 0; v < vc; v++) types.push({ type: 'sku', pos: v + 1 });
+    if (includeMain) types.push({ type: 'main', pos: 1 });
+    if (includeSub) for (let p = 2; p <= mic; p++) types.push({ type: 'sub', pos: p });
+    if (includeDetail) for (let p = 1; p <= dic; p++) types.push({ type: 'detail', pos: p });
+    if (includeSku) for (let v = 0; v < vc; v++) types.push({ type: 'sku', pos: v + 1 });
   }
   for (const t of types) { var pk = sid + '_' + t.type + '_' + t.pos + '_'; await env.DB.prepare("INSERT OR IGNORE INTO ews_jst_task_images (id, parent_task_id, sub_task_id, variant_id, set_index, image_type, position, image_url, status, created_at) VALUES (?, ?, ?, NULL, ?, ?, ?, '', 'pending', datetime('now'))").bind(pk, tid, sid, si, t.type, t.pos).run(); }
 }
 async function jstCheckSubTaskImages(env, sid) { var r = await getOne(env, "SELECT COUNT(*) as total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as done FROM ews_jst_task_images WHERE sub_task_id = ?", [sid]); return { total: r?.total || 0, completed: r?.done || 0 }; }
-async function jstCheckParentCompletion(env, tid) { var r = await getOne(env, "SELECT COUNT(*) as total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as done FROM ews_jst_sub_tasks WHERE parent_task_id = ?", [tid]); if (r && r.total > 0 && r.total === r.done) { await env.DB.prepare("UPDATE ews_jst_tasks SET status='completed', updated_at=datetime('now') WHERE id=?").bind(tid).run(); await updateTaskIndexStatus(env, tid, 'completed'); } }
+async function jstCheckParentCompletion(env, tid) {
+  var p = await getOne(env, "SELECT SUM(CASE WHEN status IN ('pending','processing') THEN 1 ELSE 0 END) as active, SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed FROM ews_jst_push_plans WHERE task_id = ?", [tid]);
+  if ((p?.failed || 0) > 0) { await env.DB.prepare("UPDATE ews_jst_tasks SET status='failed', updated_at=datetime('now') WHERE id=?").bind(tid).run(); await updateTaskIndexStatus(env, tid, 'failed'); return; }
+  var r = await getOne(env, "SELECT COUNT(*) as total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as done FROM ews_jst_sub_tasks WHERE parent_task_id = ?", [tid]);
+  if (r && r.total > 0 && r.total === r.done && (p?.active || 0) === 0) { await env.DB.prepare("UPDATE ews_jst_tasks SET status='completed', updated_at=datetime('now') WHERE id=?").bind(tid).run(); await updateTaskIndexStatus(env, tid, 'completed'); }
+}
 async function jstDeleteTaskRecord(env, tid) { await env.DB.prepare("DELETE FROM ews_jst_tasks WHERE id = ?").bind(tid).run(); }
 async function jstCreatePushPlans(env, plans) { var s = env.DB.prepare("INSERT INTO ews_jst_push_plans (id, task_id, sub_task_id, webhook_type, webhook_url, payload, status, batch_order, retry_count, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 0, datetime('now'))"); for (const p of plans) await s.bind(p.id, p.task_id, p.sub_task_id, p.webhook_type, p.webhook_url, p.payload, p.batch_order).run(); }
 async function jstGetPushPlans(env, tid) { return await query(env, "SELECT * FROM ews_jst_push_plans WHERE task_id = ? ORDER BY batch_order ASC, webhook_type ASC", [tid]); }
@@ -185,7 +192,12 @@ async function shopeeCreateExpectedImages(env, tid, sid, si, mic, dic, skuCount,
 async function shopeeCheckSubTaskImages(env, sid) { var r = await getOne(env, "SELECT COUNT(*) as total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as done FROM ews_shopee_task_images WHERE sub_task_id = ?", [sid]); return { total: r?.total || 0, completed: r?.done || 0 }; }
 async function shopeeCreateSkuTitle(env, s) { await ensureShopeeProductColumns(env); await env.DB.prepare("INSERT OR REPLACE INTO ews_shopee_sku_titles (id, sub_task_id, variation_id, title, created_at) VALUES (?, ?, ?, ?, datetime('now'))").bind(s.id, s.sub_task_id, s.variation_id, s.title).run(); }
 async function shopeeSaveImage(env, img) { var pk = img.sub_task_id + '_' + img.image_type + '_' + img.position + '_'; await env.DB.prepare("INSERT OR REPLACE INTO ews_shopee_task_images (id, parent_task_id, sub_task_id, set_index, image_type, position, image_url, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', datetime('now'))").bind(pk, img.parent_task_id, img.sub_task_id, img.set_index, img.image_type, img.position, img.image_url).run(); }
-async function shopeeCheckParentCompletion(env, tid) { var r = await getOne(env, "SELECT COUNT(*) as total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as done FROM ews_shopee_sub_tasks WHERE parent_task_id = ?", [tid]); var p = await getOne(env, "SELECT COUNT(*) as active FROM ews_shopee_push_plans WHERE task_id = ? AND status IN ('pending','processing')", [tid]); if (r && r.total > 0 && r.total === r.done && (p?.active || 0) === 0) { await env.DB.prepare("UPDATE ews_shopee_products SET status='completed', updated_at=datetime('now') WHERE id=?").bind(tid).run(); await updateTaskIndexStatus(env, tid, 'completed'); } }
+async function shopeeCheckParentCompletion(env, tid) {
+  var p = await getOne(env, "SELECT SUM(CASE WHEN status IN ('pending','processing') THEN 1 ELSE 0 END) as active, SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed FROM ews_shopee_push_plans WHERE task_id = ?", [tid]);
+  if ((p?.failed || 0) > 0) { await env.DB.prepare("UPDATE ews_shopee_products SET status='failed', updated_at=datetime('now') WHERE id=?").bind(tid).run(); await updateTaskIndexStatus(env, tid, 'failed'); return; }
+  var r = await getOne(env, "SELECT COUNT(*) as total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as done FROM ews_shopee_sub_tasks WHERE parent_task_id = ?", [tid]);
+  if (r && r.total > 0 && r.total === r.done && (p?.active || 0) === 0) { await env.DB.prepare("UPDATE ews_shopee_products SET status='completed', updated_at=datetime('now') WHERE id=?").bind(tid).run(); await updateTaskIndexStatus(env, tid, 'completed'); }
+}
 async function shopeeRefundCredits(env, tid) { var t = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id = ?", [tid]); if (t?.user_id) await env.DB.prepare("UPDATE ews_users SET credits = credits + 1 WHERE id = ?").bind(t.user_id).run(); }
 
 // -- Shopee 推送计划

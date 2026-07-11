@@ -205,10 +205,13 @@ CREATE TABLE IF NOT EXISTS ews_jst_push_plans (
   error TEXT DEFAULT '',
   batch_order INTEGER NOT NULL DEFAULT 0,
   retry_count INTEGER NOT NULL DEFAULT 0,
+  processing_at TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   FOREIGN KEY (task_id) REFERENCES ews_jst_tasks(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_jst_plans_status ON ews_jst_push_plans(task_id, status);
+CREATE INDEX IF NOT EXISTS idx_jst_plans_processing ON ews_jst_push_plans(status, processing_at);
 
 -- JST 导出记录
 CREATE TABLE IF NOT EXISTS ews_jst_export_records (
@@ -335,10 +338,13 @@ CREATE TABLE IF NOT EXISTS ews_shopee_push_plans (
   error TEXT DEFAULT '',
   batch_order INTEGER NOT NULL DEFAULT 0,
   retry_count INTEGER NOT NULL DEFAULT 0,
+  processing_at TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   FOREIGN KEY (task_id) REFERENCES ews_tasks(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_shopee_plans_status ON ews_shopee_push_plans(task_id, status);
+CREATE INDEX IF NOT EXISTS idx_shopee_plans_processing ON ews_shopee_push_plans(status, processing_at);
 
 -- Shopee 导出记录
 CREATE TABLE IF NOT EXISTS ews_shopee_export_records (
