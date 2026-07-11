@@ -1603,8 +1603,8 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
 
 const SHOPEE_ITEM_IMAGE_LIMIT_BYTES = 2 * 1024 * 1024;
 const SHOPEE_ITEM_IMAGE_MAX_SIDE = 1200;
-const SHOPEE_JPEG_QUALITIES = [90, 86, 82, 78, 74, 70, 66, 62, 58, 54, 50];
-const SHOPEE_FALLBACK_SIDES = [1100, 1000, 900, 800, 700, 600];
+const SHOPEE_FAST_JPEG_QUALITY = 88;
+const SHOPEE_RETRY_JPEG_QUALITY = 82;
 const IMAGE_FETCH_TIMEOUT_MS = 30000;
 
 function isShopeeItemImage(platform, imageType) {
@@ -1627,7 +1627,7 @@ function canReuseShopeeItemImage(buffer, contentType) {
     input = PhotonImage.new_from_byteslice(new Uint8Array(buffer));
     const width = input.get_width();
     const height = input.get_height();
-    return width > 0 && width === height && width <= SHOPEE_ITEM_IMAGE_MAX_SIDE;
+    return width > 0 && width === height;
   } catch (_) {
     return false;
   } finally {
@@ -1645,26 +1645,17 @@ async function fetchImageWithTimeout(imageUrl) {
   }
 }
 
-function candidateShopeeSides(side) {
-  const first = Math.min(side, SHOPEE_ITEM_IMAGE_MAX_SIDE);
-  const sides = [first, ...SHOPEE_FALLBACK_SIDES.filter(s => s < first)];
-  return [...new Set(sides)].filter(s => s > 0);
-}
-
-function encodeShopeeJpegUnderLimit(image) {
-  let best = null;
-  for (const quality of SHOPEE_JPEG_QUALITIES) {
-    const bytes = image.get_bytes_jpeg(quality);
-    if (!best || bytes.byteLength < best.byteLength) best = bytes;
-    if (bytes.byteLength <= SHOPEE_ITEM_IMAGE_LIMIT_BYTES) return bytes;
-  }
-  return best;
+function encodeShopeeJpegFast(image) {
+  const primary = image.get_bytes_jpeg(SHOPEE_FAST_JPEG_QUALITY);
+  if (primary.byteLength <= SHOPEE_ITEM_IMAGE_LIMIT_BYTES) return primary;
+  const retry = image.get_bytes_jpeg(SHOPEE_RETRY_JPEG_QUALITY);
+  return retry.byteLength < primary.byteLength ? retry : primary;
 }
 
 function normalizeShopeeItemImage(buffer) {
   let input = null;
   let square = null;
-  const resizedImages = [];
+  let resized = null;
   try {
     input = PhotonImage.new_from_byteslice(new Uint8Array(buffer));
     const width = input.get_width();
@@ -1680,18 +1671,18 @@ function normalizeShopeeItemImage(buffer) {
       working = square;
     }
 
-    for (const targetSide of candidateShopeeSides(side)) {
-      let candidate = working;
-      if (working.get_width() !== targetSide || working.get_height() !== targetSide) {
-        candidate = resize(working, targetSide, targetSide, SamplingFilter.Lanczos3);
-        resizedImages.push(candidate);
-      }
-      const bytes = encodeShopeeJpegUnderLimit(candidate);
-      if (bytes && bytes.byteLength <= SHOPEE_ITEM_IMAGE_LIMIT_BYTES) return bytes;
+    const encoded = encodeShopeeJpegFast(working);
+    if (encoded.byteLength <= SHOPEE_ITEM_IMAGE_LIMIT_BYTES) return encoded;
+
+    const targetSide = Math.min(side, SHOPEE_ITEM_IMAGE_MAX_SIDE);
+    if (working.get_width() > targetSide || working.get_height() > targetSide) {
+      resized = resize(working, targetSide, targetSide, SamplingFilter.Lanczos3);
+      const resizedBytes = encodeShopeeJpegFast(resized);
+      if (resizedBytes.byteLength <= SHOPEE_ITEM_IMAGE_LIMIT_BYTES) return resizedBytes;
     }
     throw new Error('Shopee image remains above 2MB after compression');
   } finally {
-    for (const img of resizedImages) freePhotonImage(img);
+    freePhotonImage(resized);
     freePhotonImage(square);
     freePhotonImage(input);
   }
