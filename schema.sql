@@ -19,6 +19,11 @@ INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('r2_public_url',
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('admin_password', '$2a$10$EWS_DEFAULT_HASH', '');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('callback_secret', '', '');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_global_max_active', '20', '');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_primary_images_only', 'false', '');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_release_per_minute', '6', '');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_release_per_task_per_minute', '2', '');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('image_queue_max_active', '3', '');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('image_queue_batch_size', '3', '');
 
 -- JST 默认配置
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_title_webhook', '', 'jst');
