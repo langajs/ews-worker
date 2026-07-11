@@ -886,6 +886,16 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
   return json({ success: true, task_id: taskId, sub_tasks: subTasks, total_plans: planRecords.length, jobs_count: planRecords.length, message: '已创建 ' + planRecords.length + ' 个推送计划' });
 }
 
+function primaryImagePlanWhereClause(taskStatus) {
+  return taskStatus === 'partial_failed' ? " AND (webhook_type='main' OR webhook_type='main_1' OR webhook_type LIKE 'sub_%')" : '';
+}
+
+async function getPendingPlansForRelease(env, planTable, taskId, limit, taskStatus) {
+  const safeTable = normalizePushPlanTable(planTable);
+  const primaryOnly = primaryImagePlanWhereClause(taskStatus);
+  return await query(env, `SELECT * FROM ${safeTable} WHERE task_id = ? AND status='pending'${primaryOnly} ORDER BY batch_order ASC LIMIT ?`, [taskId, limit]);
+}
+
 async function shopeeReleaseTaskQueue(env, taskId, ctx) {
   try {
     await ensurePushPlanRuntimeColumns(env);
@@ -893,10 +903,10 @@ async function shopeeReleaseTaskQueue(env, taskId, ctx) {
     const batchSize = parseInt(config.push_batch_size) || 20;
     const release = await getPushReleaseWindow(env, 'ews_shopee_push_plans', taskId, batchSize);
     if (release.limit <= 0) return;
-    const pendingPlans = await shopeeGetPendingPlans(env, taskId, release.limit);
+    const taskOwner = await getOne(env, "SELECT user_id, status FROM ews_tasks WHERE id=?", [taskId]);
+    const pendingPlans = await getPendingPlansForRelease(env, 'ews_shopee_push_plans', taskId, release.limit, taskOwner?.status);
     const plans = pendingPlans?.results || [];
     if (!plans.length) return;
-    const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
     for (const plan of plans) {
       if (!plan.webhook_url) {
         await markPushPlanFailed(env, 'ews_shopee_push_plans', plan.id, 'Webhook地址未配置');
@@ -988,10 +998,10 @@ async function jstReleaseTaskQueue(env, taskId, ctx) {
     const batchSize = parseInt(config.push_batch_size) || 20;
     const release = await getPushReleaseWindow(env, 'ews_jst_push_plans', taskId, batchSize);
     if (release.limit <= 0) return;
-    const pendingPlans = await jstGetPendingPlans(env, taskId, release.limit);
+    const taskOwner = await getOne(env, "SELECT user_id, status FROM ews_tasks WHERE id=?", [taskId]);
+    const pendingPlans = await getPendingPlansForRelease(env, 'ews_jst_push_plans', taskId, release.limit, taskOwner?.status);
     const plans = pendingPlans?.results || [];
     if (!plans.length) return;
-    const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
     for (const plan of plans) {
       if (!plan.webhook_url) {
         await markPushPlanFailed(env, 'ews_jst_push_plans', plan.id, 'Webhook地址未配置');
@@ -1019,9 +1029,9 @@ async function processPendingQueue(env, ctx) {
     await reconcileOpenPushPlanTaskStatuses(env);
     await processCallbackQueue(env, ctx);
     await processImageQueue(env, ctx);
-    const jstRows = await query(env, "SELECT DISTINCT p.task_id FROM ews_jst_push_plans p LEFT JOIN ews_jst_tasks t ON t.id = p.task_id WHERE p.status='pending' AND t.status='processing' AND COALESCE(t.queue_mode, 'auto') != 'manual'");
+    const jstRows = await query(env, "SELECT DISTINCT p.task_id FROM ews_jst_push_plans p LEFT JOIN ews_jst_tasks t ON t.id = p.task_id WHERE p.status='pending' AND t.status IN ('processing','partial_failed') AND COALESCE(t.queue_mode, 'auto') != 'manual'");
     for (const row of (jstRows?.results || [])) ctx.waitUntil(jstReleaseTaskQueue(env, row.task_id, ctx));
-    const shopeeRows = await query(env, "SELECT DISTINCT p.task_id FROM ews_shopee_push_plans p LEFT JOIN ews_tasks t ON t.id = p.task_id WHERE p.status='pending' AND t.status='processing'");
+    const shopeeRows = await query(env, "SELECT DISTINCT p.task_id FROM ews_shopee_push_plans p LEFT JOIN ews_tasks t ON t.id = p.task_id WHERE p.status='pending' AND t.status IN ('processing','partial_failed')");
     for (const row of (shopeeRows?.results || [])) ctx.waitUntil(shopeeReleaseTaskQueue(env, row.task_id, ctx));
   } catch (err) { console.error('processPendingQueue error:', err.message); }
 }
@@ -1436,7 +1446,7 @@ async function processImageQueuePayload(env, ctx, row) {
 
   if (isShopee) {
     const taskInfo = await getOne(env, "SELECT status FROM ews_tasks WHERE id=?", [task_id]);
-    if (taskInfo?.status === 'processing') ctx.waitUntil(shopeeReleaseTaskQueue(env, task_id, ctx));
+    if (['processing','partial_failed'].includes(taskInfo?.status)) ctx.waitUntil(shopeeReleaseTaskQueue(env, task_id, ctx));
   } else {
     const taskInfo = await getOne(env, "SELECT queue_mode FROM ews_jst_tasks WHERE id=?", [task_id]);
     if (taskInfo?.queue_mode !== 'manual') ctx.waitUntil(jstReleaseTaskQueue(env, task_id, ctx));
@@ -1534,7 +1544,7 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
 
     if (isShopee) {
       const taskInfo = await getOne(env, "SELECT status FROM ews_tasks WHERE id=?", [task_id]);
-      if (taskInfo?.status === 'processing') ctx.waitUntil(shopeeReleaseTaskQueue(env, task_id, ctx));
+      if (['processing','partial_failed'].includes(taskInfo?.status)) ctx.waitUntil(shopeeReleaseTaskQueue(env, task_id, ctx));
     } else {
       const taskInfo = await getOne(env, "SELECT queue_mode FROM ews_jst_tasks WHERE id=?", [task_id]);
       if (taskInfo?.queue_mode !== 'manual') ctx.waitUntil(jstReleaseTaskQueue(env, task_id, ctx));
