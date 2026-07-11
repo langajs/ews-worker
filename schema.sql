@@ -214,6 +214,7 @@ CREATE TABLE IF NOT EXISTS ews_jst_push_plans (
 );
 CREATE INDEX IF NOT EXISTS idx_jst_plans_status ON ews_jst_push_plans(task_id, status);
 CREATE INDEX IF NOT EXISTS idx_jst_plans_processing ON ews_jst_push_plans(status, processing_at);
+CREATE INDEX IF NOT EXISTS idx_jst_plans_processing_at ON ews_jst_push_plans(processing_at);
 
 -- JST 导出记录
 CREATE TABLE IF NOT EXISTS ews_jst_export_records (
@@ -347,6 +348,7 @@ CREATE TABLE IF NOT EXISTS ews_shopee_push_plans (
 );
 CREATE INDEX IF NOT EXISTS idx_shopee_plans_status ON ews_shopee_push_plans(task_id, status);
 CREATE INDEX IF NOT EXISTS idx_shopee_plans_processing ON ews_shopee_push_plans(status, processing_at);
+CREATE INDEX IF NOT EXISTS idx_shopee_plans_processing_at ON ews_shopee_push_plans(processing_at);
 
 -- Shopee 导出记录
 CREATE TABLE IF NOT EXISTS ews_shopee_export_records (
