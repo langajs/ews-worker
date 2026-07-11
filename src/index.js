@@ -651,7 +651,7 @@ async function handleUpdateTaskStatus(request, env, path) {
   const taskId = getTaskId(path);
   const body = await parseBody(request);
   const { status } = body || {};
-  if (!['pending','processing','completed','failed'].includes(status)) return error('无效的状态值', 400);
+  if (!['pending','processing','completed','failed','partial_failed'].includes(status)) return error('无效的状态值', 400);
   const idx = await getTaskIndex(env, taskId);
   if (!idx) return error('任务不存在', 404);
   if (idx.platform === 'jst') await jstUpdateTaskStatus(env, taskId, status);
@@ -930,7 +930,7 @@ async function markPushPlanFailed(env, planTable, planId, message) {
   const plan = await getOne(env, `SELECT task_id FROM ${safeTable} WHERE id=?`, [planId]);
   const result = await env.DB.prepare(`UPDATE ${safeTable} SET status='failed', retry_count=3, error=?, processing_at='', updated_at=datetime('now') WHERE id=?`)
     .bind(message || '推送失败', planId).run();
-  if (d1Changes(result) > 0 && plan?.task_id) await failTaskForPushPlan(env, safeTable, plan.task_id, message || '推送失败');
+  if (d1Changes(result) > 0 && plan?.task_id) await reconcileTaskStatusForPushPlans(env, safeTable, plan.task_id, message || '推送失败');
 }
 
 async function refundTaskCredit(env, taskId) {
@@ -1016,6 +1016,7 @@ async function processPendingQueue(env, ctx) {
   try {
     await ensurePushPlanRuntimeColumns(env);
     await recoverStalePushPlans(env);
+    await reconcileOpenPushPlanTaskStatuses(env);
     await processCallbackQueue(env, ctx);
     await processImageQueue(env, ctx);
     const jstRows = await query(env, "SELECT DISTINCT p.task_id FROM ews_jst_push_plans p LEFT JOIN ews_jst_tasks t ON t.id = p.task_id WHERE p.status='pending' AND t.status='processing' AND COALESCE(t.queue_mode, 'auto') != 'manual'");
@@ -1094,14 +1095,42 @@ async function ensurePushPlanRuntimeColumns(env) {
 }
 
 async function failTaskForPushPlan(env, planTable, taskId, message) {
+  await reconcileTaskStatusForPushPlans(env, planTable, taskId, message);
+}
+
+async function setTaskStatusForPushPlan(env, planTable, taskId, status) {
   const platform = pushPlanPlatform(planTable);
   if (platform === 'jst') {
-    await env.DB.prepare("UPDATE ews_jst_tasks SET status='failed', updated_at=datetime('now') WHERE id=?").bind(taskId).run();
+    await env.DB.prepare("UPDATE ews_jst_tasks SET status=?, updated_at=datetime('now') WHERE id=?").bind(status, taskId).run();
   } else {
-    await env.DB.prepare("UPDATE ews_shopee_products SET status='failed', updated_at=datetime('now') WHERE id=?").bind(taskId).run();
+    await env.DB.prepare("UPDATE ews_shopee_products SET status=?, updated_at=datetime('now') WHERE id=?").bind(status, taskId).run();
   }
-  await updateTaskIndexStatus(env, taskId, 'failed');
-  console.error('push plan task failed:', taskId, message || 'push plan failed');
+  await updateTaskIndexStatus(env, taskId, status);
+}
+
+async function reconcileTaskStatusForPushPlans(env, planTable, taskId, message, options = {}) {
+  const safeTable = normalizePushPlanTable(planTable);
+  const stats = await getOne(env, `SELECT
+    SUM(CASE WHEN status IN ('pending','processing') THEN 1 ELSE 0 END) as active,
+    SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed
+    FROM ${safeTable} WHERE task_id=?`, [taskId]);
+  const active = stats?.active || 0;
+  const failed = stats?.failed || 0;
+  let nextStatus = '';
+  if (failed > 0) nextStatus = active > 0 ? 'partial_failed' : 'failed';
+  else if (active > 0 && options.resumeWhenNoFailures) nextStatus = 'processing';
+  if (nextStatus) await setTaskStatusForPushPlan(env, safeTable, taskId, nextStatus);
+  if (failed > 0 && message) console.error('push plan task has failed plans:', taskId, message);
+}
+
+async function reconcileOpenPushPlanTaskStatuses(env) {
+  await ensurePushPlanRuntimeColumns(env);
+  const jstRows = await query(env, `SELECT DISTINCT task_id FROM ews_jst_push_plans
+    WHERE status IN ('failed','pending','processing') LIMIT 100`);
+  for (const row of (jstRows?.results || [])) await reconcileTaskStatusForPushPlans(env, 'ews_jst_push_plans', row.task_id);
+  const shopeeRows = await query(env, `SELECT DISTINCT task_id FROM ews_shopee_push_plans
+    WHERE status IN ('failed','pending','processing') LIMIT 100`);
+  for (const row of (shopeeRows?.results || [])) await reconcileTaskStatusForPushPlans(env, 'ews_shopee_push_plans', row.task_id);
 }
 
 async function recoverStalePushPlans(env) {
@@ -1638,6 +1667,7 @@ async function handleRetryPlan(env, path, request, ctx) {
     await updateUserCredits(env, taskOwner.user_id, 1, 'subtract');
   }
   await env.DB.prepare(`UPDATE ${plansTable} SET status='processing', retry_count=0, error='', processing_at=datetime('now'), updated_at=datetime('now') WHERE id=?`).bind(planId).run();
+  await reconcileTaskStatusForPushPlans(env, plansTable, taskId, 'retry plan resumed', { resumeWhenNoFailures: true });
   try { await pushToWebhook(plan.webhook_url, JSON.parse(plan.payload)); return json({ success: true, message: '计划已重新推送' }); }
   catch (err) {
     await env.DB.prepare(`UPDATE ${plansTable} SET status='failed', retry_count=3, error=?, processing_at='', updated_at=datetime('now') WHERE id=?`).bind(err.message, planId).run();
