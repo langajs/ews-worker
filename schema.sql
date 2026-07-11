@@ -22,8 +22,8 @@ INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_global_max
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_primary_images_only', 'false', '');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_release_per_minute', '6', '');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_release_per_task_per_minute', '2', '');
-INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('image_queue_max_active', '3', '');
-INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('image_queue_batch_size', '3', '');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('image_queue_max_active', '6', '');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('image_queue_batch_size', '6', '');
 
 -- JST 默认配置
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_title_webhook', '', 'jst');

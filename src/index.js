@@ -1053,7 +1053,8 @@ async function processPendingQueue(env, ctx) {
     await recoverStalePushPlans(env);
     await reconcileOpenPushPlanTaskStatuses(env);
     await processCallbackQueue(env, ctx);
-    await processImageQueue(env, ctx);
+    if (ctx) ctx.waitUntil(processImageQueue(env, ctx));
+    else await processImageQueue(env, ctx);
     const jstRows = await query(env, "SELECT DISTINCT p.task_id FROM ews_jst_push_plans p LEFT JOIN ews_jst_tasks t ON t.id = p.task_id WHERE p.status='pending' AND t.status IN ('processing','partial_failed') AND COALESCE(t.queue_mode, 'auto') != 'manual'");
     for (const row of (jstRows?.results || [])) ctx.waitUntil(jstReleaseTaskQueue(env, row.task_id, ctx));
     const shopeeRows = await query(env, "SELECT DISTINCT p.task_id FROM ews_shopee_push_plans p LEFT JOIN ews_tasks t ON t.id = p.task_id WHERE p.status='pending' AND t.status IN ('processing','partial_failed')");
@@ -1066,8 +1067,8 @@ async function processPendingQueue(env, ctx) {
 const CALLBACK_QUEUE_BATCH_SIZE = 3;
 const CALLBACK_QUEUE_MAX_ACTIVE = 3;
 const CALLBACK_QUEUE_MAX_ATTEMPTS = 5;
-const DEFAULT_IMAGE_QUEUE_BATCH_SIZE = 3;
-const DEFAULT_IMAGE_QUEUE_MAX_ACTIVE = 3;
+const DEFAULT_IMAGE_QUEUE_BATCH_SIZE = 6;
+const DEFAULT_IMAGE_QUEUE_MAX_ACTIVE = 6;
 const MAX_IMAGE_QUEUE_BATCH_SIZE = 20;
 const MAX_IMAGE_QUEUE_MAX_ACTIVE = 20;
 const IMAGE_QUEUE_MAX_ATTEMPTS = 5;
@@ -1415,7 +1416,11 @@ async function processImageQueue(env, ctx) {
     const candidates = await query(env, `SELECT * FROM ews_image_queue
       WHERE attempts < ? AND (status='pending' OR (status='processing' AND processing_at < datetime('now', '-5 minutes')))
       ORDER BY received_at ASC LIMIT ?`, [IMAGE_QUEUE_MAX_ATTEMPTS, limits.batchSize]);
-    for (const row of (candidates?.results || [])) await processImageQueueRow(env, ctx, row, limits);
+    const rows = candidates?.results || [];
+    if (!rows.length) return;
+    const results = await Promise.allSettled(rows.map(row => processImageQueueRow(env, ctx, row, limits)));
+    const claimedAny = results.some(result => result.status === 'fulfilled' && result.value);
+    if (claimedAny && ctx) ctx.waitUntil(processImageQueue(env, ctx));
   } catch (err) {
     console.error('processImageQueue error:', err.message);
   }
@@ -1431,7 +1436,7 @@ async function processImageQueueRow(env, ctx, row, limits) {
     .bind(row.id, IMAGE_QUEUE_MAX_ATTEMPTS, queueLimits.maxActive).run();
   const attempts = (row.attempts || 0) + 1;
   const claimedChanges = d1Changes(claim);
-  if (claimedChanges < 1) return;
+  if (claimedChanges < 1) return false;
   try {
     await processImageQueuePayload(env, ctx, row);
     await env.DB.prepare("DELETE FROM ews_image_queue WHERE id=?").bind(row.id).run();
@@ -1440,9 +1445,8 @@ async function processImageQueueRow(env, ctx, row, limits) {
     await env.DB.prepare("UPDATE ews_image_queue SET status=?, error=?, updated_at=datetime('now') WHERE id=?")
       .bind(failed ? 'failed' : 'pending', err.message || '图片处理失败', row.id).run();
     console.error('image queue item failed:', row.id, err.message);
-  } finally {
-    if (ctx) ctx.waitUntil(processImageQueue(env, ctx));
   }
+  return true;
 }
 
 async function processImageQueuePayload(env, ctx, row) {
@@ -1601,6 +1605,7 @@ const SHOPEE_ITEM_IMAGE_LIMIT_BYTES = 2 * 1024 * 1024;
 const SHOPEE_ITEM_IMAGE_MAX_SIDE = 1200;
 const SHOPEE_JPEG_QUALITIES = [90, 86, 82, 78, 74, 70, 66, 62, 58, 54, 50];
 const SHOPEE_FALLBACK_SIDES = [1100, 1000, 900, 800, 700, 600];
+const IMAGE_FETCH_TIMEOUT_MS = 30000;
 
 function isShopeeItemImage(platform, imageType) {
   return platform === 'shopee' && (imageType === 'main' || imageType === 'sub');
@@ -1608,6 +1613,36 @@ function isShopeeItemImage(platform, imageType) {
 
 function freePhotonImage(img) {
   if (img) img.free();
+}
+
+function isJpegContentType(contentType) {
+  return /^image\/jpe?g\b/i.test(contentType || '');
+}
+
+function canReuseShopeeItemImage(buffer, contentType) {
+  if (!buffer || buffer.byteLength > SHOPEE_ITEM_IMAGE_LIMIT_BYTES) return false;
+  if (!isJpegContentType(contentType)) return false;
+  let input = null;
+  try {
+    input = PhotonImage.new_from_byteslice(new Uint8Array(buffer));
+    const width = input.get_width();
+    const height = input.get_height();
+    return width > 0 && width === height && width <= SHOPEE_ITEM_IMAGE_MAX_SIDE;
+  } catch (_) {
+    return false;
+  } finally {
+    freePhotonImage(input);
+  }
+}
+
+async function fetchImageWithTimeout(imageUrl) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), IMAGE_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(imageUrl, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function candidateShopeeSides(side) {
@@ -1664,12 +1699,12 @@ function normalizeShopeeItemImage(buffer) {
 
 async function processOneImage(env, platform, task_id, sub_task_id, set_index, image_type, image_position, image_url, publicUrl) {
   try {
-    const resp = await fetch(image_url);
+    const resp = await fetchImageWithTimeout(image_url);
     if (!resp.ok) return null;
     let buffer = await resp.arrayBuffer();
     let contentType = resp.headers.get('content-type') || 'image/jpeg';
     if (isShopeeItemImage(platform, image_type)) {
-      buffer = normalizeShopeeItemImage(buffer);
+      if (!canReuseShopeeItemImage(buffer, contentType)) buffer = normalizeShopeeItemImage(buffer);
       contentType = 'image/jpeg';
     }
     const ext = 'jpg';
