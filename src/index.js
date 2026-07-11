@@ -1147,6 +1147,7 @@ async function ensureCallbackQueueTable(env) {
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_callback_queue_status ON ews_callback_queue(status, received_at)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_callback_queue_processing ON ews_callback_queue(status, processing_at)").run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_callback_queue_task ON ews_callback_queue(task_id)").run();
   callbackQueueReady = true;
 }
@@ -1171,8 +1172,69 @@ async function ensureImageQueueTable(env) {
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_image_queue_status ON ews_image_queue(status, received_at)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_image_queue_processing ON ews_image_queue(status, processing_at)").run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_image_queue_task ON ews_image_queue(task_id)").run();
   imageQueueReady = true;
+}
+
+async function recoverStaleCallbackQueue(env) {
+  await ensureCallbackQueueTable(env);
+  await env.DB.prepare(`UPDATE ews_callback_queue
+    SET status='failed', error='回调队列处理超时，已达到最大重试次数', updated_at=datetime('now')
+    WHERE status='processing' AND attempts >= ?
+      AND (processing_at IS NULL OR processing_at='' OR processing_at < datetime('now', '-5 minutes'))`)
+    .bind(CALLBACK_QUEUE_MAX_ATTEMPTS).run();
+  await env.DB.prepare(`UPDATE ews_callback_queue
+    SET status='pending', error='回调队列处理超时，重新入队', updated_at=datetime('now')
+    WHERE status='processing' AND attempts < ?
+      AND (processing_at IS NULL OR processing_at='' OR processing_at < datetime('now', '-5 minutes'))`)
+    .bind(CALLBACK_QUEUE_MAX_ATTEMPTS).run();
+}
+
+async function failImageQueuePlan(env, row, reason) {
+  const idx = await getTaskIndex(env, row.task_id);
+  if (!idx) return 'missing_task';
+  await ensurePushPlanRuntimeColumns(env);
+  const planTable = idx.platform === 'shopee' ? 'ews_shopee_push_plans' : 'ews_jst_push_plans';
+  const whType = `${row.image_type}_${parseInt(row.image_position) || 1}`;
+  const result = await env.DB.prepare(`UPDATE ${planTable}
+    SET status='failed', retry_count=3, error=?, processing_at='', updated_at=datetime('now')
+    WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`)
+    .bind(reason, row.task_id, row.sub_task_id || '', whType).run();
+  if (d1Changes(result) > 0) {
+    await refundTaskCredit(env, row.task_id);
+    await failTaskForPushPlan(env, planTable, row.task_id, reason);
+    return 'failed';
+  }
+  const plan = await getOne(env, `SELECT status FROM ${planTable} WHERE task_id=? AND sub_task_id=? AND webhook_type=?`, [row.task_id, row.sub_task_id || '', whType]);
+  return plan?.status || 'missing_plan';
+}
+
+async function recoverStaleImageQueue(env) {
+  await ensureImageQueueTable(env);
+  const reason = '图片队列处理超时，已达到最大重试次数';
+  const exhausted = await query(env, `SELECT * FROM ews_image_queue
+    WHERE status='processing' AND attempts >= ?
+      AND (processing_at IS NULL OR processing_at='' OR processing_at < datetime('now', '-5 minutes'))
+    ORDER BY updated_at ASC LIMIT 50`, [IMAGE_QUEUE_MAX_ATTEMPTS]);
+  for (const row of (exhausted?.results || [])) {
+    const planStatus = await failImageQueuePlan(env, row, reason);
+    if (planStatus === 'done') {
+      await env.DB.prepare("DELETE FROM ews_image_queue WHERE id=?").bind(row.id).run();
+      continue;
+    }
+    const result = await env.DB.prepare(`UPDATE ews_image_queue
+      SET status='failed', error=?, updated_at=datetime('now')
+      WHERE id=? AND status='processing' AND attempts >= ?
+        AND (processing_at IS NULL OR processing_at='' OR processing_at < datetime('now', '-5 minutes'))`)
+      .bind(reason, row.id, IMAGE_QUEUE_MAX_ATTEMPTS).run();
+    if (d1Changes(result) < 1) continue;
+  }
+  await env.DB.prepare(`UPDATE ews_image_queue
+    SET status='pending', error='图片队列处理超时，重新入队', updated_at=datetime('now')
+    WHERE status='processing' AND attempts < ?
+      AND (processing_at IS NULL OR processing_at='' OR processing_at < datetime('now', '-5 minutes'))`)
+    .bind(IMAGE_QUEUE_MAX_ATTEMPTS).run();
 }
 
 async function handleCallback(request, env, ctx) {
@@ -1202,6 +1264,7 @@ async function handleCallback(request, env, ctx) {
 async function processCallbackQueue(env, ctx, preferredId) {
   try {
     await ensureCallbackQueueTable(env);
+    await recoverStaleCallbackQueue(env);
     const rows = [];
     if (preferredId) {
       const preferred = await getOne(env, "SELECT * FROM ews_callback_queue WHERE id=?", [preferredId]);
@@ -1267,6 +1330,7 @@ async function enqueueImageCallback(env, idx, body) {
 async function processImageQueue(env, ctx) {
   try {
     await ensureImageQueueTable(env);
+    await recoverStaleImageQueue(env);
     const candidates = await query(env, `SELECT * FROM ews_image_queue
       WHERE attempts < ? AND (status='pending' OR (status='processing' AND processing_at < datetime('now', '-5 minutes')))
       ORDER BY received_at ASC LIMIT ?`, [IMAGE_QUEUE_MAX_ATTEMPTS, IMAGE_QUEUE_BATCH_SIZE]);

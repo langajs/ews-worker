@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS ews_callback_queue (
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_callback_queue_status ON ews_callback_queue(status, received_at);
+CREATE INDEX IF NOT EXISTS idx_callback_queue_processing ON ews_callback_queue(status, processing_at);
 CREATE INDEX IF NOT EXISTS idx_callback_queue_task ON ews_callback_queue(task_id);
 
 -- 共享图片处理队列：限制图片下载/R2写入并发，成功处理后删除
@@ -103,6 +104,7 @@ CREATE TABLE IF NOT EXISTS ews_image_queue (
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_image_queue_status ON ews_image_queue(status, received_at);
+CREATE INDEX IF NOT EXISTS idx_image_queue_processing ON ews_image_queue(status, processing_at);
 CREATE INDEX IF NOT EXISTS idx_image_queue_task ON ews_image_queue(task_id);
 
 -- ====================================================================
