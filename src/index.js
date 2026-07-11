@@ -144,6 +144,10 @@ const RATE_LIMIT_MAX = 5;
 const RATE_LIMIT_WINDOW = 300;
 
 export default {
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(processPendingQueue(env, ctx));
+  },
+
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -1028,7 +1032,12 @@ function parseQueueLimit(value, fallback, max) {
 }
 
 function d1Changes(result) {
-  return result?.meta && typeof result.meta.changes === 'number' ? result.meta.changes : 0;
+  const meta = result?.meta || {};
+  if (typeof meta.changes === 'number') return meta.changes;
+  if (typeof meta.rows_written === 'number') return meta.rows_written;
+  if (meta.changed_db === true) return 1;
+  if (meta.changed_db === false) return 0;
+  return result?.success === true ? 1 : 0;
 }
 
 function callbackPermanentError(message) {
