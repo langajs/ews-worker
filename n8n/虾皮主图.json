@@ -54,6 +54,9 @@
                                    ],
                       "id":  "5c57af4c-4a32-4c62-a736-66e9ffa88857",
                       "name":  "gpt-image-2",
+                      "retryOnFail":  true,
+                      "maxTries":  3,
+                      "waitBetweenTries":  5000,
                       "credentials":  {
                                           "httpHeaderAuth":  {
                                                                  "id":  "Ua1TBIbDcAu3z8pU",
@@ -63,7 +66,7 @@
                   },
                   {
                       "parameters":  {
-                                         "jsCode":  "const grsaiResp = $input.first().json;\nconst prevNode = $node[\u0027提取参数\u0027];\nconst orig = prevNode.json;\n\nreturn {\n  grsaiTaskId: grsaiResp.id,\n  status: grsaiResp.status,\n  attempts: 0,\n  taskId: orig.taskId,\n  subTaskId: orig.subTaskId,\n  imageType: orig.imageType,\n  imagePosition: orig.imagePosition,\n  callbackSecret: orig.callbackSecret,\n  callbackUrl: orig.callbackUrl\n};"
+                                         "jsCode":  "const grsaiResp = $input.first().json;\nconst prevNode = $node[\u0027提取参数\u0027];\nconst orig = prevNode.json;\n\nreturn {\n  grsaiTaskId: grsaiResp.id,\n  status: grsaiResp.status,\n  taskId: orig.taskId,\n  subTaskId: orig.subTaskId,\n  imageType: orig.imageType,\n  imagePosition: orig.imagePosition,\n  callbackSecret: orig.callbackSecret,\n  callbackUrl: orig.callbackUrl,\n  startedAt: Date.now()\n};"
                                      },
                       "type":  "n8n-nodes-base.code",
                       "typeVersion":  2,
@@ -100,6 +103,9 @@
                                    ],
                       "id":  "a2a4ae5e-4da8-4413-8913-aaa680e65695",
                       "name":  "查询结果",
+                      "retryOnFail":  true,
+                      "maxTries":  3,
+                      "waitBetweenTries":  5000,
                       "credentials":  {
                                           "httpHeaderAuth":  {
                                                                  "id":  "Ua1TBIbDcAu3z8pU",
@@ -200,6 +206,16 @@
                                                                                                     "operation":  "equals",
                                                                                                     "name":  "filter.operator.equals"
                                                                                                 }
+                                                                               },
+                                                                               {
+                                                                                   "id":  "a2000000-0000-4000-8000-000000000900",
+                                                                                   "leftValue":  "={{ $json.timedOut }}",
+                                                                                   "rightValue":  true,
+                                                                                   "operator":  {
+                                                                                                    "type":  "boolean",
+                                                                                                    "operation":  "true",
+                                                                                                    "singleValue":  true
+                                                                                                }
                                                                                }
                                                                            ],
                                                             "combinator":  "or"
@@ -219,7 +235,7 @@
                   },
                   {
                       "parameters":  {
-                                         "jsCode":  "const prevNode = $node[\u0027提取参数\u0027];\nconst orig = prevNode.json;\n\nreturn {\n  secret: orig.callbackSecret || \u0027\u0027,\n  task_id: orig.taskId,\n  sub_task_id: orig.subTaskId,\n  image_type: orig.imageType,\n  image_position: orig.imagePosition,\n  error: \"图片生成失败\",\n  callbackUrl: orig.callbackUrl\n};"
+                                         "jsCode":  "const response = $input.first().json;\nconst prevNode = $node[\u0027提取参数\u0027];\nconst orig = prevNode.json;\nconst error = response.timedOut\n  ? \u0027图片生成超过900秒，已终止轮询\u0027\n  : String(response.error || response.status || \u0027图片生成失败\u0027);\n\nreturn {\n  secret: orig.callbackSecret || \u0027\u0027,\n  task_id: orig.taskId,\n  sub_task_id: orig.subTaskId,\n  image_type: orig.imageType,\n  image_position: orig.imagePosition,\n  error,\n  callbackUrl: orig.callbackUrl\n};"
                                      },
                       "type":  "n8n-nodes-base.code",
                       "typeVersion":  2,
@@ -257,7 +273,10 @@
                                        96
                                    ],
                       "id":  "8e31e68d-c4b7-4ab6-bf21-4e8ddf5c02e3",
-                      "name":  "失败回调"
+                      "name":  "失败回调",
+                      "retryOnFail":  true,
+                      "maxTries":  3,
+                      "waitBetweenTries":  5000
                   },
                   {
                       "parameters":  {
@@ -286,7 +305,10 @@
                                        -96
                                    ],
                       "id":  "850fcaab-ad42-420d-8aca-8fafa1a7a5ca",
-                      "name":  "成功回调"
+                      "name":  "成功回调",
+                      "retryOnFail":  true,
+                      "maxTries":  3,
+                      "waitBetweenTries":  5000
                   },
                   {
                       "parameters":  {
@@ -326,7 +348,7 @@
                   },
                   {
                       "parameters":  {
-                                         "jsCode":  "const data = $input.first().json;\nconst prevNode = $node[\u0027提取任务ID\u0027];\nconst grsaiTaskId = prevNode.json.grsaiTaskId;\nconst attempts = (data.attempts || 0) + 1;\n\nreturn {\n  grsaiTaskId: grsaiTaskId,\n  attempts: attempts,\n  status: data.status,\n  progress: data.progress,\n  results: data.results,\n  error: data.error,\n  taskId: data.taskId,\n  subTaskId: data.subTaskId,\n  imageType: data.imageType,\n  imagePosition: data.imagePosition,\n  callbackSecret: data.callbackSecret,\n  callbackUrl: data.callbackUrl\n};"
+                                         "jsCode":  "const response = $input.first().json;\nconst task = $node[\u0027提取任务ID\u0027].json;\nconst elapsedSeconds = Math.floor((Date.now() - task.startedAt) / 1000);\n\nreturn {\n  grsaiTaskId: task.grsaiTaskId,\n  status: response.status,\n  progress: response.progress,\n  results: response.results,\n  error: response.error,\n  taskId: task.taskId,\n  subTaskId: task.subTaskId,\n  imageType: task.imageType,\n  imagePosition: task.imagePosition,\n  callbackSecret: task.callbackSecret,\n  callbackUrl: task.callbackUrl,\n  elapsedSeconds,\n  timedOut: elapsedSeconds \u003e= 900\n};"
                                      },
                       "type":  "n8n-nodes-base.code",
                       "typeVersion":  2,
@@ -424,7 +446,7 @@
                                      "main":  [
                                                   [
                                                       {
-                                                          "node":  "任务完成",
+                                                          "node":  "重组查询",
                                                           "type":  "main",
                                                           "index":  0
                                                       }
@@ -493,7 +515,7 @@
                                                   ],
                                                   [
                                                       {
-                                                          "node":  "重组查询",
+                                                          "node":  "Wait",
                                                           "type":  "main",
                                                           "index":  0
                                                       }
@@ -533,7 +555,7 @@
                                      "main":  [
                                                   [
                                                       {
-                                                          "node":  "Wait",
+                                                          "node":  "任务完成",
                                                           "type":  "main",
                                                           "index":  0
                                                       }

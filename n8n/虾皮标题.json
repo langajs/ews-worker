@@ -41,7 +41,10 @@
                                        -32
                                    ],
                       "id":  "abcb7dcc-11bd-4366-a712-a6bf5950feed",
-                      "name":  "callback"
+                      "name":  "callback",
+                      "retryOnFail":  true,
+                      "maxTries":  3,
+                      "waitBetweenTries":  5000
                   },
                   {
                       "parameters":  {
@@ -64,6 +67,9 @@
                                    ],
                       "id":  "d71d77d8-54d5-4794-9951-1796aa6077b3",
                       "name":  "deepseek-v4-flash",
+                      "retryOnFail":  true,
+                      "maxTries":  3,
+                      "waitBetweenTries":  5000,
                       "credentials":  {
                                           "httpHeaderAuth":  {
                                                                  "id":  "11xE3AjgQ1iUHDdR",

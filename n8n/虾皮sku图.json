@@ -22,7 +22,7 @@
                                          "genericAuthType":  "httpHeaderAuth",
                                          "sendBody":  true,
                                          "specifyBody":  "json",
-                                         "jsonBody":  "={\n  \"model\": \"gpt-image-2\",\n  \"prompt\": \"{{ $json.finalPrompt }}\",\n  \"images\": {{ JSON.stringify($json.imagesArray) }},\n  \"aspectRatio\": \"1024x1024\",\n  \"replyType\": \"async\"\n}",
+                                         "jsonBody":  "={{ {\n  model: \"gpt-image-2\",\n  prompt: $json.finalPrompt,\n  images: $json.imagesArray,\n  aspectRatio: \"1024x1024\",\n  replyType: \"async\"\n} }}",
                                          "options":  {
 
                                                      }
@@ -35,6 +35,9 @@
                                    ],
                       "id":  "f633e7b3-299f-43c1-8bf1-51e5c1f57148",
                       "name":  "gpt-image-2",
+                      "retryOnFail":  true,
+                      "maxTries":  3,
+                      "waitBetweenTries":  5000,
                       "credentials":  {
                                           "httpHeaderAuth":  {
                                                                  "id":  "Ua1TBIbDcAu3z8pU",
@@ -44,7 +47,7 @@
                   },
                   {
                       "parameters":  {
-                                         "jsCode":  "const response = $input.first().json;\nconst original = $node[\u0027提取参数\u0027].json;\n\nif (!response?.id) {\n  throw new Error(\u0027图片服务未返回任务ID\u0027);\n}\n\nreturn {\n  grsaiTaskId: response.id,\n  status: response.status,\n  taskId: original.taskId,\n  subTaskId: original.subTaskId,\n  setIndex: original.setIndex,\n  imageType: original.imageType,\n  imagePosition: original.imagePosition,\n  callbackSecret: original.callbackSecret,\n  callbackUrl: original.callbackUrl\n};"
+                                         "jsCode":  "const response = $input.first().json;\nconst original = $node[\u0027提取参数\u0027].json;\n\nif (!response?.id) {\n  throw new Error(\u0027图片服务未返回任务ID\u0027);\n}\n\nreturn {\n  grsaiTaskId: response.id,\n  status: response.status,\n  taskId: original.taskId,\n  subTaskId: original.subTaskId,\n  setIndex: original.setIndex,\n  imageType: original.imageType,\n  imagePosition: original.imagePosition,\n  callbackSecret: original.callbackSecret,\n  callbackUrl: original.callbackUrl,\n  startedAt: Date.now()\n};"
                                      },
                       "type":  "n8n-nodes-base.code",
                       "typeVersion":  2,
@@ -81,6 +84,9 @@
                                    ],
                       "id":  "27b3da1c-5fb4-47b9-b2d5-198c10830366",
                       "name":  "查询结果",
+                      "retryOnFail":  true,
+                      "maxTries":  3,
+                      "waitBetweenTries":  5000,
                       "credentials":  {
                                           "httpHeaderAuth":  {
                                                                  "id":  "Ua1TBIbDcAu3z8pU",
@@ -180,6 +186,16 @@
                                                                                                     "operation":  "equals",
                                                                                                     "name":  "filter.operator.equals"
                                                                                                 }
+                                                                               },
+                                                                               {
+                                                                                   "id":  "a1000000-0000-4000-8000-000000000900",
+                                                                                   "leftValue":  "={{ $json.timedOut }}",
+                                                                                   "rightValue":  true,
+                                                                                   "operator":  {
+                                                                                                    "type":  "boolean",
+                                                                                                    "operation":  "true",
+                                                                                                    "singleValue":  true
+                                                                                                }
                                                                                }
                                                                            ],
                                                             "combinator":  "or"
@@ -199,7 +215,7 @@
                   },
                   {
                       "parameters":  {
-                                         "jsCode":  "const response = $input.first().json;\nconst original = $node[\u0027提取参数\u0027].json;\n\nreturn {\n  callback_secret: original.callbackSecret,\n  task_id: original.taskId,\n  sub_task_id: original.subTaskId,\n  set_index: original.setIndex,\n  image_type: original.imageType,\n  image_position: original.imagePosition,\n  error: String(response.error || response.status || \u0027SKU图片生成失败\u0027),\n  callbackUrl: original.callbackUrl\n};"
+                                         "jsCode":  "const response = $input.first().json;\nconst original = $node[\u0027提取参数\u0027].json;\nconst error = response.timedOut\n  ? \u0027图片生成超过900秒，已终止轮询\u0027\n  : String(response.error || response.status || \u0027SKU图片生成失败\u0027);\n\nreturn {\n  callback_secret: original.callbackSecret,\n  task_id: original.taskId,\n  sub_task_id: original.subTaskId,\n  set_index: original.setIndex,\n  image_type: original.imageType,\n  image_position: original.imagePosition,\n  error,\n  callbackUrl: original.callbackUrl\n};"
                                      },
                       "type":  "n8n-nodes-base.code",
                       "typeVersion":  2,
@@ -237,11 +253,14 @@
                                        256
                                    ],
                       "id":  "6f027b78-be56-4108-95e8-cd97a093d757",
-                      "name":  "失败回调"
+                      "name":  "失败回调",
+                      "retryOnFail":  true,
+                      "maxTries":  3,
+                      "waitBetweenTries":  5000
                   },
                   {
                       "parameters":  {
-                                         "jsCode":  "const response = $input.first().json;\nconst task = $node[\u0027提取任务ID\u0027].json;\n\nreturn {\n  grsaiTaskId: task.grsaiTaskId,\n  status: response.status,\n  progress: response.progress,\n  results: response.results,\n  error: response.error,\n  taskId: task.taskId,\n  subTaskId: task.subTaskId,\n  setIndex: task.setIndex,\n  imageType: task.imageType,\n  imagePosition: task.imagePosition,\n  callbackSecret: task.callbackSecret,\n  callbackUrl: task.callbackUrl\n};"
+                                         "jsCode":  "const response = $input.first().json;\nconst task = $node[\u0027提取任务ID\u0027].json;\nconst elapsedSeconds = Math.floor((Date.now() - task.startedAt) / 1000);\n\nreturn {\n  grsaiTaskId: task.grsaiTaskId,\n  status: response.status,\n  progress: response.progress,\n  results: response.results,\n  error: response.error,\n  taskId: task.taskId,\n  subTaskId: task.subTaskId,\n  setIndex: task.setIndex,\n  imageType: task.imageType,\n  imagePosition: task.imagePosition,\n  callbackSecret: task.callbackSecret,\n  callbackUrl: task.callbackUrl,\n  elapsedSeconds,\n  timedOut: elapsedSeconds \u003e= 900\n};"
                                      },
                       "type":  "n8n-nodes-base.code",
                       "typeVersion":  2,
@@ -279,7 +298,10 @@
                                        -160
                                    ],
                       "id":  "d39423d9-b5a0-4118-94cc-04982c64ee11",
-                      "name":  "成功回调"
+                      "name":  "成功回调",
+                      "retryOnFail":  true,
+                      "maxTries":  3,
+                      "waitBetweenTries":  5000
                   },
                   {
                       "parameters":  {
@@ -412,7 +434,7 @@
                                      "main":  [
                                                   [
                                                       {
-                                                          "node":  "任务完成",
+                                                          "node":  "重组查询",
                                                           "type":  "main",
                                                           "index":  0
                                                       }
@@ -481,7 +503,7 @@
                                                   ],
                                                   [
                                                       {
-                                                          "node":  "重组查询",
+                                                          "node":  "Wait",
                                                           "type":  "main",
                                                           "index":  0
                                                       }
@@ -503,7 +525,7 @@
                                      "main":  [
                                                   [
                                                       {
-                                                          "node":  "Wait",
+                                                          "node":  "任务完成",
                                                           "type":  "main",
                                                           "index":  0
                                                       }
