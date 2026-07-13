@@ -278,7 +278,7 @@ CREATE TABLE IF NOT EXISTS ews_shopee_products (
   size_chart_template_id TEXT NOT NULL DEFAULT '',
   size_chart_image TEXT NOT NULL DEFAULT '',
   pre_order_dts INTEGER,
-  shipping_channels TEXT NOT NULL DEFAULT '[]',  -- JSON: 物流渠道启用列表
+  shipping_channels TEXT NOT NULL DEFAULT '["50052"]',  -- JSON: 默认启用 SPX
   status TEXT NOT NULL DEFAULT 'pending',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -299,7 +299,7 @@ CREATE TABLE IF NOT EXISTS ews_shopee_variations (
   price_min REAL,
   price_max REAL,
   price_precision INTEGER NOT NULL DEFAULT 0,
-  stock INTEGER NOT NULL DEFAULT 0,
+  stock INTEGER NOT NULL DEFAULT 999,
   sku TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   FOREIGN KEY (product_id) REFERENCES ews_shopee_products(id) ON DELETE CASCADE

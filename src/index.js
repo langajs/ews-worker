@@ -650,6 +650,8 @@ async function handleUpdateTask(request, env, path) {
       const v = variations[i];
       const pricing = normalizeVariantPricing(v, true);
       if (pricing.error) return error('变体#' + (i + 1) + pricing.error, 400);
+      const stock = v.stock === undefined || v.stock === null || v.stock === '' ? 999 : Number(v.stock);
+      if (!Number.isInteger(stock) || stock < 0 || stock > 10000000) return error(`变体#${i + 1}库存必须为0~10000000`, 400);
       const option1 = String(v.option1 || '').trim();
       const option2 = String(v.option2 || '').trim();
       if (!option1 || option1.length > 20) return error(`变体#${i + 1}一级规格值必须为1~20字符`, 400);
@@ -663,7 +665,7 @@ async function handleUpdateTask(request, env, path) {
         option2, image_2: '',
         price: pricing.price, price_float_enabled: pricing.price_float_enabled,
         price_min: pricing.price_min, price_max: pricing.price_max, price_precision: pricing.price_precision,
-        stock: v.stock || 0, sku: v.sku || '',
+        stock, sku: v.sku || '',
       });
     }
     const hasTier2 = normalizedVariations.some(variation => variation.option2);
@@ -695,7 +697,7 @@ async function handleUpdateTask(request, env, path) {
       variation_name1: variationName1, variation_name2: hasTier2 ? variationName2 : '',
       variation_image_mode: variationImageMode,
       pre_order_dts: pre_order_dts ?? null,
-      shipping_channels: shipping_channels || '[]',
+      shipping_channels: shipping_channels || '["50052"]',
     });
     await shopeeReplaceVariations(env, taskId, normalizedVariations);
     return json({ success: true, task_id: taskId, message: '商品创建成功' });
