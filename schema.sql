@@ -72,6 +72,9 @@ CREATE TABLE IF NOT EXISTS ews_tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_ews_tasks_platform ON ews_tasks(platform);
 CREATE INDEX IF NOT EXISTS idx_ews_tasks_user ON ews_tasks(user_id);
+CREATE INDEX IF NOT EXISTS idx_ews_tasks_created ON ews_tasks(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ews_tasks_user_created ON ews_tasks(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ews_tasks_platform_created ON ews_tasks(platform, created_at DESC);
 
 -- 共享回调队列：工作流回调先入队备份，处理成功后删除，失败保留重试/排查
 CREATE TABLE IF NOT EXISTS ews_callback_queue (

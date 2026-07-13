@@ -1,0 +1,239 @@
+{
+    "name":  "虾皮标题",
+    "nodes":  [
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const response = $input.first().json;\nconst originalData = $node[\u0027提取参数\u0027].json;\nlet content = response?.choices?.[0]?.message?.content;\n\nif (typeof content !== \u0027string\u0027) {\n  throw new Error(\u0027模型未返回标题文本\u0027);\n}\n\ncontent = content.replace(/```json\\s*/gi, \u0027\u0027).replace(/```/g, \u0027\u0027).trim();\nlet titles;\ntry {\n  titles = JSON.parse(content);\n} catch (error) {\n  throw new Error(\u0027标题结果不是合法 JSON 数组\u0027);\n}\n\nif (!Array.isArray(titles) || titles.length !== originalData.subTaskCount) {\n  throw new Error(`标题数量不匹配: ${Array.isArray(titles) ? titles.length : 0} / ${originalData.subTaskCount}`);\n}\n\ntitles = titles.map((value, index) =\u003e {\n  const title = typeof value === \u0027string\u0027 ? value.replace(/\\s+/g, \u0027 \u0027).trim() : \u0027\u0027;\n  if (title.length \u003c 10 || title.length \u003e 120) {\n    throw new Error(`标题#${index + 1}长度必须为10~120字符`);\n  }\n  return title;\n});\n\nif (new Set(titles.map(title =\u003e title.toLocaleLowerCase(\u0027vi\u0027))).size !== titles.length) {\n  throw new Error(\u0027标题结果存在重复项\u0027);\n}\n\nreturn {\n  callback_secret: originalData.callbackSecret,\n  task_id: originalData.taskId,\n  titles,\n  callbackUrl: originalData.callbackUrl\n};"
+                                     },
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       512,
+                                       -32
+                                   ],
+                      "id":  "8730dda7-9c0c-4eee-81b8-10e263ccc33c",
+                      "name":  "提取标题列表"
+                  },
+                  {
+                      "parameters":  {
+                                         "method":  "POST",
+                                         "url":  "={{ $json.callbackUrl }}",
+                                         "sendHeaders":  true,
+                                         "headerParameters":  {
+                                                                  "parameters":  [
+                                                                                     {
+                                                                                         "name":  "Content-Type",
+                                                                                         "value":  "application/json"
+                                                                                     }
+                                                                                 ]
+                                                              },
+                                         "sendBody":  true,
+                                         "specifyBody":  "json",
+                                         "jsonBody":  "={{\n  callback_secret: $json.callback_secret,\n  task_id: $json.task_id,\n  titles: $json.titles\n}}",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "typeVersion":  4.4,
+                      "position":  [
+                                       736,
+                                       -32
+                                   ],
+                      "id":  "abcb7dcc-11bd-4366-a712-a6bf5950feed",
+                      "name":  "callback"
+                  },
+                  {
+                      "parameters":  {
+                                         "method":  "POST",
+                                         "url":  "https://api.deepseek.com/chat/completions",
+                                         "authentication":  "genericCredentialType",
+                                         "genericAuthType":  "httpHeaderAuth",
+                                         "sendBody":  true,
+                                         "specifyBody":  "json",
+                                         "jsonBody":  "={{\n{\n  model: \"deepseek-v4-flash\",\n  messages: [\n    {\n      role: \"system\",\n      content: \"你只输出符合要求的严格 JSON，不输出 Markdown 或解释。\"\n    },\n    {\n      role: \"user\",\n      content: $json.finalPrompt\n    }\n  ],\n  stream: false\n}\n}}",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "typeVersion":  4.4,
+                      "position":  [
+                                       288,
+                                       -32
+                                   ],
+                      "id":  "d71d77d8-54d5-4794-9951-1796aa6077b3",
+                      "name":  "deepseek-v4-flash",
+                      "credentials":  {
+                                          "httpHeaderAuth":  {
+                                                                 "id":  "11xE3AjgQ1iUHDdR",
+                                                                 "name":  "deepseek"
+                                                             }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const body = $input.first().json.body || {};\n\nconst taskId = body.task_id;\nconst name = String(body.name || \u0027\u0027).trim();\nconst referenceTitle = String(body.reference_title || \u0027\u0027).trim();\nconst description = String(body.description || \u0027\u0027).trim();\nconst subTaskCount = Math.max(parseInt(body.sub_task_count) || 1, 1);\nconst callbackSecret = body.callback_secret || \u0027\u0027;\nconst callbackUrl = body.callback_url || \u0027\u0027;\n\nif (!taskId || !callbackUrl) {\n  throw new Error(\u0027缺少 task_id 或 callback_url\u0027);\n}\n\nconst finalPrompt = `\n你是 Shopee 越南站商品标题生成专家。请基于输入商品信息生成 ${subTaskCount} 个互不重复的越南语商品标题。\n\n商品名称：${name}\n参考标题：${referenceTitle}\n商品描述：${description}\n\n每个标题必须按以下语义顺序自然组合，不要输出括号或字段标签：\n【主关键词】+【副关键词】+【长尾词】+【属性词】\n\n要求：\n1. 主关键词必须是准确的商品品类词，并放在标题开头。\n2. 副关键词补充常用搜索同义词或功能词，不得重复堆砌主关键词。\n3. 长尾词体现适用人群、使用场景或明确需求。\n4. 属性词只能使用输入中能确认的材质、颜色、规格、功能或风格，禁止臆造。\n5. 全部使用自然越南语，不得出现中文、序号、价格、店铺名、夸大承诺或无关热词。\n6. 每个标题长度控制在 60~110 个字符，系统硬限制为 10~120 个字符。\n7. 同批标题保持同一商品语义，但关键词组合和长尾方向必须有明显差异。\n\n只返回严格 JSON 字符串数组，数组长度必须等于 ${subTaskCount}，不要 Markdown，不要解释。\n`;\n\nreturn {\n  taskId,\n  subTaskCount,\n  finalPrompt,\n  callbackSecret,\n  callbackUrl\n};"
+                                     },
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       64,
+                                       -32
+                                   ],
+                      "id":  "f64518e8-9108-46c0-a54f-4de340ec6daf",
+                      "name":  "提取参数"
+                  },
+                  {
+                      "parameters":  {
+                                         "httpMethod":  "POST",
+                                         "path":  "vn/v3t1",
+                                         "options":  {
+                                                         "responseData":  "={\"status\":\"accepted\"}"
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.webhook",
+                      "typeVersion":  2.1,
+                      "position":  [
+                                       -384,
+                                       -32
+                                   ],
+                      "id":  "45498374-da9b-4a15-ab2b-49a260770746",
+                      "name":  "test-title",
+                      "webhookId":  "78519397-39bd-4d70-a3dd-2c70ac869e44"
+                  },
+                  {
+                      "parameters":  {
+                                         "conditions":  {
+                                                            "options":  {
+                                                                            "caseSensitive":  true,
+                                                                            "leftValue":  "",
+                                                                            "typeValidation":  "strict",
+                                                                            "version":  3
+                                                                        },
+                                                            "conditions":  [
+                                                                               {
+                                                                                   "id":  "7d8441ca-8e3d-459a-b083-4d27d3f612f1",
+                                                                                   "leftValue":  "={{ $json.body.callback_secret }}",
+                                                                                   "rightValue":  "v3",
+                                                                                   "operator":  {
+                                                                                                    "type":  "string",
+                                                                                                    "operation":  "equals",
+                                                                                                    "name":  "filter.operator.equals"
+                                                                                                }
+                                                                               }
+                                                                           ],
+                                                            "combinator":  "and"
+                                                        },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.if",
+                      "typeVersion":  2.3,
+                      "position":  [
+                                       -160,
+                                       -32
+                                   ],
+                      "id":  "405083e4-4cd0-4b1c-9bbf-47af8d4e8714",
+                      "name":  "密钥校对"
+                  }
+              ],
+    "pinData":  {
+
+                },
+    "connections":  {
+                        "提取标题列表":  {
+                                       "main":  [
+                                                    [
+                                                        {
+                                                            "node":  "callback",
+                                                            "type":  "main",
+                                                            "index":  0
+                                                        }
+                                                    ]
+                                                ]
+                                   },
+                        "deepseek-v4-flash":  {
+                                                  "main":  [
+                                                               [
+                                                                   {
+                                                                       "node":  "提取标题列表",
+                                                                       "type":  "main",
+                                                                       "index":  0
+                                                                   }
+                                                               ]
+                                                           ]
+                                              },
+                        "提取参数":  {
+                                     "main":  [
+                                                  [
+                                                      {
+                                                          "node":  "deepseek-v4-flash",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
+                                                  ]
+                                              ]
+                                 },
+                        "test-title":  {
+                                           "main":  [
+                                                        [
+                                                            {
+                                                                "node":  "密钥校对",
+                                                                "type":  "main",
+                                                                "index":  0
+                                                            }
+                                                        ]
+                                                    ]
+                                       },
+                        "密钥校对":  {
+                                     "main":  [
+                                                  [
+                                                      {
+                                                          "node":  "提取参数",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
+                                                  ],
+                                                  [
+
+                                                  ]
+                                              ]
+                                 }
+                    },
+    "active":  false,
+    "settings":  {
+                     "executionOrder":  "v1",
+                     "binaryMode":  "separate",
+                     "availableInMCP":  false
+                 },
+    "versionId":  "dd770455-446f-4017-81fc-8d2f78b9eb1a",
+    "meta":  {
+                 "instanceId":  "bac5a48cbfe45b4dd41ef15205e80ac0e0958f3b697c370060cb2d4c14846049"
+             },
+    "nodeGroups":  [
+
+                   ],
+    "id":  "xVSBMYSVJD9dhOLF",
+    "tags":  [
+                 {
+                     "updatedAt":  "2026-07-10T01:42:16.053Z",
+                     "createdAt":  "2026-07-10T01:42:16.053Z",
+                     "id":  "3jFkRnXqIMlSDFy0",
+                     "name":  "v3"
+                 },
+                 {
+                     "updatedAt":  "2026-07-01T08:59:46.679Z",
+                     "createdAt":  "2026-07-01T08:59:46.679Z",
+                     "id":  "UM8CfYPKINtnZnA2",
+                     "name":  "标题"
+                 },
+                 {
+                     "updatedAt":  "2026-07-07T11:05:30.160Z",
+                     "createdAt":  "2026-07-07T11:05:30.160Z",
+                     "id":  "dYx7pZfd01CltSoJ",
+                     "name":  "VNEC"
+                 }
+             ]
+}

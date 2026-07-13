@@ -4,17 +4,17 @@ import { PhotonImage, SamplingFilter, crop, resize } from '@cf-wasm/photon/worke
 import {
   query, getOne, getConfig, updateConfig, getPlatformConfig,
   createUser, getUserByUsername, getUserList, updateUserPassword,
-  toggleUserActive, deleteUser, updateUserPlatformAccess, updateUserWebhook, getUserCredits, updateUserCredits,
-  createTaskIndex, updateTaskIndexStatus, getTaskIndex, getTaskList, deleteTaskIndex,
+  toggleUserActive, deleteUser, updateUserPlatformAccess, updateUserWebhook, getUserCredits, updateUserCredits, consumeUserCredit,
+  createTaskIndex, updateTaskIndexStatus, getTaskIndex, getTaskList, getTaskCount, deleteTaskIndex,
   jstCreateTask, jstUpdateTask, jstGetTask, jstUpdateTaskStatus,
-  jstCreateVariant, jstClearVariants,
+  jstReplaceVariants,
   jstCreateSubTask, jstGetSubTasks, jstUpdateSubTask, jstDeleteSubTasks,
   jstCreateSkuTitle, jstSaveImage, jstClearImages,
   jstCreateExpectedImages, jstCheckSubTaskImages, jstCheckParentCompletion, jstDeleteTaskRecord,
   jstCreatePushPlans, jstGetPushPlans, jstGetPendingPlans, jstGetPlanStats,
   jstRefundCredits,
   shopeeCreateProduct, shopeeGetProduct, shopeeDeleteProduct,
-  shopeeCreateVariations, shopeeClearVariations,
+  shopeeReplaceVariations,
   shopeeCreatePushPlans, shopeeGetPushPlans, shopeeGetPendingPlans, shopeeGetPlanStats,
   shopeeCreateExportRecord,
   shopeeCreateSubTask, shopeeGetSubTasks, shopeeUpdateSubTask,
@@ -179,7 +179,7 @@ export default {
       if (path === '/api/tasks/init' && method === 'POST')
         return requireAuth(request, env, () => handleInitTask(request, env));
       if (path === '/api/tasks' && method === 'GET')
-        return requireAuth(request, env, () => handleGetTasks(env, ctx, request.auth));
+        return requireAuth(request, env, () => handleGetTasks(env, ctx, request.auth, url));
       if (path.match(/^\/api\/tasks\/[^\/]+$/) && method === 'GET')
         return requireAuth(request, env, () => handleGetTaskDetail(env, ctx, path));
       if (path.match(/^\/api\/tasks\/[^\/]+$/) && method === 'PUT')
@@ -441,6 +441,10 @@ async function handleDeleteUser(request, env, path) {
 
 function getTaskId(path) { return path.split('/')[3]; }
 
+const MAX_GENERATE_COUNT = 100;
+const MAX_JST_VARIANTS = 10;
+const MAX_SHOPEE_VARIATIONS = 50;
+
 async function resetGeneratedTaskArtifacts(env, taskId, platform) {
   const prefix = platform === 'shopee' ? 'ews_shopee' : 'ews_jst';
   await env.DB.prepare("DELETE FROM ews_callback_queue WHERE task_id=?").bind(taskId).run().catch(() => {});
@@ -463,9 +467,14 @@ async function getTaskSummaryRows(env, sqlPrefix, ids, sqlSuffix = '') {
   return rows;
 }
 
-async function handleGetTasks(env, ctx, auth) {
-  ctx.waitUntil(processPendingQueue(env, ctx));
-  const result = await getTaskList(env, '', auth.username, auth.role);
+async function handleGetTasks(env, ctx, auth, url) {
+  const platform = ['jst','shopee'].includes(url.searchParams.get('platform')) ? url.searchParams.get('platform') : '';
+  const page = Math.max(parseInt(url.searchParams.get('page')) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit')) || 50, 1), 100);
+  const [result, total] = await Promise.all([
+    getTaskList(env, platform, auth.username, auth.role, limit, (page - 1) * limit),
+    getTaskCount(env, platform, auth.username, auth.role),
+  ]);
   let tasks = result.results || [];
   if (auth.role !== 'admin') tasks = tasks.filter(t => t.user_id === auth.username);
 
@@ -491,7 +500,7 @@ async function handleGetTasks(env, ctx, auth) {
       if (sp) t.name = sp.name;
     }
   }
-  return json({ success: true, tasks, total: tasks.length });
+  return json({ success: true, tasks, total, page, limit, pages: Math.max(1, Math.ceil(total / limit)) });
 }
 
 async function handleInitTask(request, env) {
@@ -513,7 +522,6 @@ async function handleInitTask(request, env) {
 
 async function handleGetTaskDetail(env, ctx, path) {
   const taskId = getTaskId(path);
-  ctx.waitUntil(processPendingQueue(env, ctx));
   const idx = await getTaskIndex(env, taskId);
   if (!idx) return error('任务不存在', 404);
   let detail = idx;
@@ -538,6 +546,23 @@ async function handleUpdateTask(request, env, path) {
     const { name, description, task_description, main_description, detail_description, reference_title, reference_image, auxiliary_images, generate_count, main_image_count, detail_image_count, mode, category_id, brand_id, cover_image, images, weight_kg, length_cm, width_cm, height_cm, gtin, hs_code, tax_code, origin_country, variation_name1, variation_name2, pre_order_dts, shipping_channels, variations } = body || {};
     if (!name) return error('商品名称不能为空', 400);
     if (!reference_image) return error('核心参考图不能为空', 400);
+    const shopeeGenerateCount = parseInt(generate_count);
+    if (!Number.isInteger(shopeeGenerateCount) || shopeeGenerateCount < 1 || shopeeGenerateCount > MAX_GENERATE_COUNT) return error(`生成套数必须为1~${MAX_GENERATE_COUNT}`, 400);
+    if (!Array.isArray(variations) || variations.length < 1 || variations.length > MAX_SHOPEE_VARIATIONS) return error(`Shopee变体数量必须为1~${MAX_SHOPEE_VARIATIONS}`, 400);
+    const normalizedVariations = [];
+    for (let i = 0; i < variations.length; i++) {
+      const v = variations[i];
+      const pricing = normalizeVariantPricing(v, true);
+      if (pricing.error) return error('变体#' + (i + 1) + pricing.error, 400);
+      normalizedVariations.push({
+        id: v.id || uuid(), product_id: taskId, integration_no: v.integration_no || taskId.slice(0,8),
+        option1: v.option1 || '', image_per_variation: v.image_per_variation || '',
+        option2: v.option2 || '', image_2: v.image_2 || '',
+        price: pricing.price, price_float_enabled: pricing.price_float_enabled,
+        price_min: pricing.price_min, price_max: pricing.price_max, price_precision: pricing.price_precision,
+        stock: v.stock || 0, sku: v.sku || '',
+      });
+    }
     const shopeeDetailCount = parseInt(detail_image_count);
     await env.DB.prepare("UPDATE ews_tasks SET name=?, status='pending', updated_at=datetime('now') WHERE id=?").bind(String(name).slice(0,30), taskId).run();
     await shopeeCreateProduct(env, {
@@ -545,7 +570,7 @@ async function handleUpdateTask(request, env, path) {
       description: description ?? task_description ?? '', main_description: main_description || '', detail_description: detail_description || '',
       reference_title: reference_title || name || '',
       reference_image: reference_image || '', auxiliary_images: auxiliary_images || '[]',
-      generate_count: Math.max(1, parseInt(generate_count) || 1),
+      generate_count: shopeeGenerateCount,
       mode: mode === 'dedup' ? 'dedup' : 'full',
       main_image_count: Math.min(Math.max(parseInt(main_image_count) || 9, 5), 9),
       detail_image_count: Math.min(Math.max(Number.isNaN(shopeeDetailCount) ? 0 : shopeeDetailCount, 0), 9),
@@ -557,22 +582,7 @@ async function handleUpdateTask(request, env, path) {
       pre_order_dts: pre_order_dts ?? null,
       shipping_channels: shipping_channels || '[]',
     });
-    if (variations && Array.isArray(variations)) {
-      await shopeeClearVariations(env, taskId);
-      for (let i = 0; i < variations.length; i++) {
-        const v = variations[i];
-        const pricing = normalizeVariantPricing(v, true);
-        if (pricing.error) return error('变体#' + (i + 1) + pricing.error, 400);
-        await shopeeCreateVariations(env, [{
-          id: v.id || uuid(), product_id: taskId, integration_no: v.integration_no || taskId.slice(0,8),
-          option1: v.option1 || '', image_per_variation: v.image_per_variation || '',
-          option2: v.option2 || '', image_2: v.image_2 || '',
-          price: pricing.price, price_float_enabled: pricing.price_float_enabled,
-          price_min: pricing.price_min, price_max: pricing.price_max, price_precision: pricing.price_precision,
-          stock: v.stock || 0, sku: v.sku || '',
-        }]);
-      }
-    }
+    await shopeeReplaceVariations(env, taskId, normalizedVariations);
     return json({ success: true, task_id: taskId, message: '商品创建成功' });
   }
 
@@ -580,12 +590,30 @@ async function handleUpdateTask(request, env, path) {
     const { name, topic_items, description, main_description, detail_description, auxiliary_images, reference_image, generate_count, stock, weight, variants, mode, main_image_count, detail_image_count } = body || {};
     if (!name) return error('任务名称不能为空', 400);
     if (!reference_image) return error('核心参考图不能为空', 400);
+    const jstGenerateCount = parseInt(generate_count);
+    if (!Number.isInteger(jstGenerateCount) || jstGenerateCount < 1 || jstGenerateCount > MAX_GENERATE_COUNT) return error(`生成套数必须为1~${MAX_GENERATE_COUNT}`, 400);
+    if (!Array.isArray(variants) || variants.length < 1 || variants.length > MAX_JST_VARIANTS) return error(`聚水潭变体数量必须为1~${MAX_JST_VARIANTS}`, 400);
+    const normalizedVariants = [];
+    for (let i = 0; i < variants.length; i++) {
+      const v = variants[i];
+      const pricing = normalizeVariantPricing(v, false);
+      if (pricing.error) return error('变体#' + (i + 1) + pricing.error, 400);
+      normalizedVariants.push({
+        id: uuid(), task_id: taskId,
+        tier1_name: v.tier1_name || '', tier1_value: v.tier1_value || v.name || '',
+        tier2_name: v.tier2_name || '', tier2_value: v.tier2_value || '',
+        white_bg_image: v.sku_image || v.white_bg_image || '',
+        price: pricing.price, price_float_enabled: pricing.price_float_enabled,
+        price_min: pricing.price_min, price_max: pricing.price_max, price_precision: pricing.price_precision,
+        description: v.sku_description || '', sort_order: i,
+      });
+    }
 
     await jstUpdateTask(env, taskId, {
       name: String(name).slice(0, 12), topic_items: topic_items || '', description: description || '',
       main_description: main_description || '', detail_description: detail_description || '',
       auxiliary_images: auxiliary_images || '', reference_image,
-      generate_count: parseInt(generate_count), stock: stock !== undefined ? parseInt(stock) : 999,
+      generate_count: jstGenerateCount, stock: stock !== undefined ? parseInt(stock) : 999,
       weight: weight !== undefined ? parseFloat(weight) : 1.0,
       variant_count: variants?.length || 1,
       main_image_count: Math.min(Math.max(parseInt(main_image_count) || 5, 5), 9),
@@ -597,25 +625,7 @@ async function handleUpdateTask(request, env, path) {
       .bind(String(name).slice(0, 12), taskId).run();
 
     // 变体（二维规格）
-    if (variants && Array.isArray(variants)) {
-      await jstClearVariants(env, taskId);
-      for (let i = 0; i < variants.length; i++) {
-        const v = variants[i];
-        const pricing = normalizeVariantPricing(v, false);
-        if (pricing.error) return error('变体#' + (i + 1) + pricing.error, 400);
-        await jstCreateVariant(env, {
-          id: uuid(), task_id: taskId,
-          tier1_name: v.tier1_name || '',
-          tier1_value: v.tier1_value || v.name || '',
-          tier2_name: v.tier2_name || '',
-          tier2_value: v.tier2_value || '',
-          white_bg_image: v.sku_image || v.white_bg_image || '',
-          price: pricing.price, price_float_enabled: pricing.price_float_enabled,
-          price_min: pricing.price_min, price_max: pricing.price_max, price_precision: pricing.price_precision,
-          description: v.sku_description || '', sort_order: i,
-        });
-      }
-    }
+    await jstReplaceVariants(env, taskId, normalizedVariants);
     return json({ success: true, task_id: taskId, message: '任务更新成功' });
   }
 
@@ -705,7 +715,7 @@ async function jstHandlePush(env, taskId, ctx, request) {
     await jstCreateExpectedImages(env, taskId, subId, i, variantCount, detail.mode || 'full', mainImageCount, detailImageCount,
       !!mainWebhookUrl, !!subImageWebhookUrl, !!detailWebhookUrl, !!config.n8n_sku_image_webhook);
   }
-  await jstUpdateTaskStatus(env, taskId, 'processing');
+  await env.DB.prepare("UPDATE ews_jst_tasks SET status='processing', queue_mode='auto', updated_at=datetime('now') WHERE id=?").bind(taskId).run();
   const subTasks = subTaskIds.map((id, i) => ({ sub_task_id: id, set_index: i, style_code: id.slice(0, 8) }));
   const allJobs = [];
 
@@ -886,8 +896,9 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
   return json({ success: true, task_id: taskId, sub_tasks: subTasks, total_plans: planRecords.length, jobs_count: planRecords.length, message: '已创建 ' + planRecords.length + ' 个推送计划' });
 }
 
-function primaryImagePlanWhereClause(primaryOnly) {
-  return primaryOnly ? " AND (webhook_type='main' OR webhook_type='main_1' OR webhook_type LIKE 'sub_%')" : '';
+function primaryImagePlanWhereClause(primaryOnly, alias = '') {
+  const column = alias ? `${alias}.webhook_type` : 'webhook_type';
+  return primaryOnly ? ` AND (${column}='main' OR ${column}='main_1' OR ${column} LIKE 'sub_%')` : '';
 }
 
 async function getPendingPlansForRelease(env, planTable, taskId, limit, primaryOnly) {
@@ -903,8 +914,8 @@ async function shopeeReleaseTaskQueue(env, taskId, ctx) {
     const batchSize = parseInt(config.push_batch_size) || 20;
     const release = await getPushReleaseWindow(env, 'ews_shopee_push_plans', taskId, batchSize);
     if (release.limit <= 0) return;
-    const taskOwner = await getOne(env, "SELECT user_id, status FROM ews_tasks WHERE id=?", [taskId]);
-    const primaryOnly = taskOwner?.status === 'partial_failed' || isEnabled(config.push_primary_images_only);
+    const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
+    const primaryOnly = isEnabled(config.push_primary_images_only);
     const pendingPlans = await getPendingPlansForRelease(env, 'ews_shopee_push_plans', taskId, release.limit, primaryOnly);
     const plans = pendingPlans?.results || [];
     if (!plans.length) return;
@@ -916,9 +927,7 @@ async function shopeeReleaseTaskQueue(env, taskId, ctx) {
       const claimed = await claimPushPlan(env, 'ews_shopee_push_plans', plan.id, taskId, batchSize, release.globalMax, release.globalReleasePerMinute, release.taskReleasePerMinute);
       if (!claimed) continue;
       if (taskOwner?.user_id) {
-        const credits = await getUserCredits(env, taskOwner.user_id);
-        if (credits > 0) await updateUserCredits(env, taskOwner.user_id, 1, 'subtract');
-        else {
+        if (!(await consumeUserCredit(env, taskOwner.user_id))) {
           await markPushPlanFailed(env, 'ews_shopee_push_plans', plan.id, '算力不足');
           continue;
         }
@@ -947,6 +956,22 @@ async function markPushPlanFailed(env, planTable, planId, message) {
 async function refundTaskCredit(env, taskId) {
   const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
   if (taskOwner?.user_id) await updateUserCredits(env, taskOwner.user_id, 1, 'add');
+}
+
+async function completePushPlanFromCallback(env, planTable, taskId, webhookType, subTaskId = '') {
+  const safeTable = normalizePushPlanTable(planTable);
+  const subTaskClause = subTaskId ? ' AND sub_task_id=?' : '';
+  const params = [taskId, webhookType];
+  if (subTaskId) params.push(subTaskId);
+  const completed = await env.DB.prepare(`UPDATE ${safeTable} SET status='done', error='', updated_at=datetime('now') WHERE task_id=? AND webhook_type=?${subTaskClause} AND status='processing'`).bind(...params).run();
+  if (d1Changes(completed) > 0) return true;
+  const timedOutPlan = await getOne(env, `SELECT id FROM ${safeTable} WHERE task_id=? AND webhook_type=?${subTaskClause} AND status='failed' AND error LIKE 'Push plan timed out after %'`, params);
+  if (!timedOutPlan) return false;
+  const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
+  if (taskOwner?.user_id && !(await consumeUserCredit(env, taskOwner.user_id))) return false;
+  const recovered = await env.DB.prepare(`UPDATE ${safeTable} SET status='done', error='Late callback accepted', updated_at=datetime('now') WHERE id=? AND status='failed' AND error LIKE 'Push plan timed out after %'`).bind(timedOutPlan.id).run();
+  if (d1Changes(recovered) < 1 && taskOwner?.user_id) await updateUserCredits(env, taskOwner.user_id, 1, 'add');
+  return d1Changes(recovered) > 0;
 }
 
 async function getGlobalPushMaxActive(env) {
@@ -1022,8 +1047,8 @@ async function jstReleaseTaskQueue(env, taskId, ctx) {
     const batchSize = parseInt(config.push_batch_size) || 20;
     const release = await getPushReleaseWindow(env, 'ews_jst_push_plans', taskId, batchSize);
     if (release.limit <= 0) return;
-    const taskOwner = await getOne(env, "SELECT user_id, status FROM ews_tasks WHERE id=?", [taskId]);
-    const primaryOnly = taskOwner?.status === 'partial_failed' || isEnabled(config.push_primary_images_only);
+    const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
+    const primaryOnly = isEnabled(config.push_primary_images_only);
     const pendingPlans = await getPendingPlansForRelease(env, 'ews_jst_push_plans', taskId, release.limit, primaryOnly);
     const plans = pendingPlans?.results || [];
     if (!plans.length) return;
@@ -1035,9 +1060,7 @@ async function jstReleaseTaskQueue(env, taskId, ctx) {
       const claimed = await claimPushPlan(env, 'ews_jst_push_plans', plan.id, taskId, batchSize, release.globalMax, release.globalReleasePerMinute, release.taskReleasePerMinute);
       if (!claimed) continue;
       if (taskOwner?.user_id) {
-        const credits = await getUserCredits(env, taskOwner.user_id);
-        if (credits > 0) await updateUserCredits(env, taskOwner.user_id, 1, 'subtract');
-        else {
+        if (!(await consumeUserCredit(env, taskOwner.user_id))) {
           await markPushPlanFailed(env, 'ews_jst_push_plans', plan.id, '算力不足');
           continue;
         }
@@ -1055,10 +1078,25 @@ async function processPendingQueue(env, ctx) {
     await processCallbackQueue(env, ctx);
     if (ctx) ctx.waitUntil(processImageQueue(env, ctx));
     else await processImageQueue(env, ctx);
-    const jstRows = await query(env, "SELECT DISTINCT p.task_id FROM ews_jst_push_plans p LEFT JOIN ews_jst_tasks t ON t.id = p.task_id WHERE p.status='pending' AND t.status IN ('processing','partial_failed') AND COALESCE(t.queue_mode, 'auto') != 'manual'");
-    for (const row of (jstRows?.results || [])) ctx.waitUntil(jstReleaseTaskQueue(env, row.task_id, ctx));
-    const shopeeRows = await query(env, "SELECT DISTINCT p.task_id FROM ews_shopee_push_plans p LEFT JOIN ews_tasks t ON t.id = p.task_id WHERE p.status='pending' AND t.status IN ('processing','partial_failed')");
-    for (const row of (shopeeRows?.results || [])) ctx.waitUntil(shopeeReleaseTaskQueue(env, row.task_id, ctx));
+    const [jstConfig, shopeeConfig, releaseLimits] = await Promise.all([
+      getConfig(env, 'jst'), getConfig(env, 'shopee'), getPushReleaseLimits(env),
+    ]);
+    const jstPrimary = primaryImagePlanWhereClause(isEnabled(jstConfig.push_primary_images_only), 'p');
+    const shopeePrimary = primaryImagePlanWhereClause(isEnabled(shopeeConfig.push_primary_images_only), 'p');
+    const candidates = await query(env, `SELECT platform, task_id, MIN(created_at) AS oldest FROM (
+      SELECT 'jst' AS platform, p.task_id, p.created_at FROM ews_jst_push_plans p
+        JOIN ews_jst_tasks t ON t.id=p.task_id
+        WHERE p.status='pending' AND t.status IN ('processing','partial_failed')
+          AND COALESCE(t.queue_mode, 'auto') != 'manual'${jstPrimary}
+      UNION ALL
+      SELECT 'shopee' AS platform, p.task_id, p.created_at FROM ews_shopee_push_plans p
+        JOIN ews_tasks t ON t.id=p.task_id
+        WHERE p.status='pending' AND t.status IN ('processing','partial_failed')${shopeePrimary}
+    ) GROUP BY platform, task_id ORDER BY oldest ASC LIMIT ?`, [releaseLimits.globalPerMinute]);
+    for (const row of (candidates?.results || [])) {
+      if (row.platform === 'jst') await jstReleaseTaskQueue(env, row.task_id, ctx);
+      else await shopeeReleaseTaskQueue(env, row.task_id, ctx);
+    }
   } catch (err) { console.error('processPendingQueue error:', err.message); }
 }
 
@@ -1213,6 +1251,19 @@ function callbackPermanentError(message) {
   return err;
 }
 
+function normalizeGeneratedTitles(values, expectedCount, minLength, maxLength, label) {
+  if (!Array.isArray(values) || values.length !== expectedCount) {
+    throw callbackPermanentError(`${label}数量不匹配: ${Array.isArray(values) ? values.length : 0} vs ${expectedCount}`);
+  }
+  return values.map((value, index) => {
+    const title = typeof value === 'string' ? value.trim() : '';
+    if (title.length < minLength || title.length > maxLength) {
+      throw callbackPermanentError(`${label}#${index + 1}长度必须为${minLength}~${maxLength}字符`);
+    }
+    return title;
+  });
+}
+
 async function ensureCallbackQueueTable(env) {
   if (callbackQueueReady) return;
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS ews_callback_queue (
@@ -1345,23 +1396,39 @@ async function handleCallback(request, env, ctx) {
 async function processCallbackQueue(env, ctx, preferredId) {
   try {
     await ensureCallbackQueueTable(env);
-    await recoverStaleCallbackQueue(env);
-    const rows = [];
     if (preferredId) {
       const preferred = await getOne(env, "SELECT * FROM ews_callback_queue WHERE id=?", [preferredId]);
-      if (preferred) rows.push(preferred);
+      if (preferred) await processCallbackQueueRow(env, ctx, preferred);
+      return;
     }
-    const remaining = CALLBACK_QUEUE_BATCH_SIZE - rows.length;
-    if (remaining > 0) {
-      const pending = await query(env, `SELECT * FROM ews_callback_queue
-        WHERE id != ? AND attempts < ? AND (status='pending' OR (status='processing' AND processing_at < datetime('now', '-5 minutes')))
-        ORDER BY received_at ASC LIMIT ?`, [preferredId || '', CALLBACK_QUEUE_MAX_ATTEMPTS, remaining]);
-      rows.push(...(pending?.results || []));
-    }
-    for (const row of rows) await processCallbackQueueRow(env, ctx, row);
+    await recoverStaleCallbackQueue(env);
+    const pending = await query(env, `SELECT * FROM ews_callback_queue
+      WHERE attempts < ? AND (status='pending' OR (status='processing' AND processing_at < datetime('now', '-5 minutes')))
+      ORDER BY received_at ASC LIMIT ?`, [CALLBACK_QUEUE_MAX_ATTEMPTS, CALLBACK_QUEUE_BATCH_SIZE]);
+    const results = await Promise.allSettled((pending?.results || []).map(row => processCallbackQueueRow(env, ctx, row)));
+    const claimedAny = results.some(result => result.status === 'fulfilled' && result.value);
+    if (claimedAny && ctx) ctx.waitUntil(processCallbackQueue(env, ctx));
   } catch (err) {
     console.error('processCallbackQueue error:', err.message);
   }
+}
+
+async function failCallbackPushPlan(env, row, reason) {
+  let payload;
+  try { payload = JSON.parse(row.payload || '{}'); } catch (_) { return; }
+  let webhookType = '';
+  if (payload.sku_titles !== undefined) webhookType = 'sku_title';
+  else if (payload.titles !== undefined || payload.product_title) webhookType = 'title';
+  else if (payload.image_type && payload.image_position) webhookType = `${payload.image_type}_${parseInt(payload.image_position) || 1}`;
+  if (!webhookType) return;
+  const planTable = row.platform === 'shopee' ? 'ews_shopee_push_plans' : 'ews_jst_push_plans';
+  const subTaskWhere = webhookType === 'title' || webhookType === 'sku_title' ? '' : ' AND sub_task_id=?';
+  const params = [row.task_id, webhookType];
+  if (subTaskWhere) params.push(payload.sub_task_id || '');
+  const plan = await getOne(env, `SELECT id FROM ${planTable} WHERE task_id=? AND webhook_type=?${subTaskWhere} AND status='processing'`, params);
+  if (!plan) return;
+  await markPushPlanFailed(env, planTable, plan.id, reason);
+  await refundTaskCredit(env, row.task_id);
 }
 
 async function processCallbackQueueRow(env, ctx, row) {
@@ -1377,15 +1444,15 @@ async function processCallbackQueueRow(env, ctx, row) {
   try {
     const payload = JSON.parse(row.payload || '{}');
     await processCallbackPayload(env, ctx, payload, true);
-    await env.DB.prepare("DELETE FROM ews_callback_queue WHERE id=?").bind(row.id).run();
+    await env.DB.prepare("DELETE FROM ews_callback_queue WHERE id=? AND status='processing' AND attempts=?").bind(row.id, attempts).run();
   } catch (err) {
     const failed = err.permanent || attempts >= CALLBACK_QUEUE_MAX_ATTEMPTS;
-    await env.DB.prepare("UPDATE ews_callback_queue SET status=?, error=?, updated_at=datetime('now') WHERE id=?")
-      .bind(failed ? 'failed' : 'pending', err.message || '回调处理失败', row.id).run();
+    if (err.permanent) await failCallbackPushPlan(env, row, err.message || '回调数据无效');
+    await env.DB.prepare("UPDATE ews_callback_queue SET status=?, error=?, updated_at=datetime('now') WHERE id=? AND status='processing' AND attempts=?")
+      .bind(failed ? 'failed' : 'pending', err.message || '回调处理失败', row.id, attempts).run();
     console.error('callback queue item failed:', row.id, err.message);
-  } finally {
-    if (ctx) ctx.waitUntil(processCallbackQueue(env, ctx));
   }
+  return true;
 }
 
 async function enqueueImageCallback(env, idx, body) {
@@ -1408,11 +1475,16 @@ async function enqueueImageCallback(env, idx, body) {
   return imageId;
 }
 
-async function processImageQueue(env, ctx) {
+async function processImageQueue(env, ctx, preferredId) {
   try {
     await ensureImageQueueTable(env);
-    await recoverStaleImageQueue(env);
     const limits = await getImageQueueLimits(env);
+    if (preferredId) {
+      const preferred = await getOne(env, "SELECT * FROM ews_image_queue WHERE id=?", [preferredId]);
+      if (preferred) await processImageQueueRow(env, ctx, preferred, limits);
+      return;
+    }
+    await recoverStaleImageQueue(env);
     const candidates = await query(env, `SELECT * FROM ews_image_queue
       WHERE attempts < ? AND (status='pending' OR (status='processing' AND processing_at < datetime('now', '-5 minutes')))
       ORDER BY received_at ASC LIMIT ?`, [IMAGE_QUEUE_MAX_ATTEMPTS, limits.batchSize]);
@@ -1439,11 +1511,12 @@ async function processImageQueueRow(env, ctx, row, limits) {
   if (claimedChanges < 1) return false;
   try {
     await processImageQueuePayload(env, ctx, row);
-    await env.DB.prepare("DELETE FROM ews_image_queue WHERE id=?").bind(row.id).run();
+    await env.DB.prepare("DELETE FROM ews_image_queue WHERE id=? AND status='processing' AND attempts=?").bind(row.id, attempts).run();
   } catch (err) {
     const failed = err.permanent || attempts >= IMAGE_QUEUE_MAX_ATTEMPTS;
-    await env.DB.prepare("UPDATE ews_image_queue SET status=?, error=?, updated_at=datetime('now') WHERE id=?")
-      .bind(failed ? 'failed' : 'pending', err.message || '图片处理失败', row.id).run();
+    if (err.permanent) await failImageQueuePlan(env, row, err.message || '图片回调数据无效');
+    await env.DB.prepare("UPDATE ews_image_queue SET status=?, error=?, updated_at=datetime('now') WHERE id=? AND status='processing' AND attempts=?")
+      .bind(failed ? 'failed' : 'pending', err.message || '图片处理失败', row.id, attempts).run();
     console.error('image queue item failed:', row.id, err.message);
   }
   return true;
@@ -1463,14 +1536,17 @@ async function processImageQueuePayload(env, ctx, row) {
   const planTable = isShopee ? 'ews_shopee_push_plans' : 'ews_jst_push_plans';
   await ensurePushPlanRuntimeColumns(env);
   const sub_task_id = row.sub_task_id || '';
+  if (!sub_task_id) throw callbackPermanentError('图片回调缺少 sub_task_id');
+  const subTaskTable = isShopee ? 'ews_shopee_sub_tasks' : 'ews_jst_sub_tasks';
+  const subTask = await getOne(env, `SELECT id, set_index FROM ${subTaskTable} WHERE id=? AND parent_task_id=?`, [sub_task_id, task_id]);
+  if (!subTask) throw callbackPermanentError('图片回调的 sub_task_id 不属于当前任务');
   const image_type = row.image_type;
   const image_position = parseInt(row.image_position) || 1;
   const whType = `${image_type}_${image_position}`;
-  const result = row.image_url ? await processOneImage(env, idx.platform, task_id, sub_task_id, row.set_index ?? 0, image_type, image_position, row.image_url, publicUrl) : null;
+  const result = row.image_url ? await processOneImage(env, idx.platform, task_id, sub_task_id, subTask.set_index, image_type, image_position, row.image_url, publicUrl) : null;
 
   if (result) {
-    await env.DB.prepare(`UPDATE ${planTable} SET status='done', updated_at=datetime('now') WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`)
-      .bind(task_id, sub_task_id, whType).run();
+    await completePushPlanFromCallback(env, planTable, task_id, whType, sub_task_id);
   } else {
     const planInfo = await env.DB.prepare(`SELECT id, webhook_url, payload, retry_count FROM ${planTable} WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`)
       .bind(task_id, sub_task_id, whType).first();
@@ -1502,8 +1578,10 @@ async function processImageQueuePayload(env, ctx, row) {
 
 async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
   if (!body || typeof body !== 'object') throw callbackPermanentError('无效的请求体');
-  const { task_id, sub_task_id, set_index, titles, product_title, image_type, image_position, image_url, error: errMsg } = body;
+  const { task_id, sub_task_id, titles, product_title, image_type, image_position, image_url, error: errMsg } = body;
   if (!task_id) throw callbackPermanentError('缺少 task_id');
+  if (titles !== undefined && !Array.isArray(titles)) throw callbackPermanentError('titles 必须是数组');
+  if (body.sku_titles !== undefined && !Array.isArray(body.sku_titles)) throw callbackPermanentError('sku_titles 必须是数组');
   const idx = await getTaskIndex(env, task_id);
   if (!idx) throw callbackPermanentError('任务不存在');
 
@@ -1513,28 +1591,27 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
     if (config.callback_secret && receivedSecret !== config.callback_secret) throw callbackPermanentError('回调密钥无效');
   }
 
-  const publicUrl = config.r2_public_url || '';
   const isShopee = idx.platform === 'shopee';
   const getSubTasks = isShopee ? shopeeGetSubTasks : jstGetSubTasks;
   const updateSubTask = isShopee ? shopeeUpdateSubTask : jstUpdateSubTask;
   const checkSubTaskImages = isShopee ? shopeeCheckSubTaskImages : jstCheckSubTaskImages;
   const checkParentCompletion = isShopee ? shopeeCheckParentCompletion : jstCheckParentCompletion;
-  const refundCredits = isShopee ? shopeeRefundCredits : jstRefundCredits;
   await ensurePushPlanRuntimeColumns(env);
 
   // 标题回调
-  if (titles && Array.isArray(titles)) {
+  if (Array.isArray(titles)) {
     const subTasks = await getSubTasks(env, task_id);
     const allSubs = (subTasks?.results || []).sort((a,b) => a.set_index - b.set_index);
-    if (titles.length !== allSubs.length) throw callbackPermanentError(`标题数量不匹配: ${titles.length} vs ${allSubs.length}`);
-    for (let i = 0; i < allSubs.length; i++) await updateSubTask(env, allSubs[i].id, { title: titles[i] });
+    const normalizedTitles = normalizeGeneratedTitles(titles, allSubs.length, isShopee ? 10 : 1, isShopee ? 120 : 200, '商品标题');
+    for (let i = 0; i < allSubs.length; i++) await updateSubTask(env, allSubs[i].id, { title: normalizedTitles[i] });
   } else if (product_title) {
     const subTasks = await getSubTasks(env, task_id);
-    for (const st of (subTasks?.results || [])) await updateSubTask(env, st.id, { title: product_title });
+    const title = normalizeGeneratedTitles([product_title], 1, isShopee ? 10 : 1, isShopee ? 120 : 200, '商品标题')[0];
+    for (const st of (subTasks?.results || [])) await updateSubTask(env, st.id, { title });
   }
   if (titles || product_title) {
-    const PP = idx.platform === 'jst' ? 'ews_jst_' : 'ews_shopee_';
-    await env.DB.prepare(`UPDATE ${PP}push_plans SET status='done', updated_at=datetime('now') WHERE task_id=? AND webhook_type='title' AND status='processing'`).bind(task_id).run();
+    const planTable = idx.platform === 'jst' ? 'ews_jst_push_plans' : 'ews_shopee_push_plans';
+    await completePushPlanFromCallback(env, planTable, task_id, 'title');
   }
 
   // SKU 标题回调
@@ -1546,14 +1623,14 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
       const allSubs = (subTasks?.results || []).sort((a,b) => a.set_index - b.set_index);
       const vCount = variants.length;
       const expected = allSubs.length * vCount;
-      if (body.sku_titles.length !== expected) throw callbackPermanentError(`SKU标题数量不匹配: ${body.sku_titles.length} vs ${expected}`);
+      const skuTitles = normalizeGeneratedTitles(body.sku_titles, expected, 1, 20, 'SKU标题');
       for (let si = 0; si < allSubs.length; si++) {
         for (let vi = 0; vi < vCount; vi++) {
-          const title = body.sku_titles[si * vCount + vi];
-          if (title) await shopeeCreateSkuTitle(env, { id: uuid(), sub_task_id: allSubs[si].id, variation_id: variants[vi].id, title: title.slice(0, 20) });
+          const title = skuTitles[si * vCount + vi];
+          await shopeeCreateSkuTitle(env, { id: uuid(), sub_task_id: allSubs[si].id, variation_id: variants[vi].id, title });
         }
       }
-      await env.DB.prepare("UPDATE ews_shopee_push_plans SET status='done', updated_at=datetime('now') WHERE task_id=? AND webhook_type='sku_title' AND status='processing'").bind(task_id).run();
+      await completePushPlanFromCallback(env, 'ews_shopee_push_plans', task_id, 'sku_title');
     } else {
       const skuDetail = await jstGetTask(env, task_id);
       const variants = (skuDetail?.variants || []).sort((a,b) => a.sort_order - b.sort_order);
@@ -1561,23 +1638,31 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
       const allSubs = (subTasks?.results || []).sort((a,b) => a.set_index - b.set_index);
       const vCount = variants.length;
       const expected = allSubs.length * vCount;
-      if (body.sku_titles.length !== expected) throw callbackPermanentError(`SKU标题数量不匹配: ${body.sku_titles.length} vs ${expected}`);
+      const skuTitles = normalizeGeneratedTitles(body.sku_titles, expected, 1, 30, 'SKU标题');
       for (let si = 0; si < allSubs.length; si++) {
         for (let vi = 0; vi < vCount; vi++) {
-          const title = body.sku_titles[si * vCount + vi];
-          if (title) await jstCreateSkuTitle(env, { id: uuid(), sub_task_id: allSubs[si].id, variant_id: variants[vi].id, title: title.slice(0, 30) });
+          const title = skuTitles[si * vCount + vi];
+          await jstCreateSkuTitle(env, { id: uuid(), sub_task_id: allSubs[si].id, variant_id: variants[vi].id, title });
         }
       }
-      await env.DB.prepare("UPDATE ews_jst_push_plans SET status='done', updated_at=datetime('now') WHERE task_id=? AND webhook_type='sku_title' AND status='processing'").bind(task_id).run();
+      await completePushPlanFromCallback(env, 'ews_jst_push_plans', task_id, 'sku_title');
     }
   }
 
   // 图片回调先进入图片队列，避免回调并发直接放大 R2/D1 压力
   let imageQueued = false;
-  if (image_type && image_position && (image_url || errMsg)) {
+  const hasImageCallback = image_type !== undefined || image_url !== undefined || (errMsg && sub_task_id);
+  if (hasImageCallback) {
     if (!['main','sub','detail','sku'].includes(image_type)) throw callbackPermanentError('无效的图片类型');
-    await enqueueImageCallback(env, idx, body);
-    ctx.waitUntil(processImageQueue(env, ctx));
+    if (!sub_task_id) throw callbackPermanentError('图片回调缺少 sub_task_id');
+    const normalizedPosition = parseInt(image_position);
+    if (!Number.isInteger(normalizedPosition) || normalizedPosition < 1) throw callbackPermanentError('图片回调的 image_position 无效');
+    if (!image_url && !errMsg) throw callbackPermanentError('图片回调缺少 image_url 或 error');
+    const subTaskTable = isShopee ? 'ews_shopee_sub_tasks' : 'ews_jst_sub_tasks';
+    const callbackSubTask = await getOne(env, `SELECT id, set_index FROM ${subTaskTable} WHERE id=? AND parent_task_id=?`, [sub_task_id, task_id]);
+    if (!callbackSubTask) throw callbackPermanentError('图片回调的 sub_task_id 不属于当前任务');
+    const imageQueueId = await enqueueImageCallback(env, idx, { ...body, set_index: callbackSubTask.set_index, image_position: normalizedPosition });
+    ctx.waitUntil(processImageQueue(env, ctx, imageQueueId));
     imageQueued = true;
   }
 
@@ -1605,7 +1690,9 @@ const SHOPEE_ITEM_IMAGE_LIMIT_BYTES = 2 * 1024 * 1024;
 const SHOPEE_ITEM_IMAGE_MAX_SIDE = 1200;
 const SHOPEE_FAST_JPEG_QUALITY = 88;
 const SHOPEE_RETRY_JPEG_QUALITY = 82;
+const SHOPEE_FINAL_JPEG_QUALITY = 55;
 const IMAGE_FETCH_TIMEOUT_MS = 30000;
+const MAX_SOURCE_IMAGE_BYTES = 16 * 1024 * 1024;
 
 function isShopeeItemImage(platform, imageType) {
   return platform === 'shopee' && (imageType === 'main' || imageType === 'sub');
@@ -1645,6 +1732,34 @@ async function fetchImageWithTimeout(imageUrl) {
   }
 }
 
+async function readImageResponse(resp) {
+  const declaredSize = parseInt(resp.headers.get('content-length') || '0');
+  if (declaredSize > MAX_SOURCE_IMAGE_BYTES) throw new Error('Source image exceeds 16MB limit');
+  if (!resp.body?.getReader) {
+    const buffer = await resp.arrayBuffer();
+    if (buffer.byteLength > MAX_SOURCE_IMAGE_BYTES) throw new Error('Source image exceeds 16MB limit');
+    return buffer;
+  }
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+    total += chunk.byteLength;
+    if (total > MAX_SOURCE_IMAGE_BYTES) {
+      await reader.cancel();
+      throw new Error('Source image exceeds 16MB limit');
+    }
+    chunks.push(chunk);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return bytes.buffer;
+}
+
 function encodeShopeeJpegFast(image) {
   const primary = image.get_bytes_jpeg(SHOPEE_FAST_JPEG_QUALITY);
   if (primary.byteLength <= SHOPEE_ITEM_IMAGE_LIMIT_BYTES) return primary;
@@ -1680,6 +1795,8 @@ function normalizeShopeeItemImage(buffer) {
       const resizedBytes = encodeShopeeJpegFast(resized);
       if (resizedBytes.byteLength <= SHOPEE_ITEM_IMAGE_LIMIT_BYTES) return resizedBytes;
     }
+    const finalBytes = (resized || working).get_bytes_jpeg(SHOPEE_FINAL_JPEG_QUALITY);
+    if (finalBytes.byteLength <= SHOPEE_ITEM_IMAGE_LIMIT_BYTES) return finalBytes;
     throw new Error('Shopee image remains above 2MB after compression');
   } finally {
     freePhotonImage(resized);
@@ -1692,8 +1809,9 @@ async function processOneImage(env, platform, task_id, sub_task_id, set_index, i
   try {
     const resp = await fetchImageWithTimeout(image_url);
     if (!resp.ok) return null;
-    let buffer = await resp.arrayBuffer();
+    let buffer = await readImageResponse(resp);
     let contentType = resp.headers.get('content-type') || 'image/jpeg';
+    if (!/^image\//i.test(contentType) && !/^application\/octet-stream\b/i.test(contentType)) return null;
     if (isShopeeItemImage(platform, image_type)) {
       if (!canReuseShopeeItemImage(buffer, contentType)) buffer = normalizeShopeeItemImage(buffer);
       contentType = 'image/jpeg';
@@ -1737,23 +1855,13 @@ async function handleRetryPlan(env, path, request, ctx) {
   const plansTable = idx.platform === 'jst' ? 'ews_jst_push_plans' : 'ews_shopee_push_plans';
   await ensurePushPlanRuntimeColumns(env);
   const plan = await getOne(env, `SELECT * FROM ${plansTable} WHERE id=?`, [planId]);
-  if (!plan) return error('计划不存在', 404);
-  const globalMax = await getGlobalPushMaxActive(env);
-  if ((await getGlobalPushActiveCount(env)) >= globalMax) return error('全局推送队列繁忙，请稍后重试', 429);
-  const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
-  if (taskOwner?.user_id) {
-    if ((await getUserCredits(env, taskOwner.user_id)) <= 0) return error('算力不足', 400);
-    await updateUserCredits(env, taskOwner.user_id, 1, 'subtract');
-  }
-  await env.DB.prepare(`UPDATE ${plansTable} SET status='processing', retry_count=0, error='', processing_at=datetime('now'), updated_at=datetime('now') WHERE id=?`).bind(planId).run();
+  if (!plan || plan.task_id !== taskId) return error('计划不存在', 404);
+  if (plan.status === 'processing') return error('计划正在处理中，请勿重复推送', 409);
+  await env.DB.prepare(`UPDATE ${plansTable} SET status='pending', retry_count=0, error='', processing_at='', updated_at=datetime('now') WHERE id=?`).bind(planId).run();
   await reconcileTaskStatusForPushPlans(env, plansTable, taskId, 'retry plan resumed', { resumeWhenNoFailures: true });
-  try { await pushToWebhook(plan.webhook_url, JSON.parse(plan.payload)); return json({ success: true, message: '计划已重新推送' }); }
-  catch (err) {
-    await env.DB.prepare(`UPDATE ${plansTable} SET status='failed', retry_count=3, error=?, updated_at=datetime('now') WHERE id=?`).bind(err.message, planId).run();
-    await failTaskForPushPlan(env, plansTable, taskId, err.message);
-    if (taskOwner?.user_id) await updateUserCredits(env, taskOwner.user_id, 1, 'add');
-    return error('推送失败: ' + err.message, 500);
-  }
+  if (idx.platform === 'jst') ctx.waitUntil(jstReleaseTaskQueue(env, taskId, ctx));
+  else ctx.waitUntil(shopeeReleaseTaskQueue(env, taskId, ctx));
+  return json({ success: true, queued: true, message: '计划已重新加入统一推送队列' });
 }
 
 // ========== 导出 ==========
@@ -1787,22 +1895,22 @@ async function jstHandleExport(env, taskId) {
     for (const st of (skuRows?.results || [])) skuTitleMap[st.sub_task_id + '_' + st.variant_id] = st.title;
   }
 
-  function recordedImg(setIdx, type, pos) {
-    const found = images.find(img => img.set_index === setIdx && img.image_type === type && img.position === pos);
+  function recordedImg(subTaskId, type, pos) {
+    const found = images.find(img => img.sub_task_id === subTaskId && img.image_type === type && img.position === pos);
     return found?.image_url || '';
   }
-  function getImg(setIdx, type, pos) {
-    const direct = recordedImg(setIdx, type, pos);
+  function getImg(setIdx, subTaskId, type, pos) {
+    const direct = recordedImg(subTaskId, type, pos);
     if (direct) return direct;
     if (mode === 'dedup' && setIdx > 0 && type !== 'main') {
-      return recordedImg(0, type, pos);
+      return recordedImg(subTaskIds[0] || '', type, pos);
     }
     return '';
   }
-  function getSkuUrl(setIdx, vIdx) {
-    const direct = recordedImg(setIdx, 'sku', vIdx + 1);
+  function getSkuUrl(setIdx, subTaskId, vIdx) {
+    const direct = recordedImg(subTaskId, 'sku', vIdx + 1);
     if (direct) return direct;
-    if (mode === 'dedup' && setIdx > 0) return recordedImg(0, 'sku', vIdx + 1);
+    if (mode === 'dedup' && setIdx > 0) return recordedImg(subTaskIds[0] || '', 'sku', vIdx + 1);
     return '';
   }
 
@@ -1819,18 +1927,18 @@ async function jstHandleExport(env, taskId) {
     const setLabel = '第' + (setIdx + 1) + '套';
     if (!subTaskId) { addExportError(setLabel + ' 缺少子任务'); continue; }
     if (!(subTask?.title || '').trim()) addExportError(setLabel + ' 缺少AI商品标题');
-    if (!getImg(setIdx, 'main', 1)) addExportError(setLabel + ' 缺少AI主图main_1');
+    if (!getImg(setIdx, subTaskId, 'main', 1)) addExportError(setLabel + ' 缺少AI主图main_1');
     for (let p = 2; p <= mainImgTotal; p++) {
-      if (!getImg(setIdx, 'sub', p)) addExportError(setLabel + ' 缺少AI附图sub_' + p);
+      if (!getImg(setIdx, subTaskId, 'sub', p)) addExportError(setLabel + ' 缺少AI附图sub_' + p);
     }
     for (let p = 1; p <= detailImgTotal; p++) {
-      if (!getImg(setIdx, 'detail', p)) addExportError(setLabel + ' 缺少AI详情图detail_' + p);
+      if (!getImg(setIdx, subTaskId, 'detail', p)) addExportError(setLabel + ' 缺少AI详情图detail_' + p);
     }
     for (let vIdx = 0; vIdx < variants.length; vIdx++) {
       const variant = variants[vIdx];
       const skuTitle = skuTitleMap[subTaskId + '_' + variant.id] || '';
       if (!skuTitle.trim()) addExportError(setLabel + ' 变体#' + (vIdx + 1) + ' 缺少AI SKU标题');
-      if (!getSkuUrl(setIdx, vIdx)) addExportError(setLabel + ' 变体#' + (vIdx + 1) + ' 缺少AI SKU变体图');
+      if (!getSkuUrl(setIdx, subTaskId, vIdx)) addExportError(setLabel + ' 变体#' + (vIdx + 1) + ' 缺少AI SKU变体图');
     }
   }
   if (exportErrors.length) {
@@ -1846,11 +1954,11 @@ async function jstHandleExport(env, taskId) {
     for (let vIdx = 0; vIdx < variants.length; vIdx++) {
       const variant = variants[vIdx];
       const skuCode = `${styleCode}-V${vIdx + 1}`;
-      const mainUrls = [getImg(setIdx, 'main', 1)];
-      for (let p = 2; p <= mainImgTotal; p++) mainUrls.push(getImg(setIdx, 'sub', p));
+      const mainUrls = [getImg(setIdx, subTaskId, 'main', 1)];
+      for (let p = 2; p <= mainImgTotal; p++) mainUrls.push(getImg(setIdx, subTaskId, 'sub', p));
       const detailUrls = [];
-      for (let p = 1; p <= detailImgTotal; p++) detailUrls.push(getImg(setIdx, 'detail', p));
-      const skuUrl = getSkuUrl(setIdx, vIdx);
+      for (let p = 1; p <= detailImgTotal; p++) detailUrls.push(getImg(setIdx, subTaskId, 'detail', p));
+      const skuUrl = getSkuUrl(setIdx, subTaskId, vIdx);
       const skuTitle = skuTitleMap[subTaskId + '_' + variant.id] || '';
       const exportPrice = exportPriceForVariant(variant, taskId, setIdx, vIdx);
       rows.push({
@@ -1977,7 +2085,7 @@ async function shopeeHandleExport(env, taskId) {
   }
 
   function generatedImage(type, pos, setIdx, subTaskId) {
-    const rec = (product.images_rec || []).find(img => img.set_index === setIdx && img.image_type === type && img.position === pos);
+    const rec = (product.images_rec || []).find(img => img.sub_task_id === subTaskId && img.image_type === type && img.position === pos);
     return rec?.image_url || '';
   }
   function getImg(setIdx, subTaskId, type, pos) {

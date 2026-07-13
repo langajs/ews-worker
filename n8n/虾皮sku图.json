@@ -1,0 +1,518 @@
+{
+    "name":  "虾皮sku图",
+    "nodes":  [
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const body = $input.first().json.body || {};\n\nconst taskId = body.task_id;\nconst subTaskId = body.sub_task_id;\nconst setIndex = parseInt(body.set_index) || 0;\nconst referenceImage = body.reference_image || \u0027\u0027;\nconst variantName = String(body.variant_name || \u0027\u0027).trim();\nconst variantOption2 = String(body.variant_option2 || \u0027\u0027).trim();\nconst skuImage = body.sku_image || \u0027\u0027;\nconst imageType = body.image_type;\nconst imagePosition = parseInt(body.image_position) || 1;\nconst callbackSecret = body.callback_secret || \u0027\u0027;\nconst callbackUrl = body.callback_url || \u0027\u0027;\n\nif (!taskId || !subTaskId || !callbackUrl || imageType !== \u0027sku\u0027) {\n  throw new Error(\u0027SKU图任务参数不完整\u0027);\n}\n\nconst finalPrompt = `\n生成一张 Shopee 商品 SKU 变体参考图，画布比例 1:1，主体清晰完整，适合用作 Image per Variation。\n\n必须遵守：\n1. 商品品类、结构、包装、商标和材质必须与参考图一致。\n2. 当前一级变体：${variantName || \u0027未命名\u0027}。\n3. 当前二级变体：${variantOption2 || \u0027无\u0027}。\n4. 如果提供 sku_image，以它作为当前变体颜色、图案和款式的最高优先级参考；核心参考图只用于保持商品身份一致。\n5. 使用干净、明亮、真实的商业摄影背景，主体居中，不裁切商品。\n6. 不生成文字、价格、促销标签、水印、边框、拼图或无关配件。\n7. 不得创造参考图中不存在的功能或结构。\n`;\n\nconst imagesArray = [skuImage, referenceImage].filter(Boolean);\nif (imagesArray.length === 0) {\n  throw new Error(\u0027SKU图任务缺少参考图片\u0027);\n}\n\nreturn {\n  taskId,\n  subTaskId,\n  setIndex,\n  variantName,\n  variantOption2,\n  skuImage,\n  imageType,\n  imagePosition,\n  finalPrompt,\n  imagesArray,\n  callbackSecret,\n  callbackUrl\n};"
+                                     },
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       -1072,
+                                       16
+                                   ],
+                      "id":  "407d9a86-9073-4c6c-9608-bb3d0510e420",
+                      "name":  "提取参数"
+                  },
+                  {
+                      "parameters":  {
+                                         "method":  "POST",
+                                         "url":  "https://grsai.dakka.com.cn/v1/api/generate",
+                                         "authentication":  "genericCredentialType",
+                                         "genericAuthType":  "httpHeaderAuth",
+                                         "sendBody":  true,
+                                         "specifyBody":  "json",
+                                         "jsonBody":  "={\n  \"model\": \"gpt-image-2\",\n  \"prompt\": \"{{ $json.finalPrompt }}\",\n  \"images\": {{ JSON.stringify($json.imagesArray) }},\n  \"aspectRatio\": \"1024x1024\",\n  \"replyType\": \"async\"\n}",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "typeVersion":  4.4,
+                      "position":  [
+                                       -848,
+                                       16
+                                   ],
+                      "id":  "f633e7b3-299f-43c1-8bf1-51e5c1f57148",
+                      "name":  "gpt-image-2",
+                      "credentials":  {
+                                          "httpHeaderAuth":  {
+                                                                 "id":  "Ua1TBIbDcAu3z8pU",
+                                                                 "name":  "GrsaiApp"
+                                                             }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const response = $input.first().json;\nconst original = $node[\u0027提取参数\u0027].json;\n\nif (!response?.id) {\n  throw new Error(\u0027图片服务未返回任务ID\u0027);\n}\n\nreturn {\n  grsaiTaskId: response.id,\n  status: response.status,\n  taskId: original.taskId,\n  subTaskId: original.subTaskId,\n  setIndex: original.setIndex,\n  imageType: original.imageType,\n  imagePosition: original.imagePosition,\n  callbackSecret: original.callbackSecret,\n  callbackUrl: original.callbackUrl\n};"
+                                     },
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       -624,
+                                       16
+                                   ],
+                      "id":  "5ac89c8a-288a-4dd9-8e8b-6a019ec6866b",
+                      "name":  "提取任务ID"
+                  },
+                  {
+                      "parameters":  {
+                                         "url":  "=https://grsai.dakka.com.cn/v1/api/result?id={{ $json.grsaiTaskId }}",
+                                         "authentication":  "genericCredentialType",
+                                         "genericAuthType":  "httpHeaderAuth",
+                                         "sendHeaders":  true,
+                                         "headerParameters":  {
+                                                                  "parameters":  [
+                                                                                     {
+                                                                                         "name":  "Content-Type",
+                                                                                         "value":  "application/json"
+                                                                                     }
+                                                                                 ]
+                                                              },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "typeVersion":  4.4,
+                      "position":  [
+                                       -176,
+                                       -64
+                                   ],
+                      "id":  "27b3da1c-5fb4-47b9-b2d5-198c10830366",
+                      "name":  "查询结果",
+                      "credentials":  {
+                                          "httpHeaderAuth":  {
+                                                                 "id":  "Ua1TBIbDcAu3z8pU",
+                                                                 "name":  "GrsaiApp"
+                                                             }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "amount":  10
+                                     },
+                      "type":  "n8n-nodes-base.wait",
+                      "typeVersion":  1.1,
+                      "position":  [
+                                       -400,
+                                       16
+                                   ],
+                      "id":  "545b434e-7cd1-4b59-bec9-c1f47b7c19ce",
+                      "name":  "Wait",
+                      "webhookId":  "3e72f8f5-239a-443f-89e1-e6916ae3126c"
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const response = $input.first().json;\nconst original = $node[\u0027提取参数\u0027].json;\nconst imageUrl = Array.isArray(response.results) ? String(response.results[0]?.url || \u0027\u0027) : \u0027\u0027;\n\nif (!imageUrl) {\n  throw new Error(\u0027图片任务成功但未返回图片URL\u0027);\n}\n\nreturn {\n  callback_secret: original.callbackSecret,\n  task_id: original.taskId,\n  sub_task_id: original.subTaskId,\n  set_index: original.setIndex,\n  image_type: original.imageType,\n  image_position: original.imagePosition,\n  image_url: imageUrl,\n  callbackUrl: original.callbackUrl\n};"
+                                     },
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       272,
+                                       -160
+                                   ],
+                      "id":  "4422a545-f911-41ec-af8b-cf0b6be4a0cb",
+                      "name":  "组装结果"
+                  },
+                  {
+                      "parameters":  {
+                                         "conditions":  {
+                                                            "options":  {
+                                                                            "caseSensitive":  true,
+                                                                            "leftValue":  "",
+                                                                            "typeValidation":  "strict",
+                                                                            "version":  3
+                                                                        },
+                                                            "conditions":  [
+                                                                               {
+                                                                                   "id":  "7d8441ca-8e3d-459a-b083-4d27d3f612f1",
+                                                                                   "leftValue":  "={{ $json.body.callback_secret }}",
+                                                                                   "rightValue":  "v3",
+                                                                                   "operator":  {
+                                                                                                    "type":  "string",
+                                                                                                    "operation":  "equals",
+                                                                                                    "name":  "filter.operator.equals"
+                                                                                                }
+                                                                               }
+                                                                           ],
+                                                            "combinator":  "and"
+                                                        },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.if",
+                      "typeVersion":  2.3,
+                      "position":  [
+                                       -1296,
+                                       16
+                                   ],
+                      "id":  "36eac8e9-f54c-4732-92c7-439c62a72eae",
+                      "name":  "密钥校对"
+                  },
+                  {
+                      "parameters":  {
+                                         "conditions":  {
+                                                            "options":  {
+                                                                            "caseSensitive":  true,
+                                                                            "leftValue":  "",
+                                                                            "typeValidation":  "strict",
+                                                                            "version":  3
+                                                                        },
+                                                            "conditions":  [
+                                                                               {
+                                                                                   "id":  "f79e08f8-59fd-4952-ba1e-c6e3113c8cc7",
+                                                                                   "leftValue":  "={{$json.status}}",
+                                                                                   "rightValue":  "failed",
+                                                                                   "operator":  {
+                                                                                                    "type":  "string",
+                                                                                                    "operation":  "equals",
+                                                                                                    "name":  "filter.operator.equals"
+                                                                                                }
+                                                                               },
+                                                                               {
+                                                                                   "id":  "836d3092-a5c8-4e66-9d91-649b1da856c8",
+                                                                                   "leftValue":  "={{$json.status}}",
+                                                                                   "rightValue":  "violation",
+                                                                                   "operator":  {
+                                                                                                    "type":  "string",
+                                                                                                    "operation":  "equals",
+                                                                                                    "name":  "filter.operator.equals"
+                                                                                                }
+                                                                               }
+                                                                           ],
+                                                            "combinator":  "or"
+                                                        },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.if",
+                      "typeVersion":  2.3,
+                      "position":  [
+                                       272,
+                                       64
+                                   ],
+                      "id":  "a882906c-7cde-4cef-b125-a19fc004dda5",
+                      "name":  "任务失败"
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const response = $input.first().json;\nconst original = $node[\u0027提取参数\u0027].json;\n\nreturn {\n  callback_secret: original.callbackSecret,\n  task_id: original.taskId,\n  sub_task_id: original.subTaskId,\n  set_index: original.setIndex,\n  image_type: original.imageType,\n  image_position: original.imagePosition,\n  error: String(response.error || response.status || \u0027SKU图片生成失败\u0027),\n  callbackUrl: original.callbackUrl\n};"
+                                     },
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       496,
+                                       256
+                                   ],
+                      "id":  "8d91ad00-b656-43c5-b791-d89afd089362",
+                      "name":  "失败通知"
+                  },
+                  {
+                      "parameters":  {
+                                         "method":  "POST",
+                                         "url":  "={{ $json.callbackUrl }}",
+                                         "sendHeaders":  true,
+                                         "headerParameters":  {
+                                                                  "parameters":  [
+                                                                                     {
+                                                                                         "name":  "Content-Type",
+                                                                                         "value":  "application/json"
+                                                                                     }
+                                                                                 ]
+                                                              },
+                                         "sendBody":  true,
+                                         "specifyBody":  "json",
+                                         "jsonBody":  "={{\n  callback_secret: $json.callback_secret,\n  task_id: $json.task_id,\n  sub_task_id: $json.sub_task_id,\n  set_index: $json.set_index,\n  image_type: $json.image_type,\n  image_position: $json.image_position,\n  error: $json.error\n}}",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "typeVersion":  4.4,
+                      "position":  [
+                                       720,
+                                       256
+                                   ],
+                      "id":  "6f027b78-be56-4108-95e8-cd97a093d757",
+                      "name":  "失败回调"
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const response = $input.first().json;\nconst task = $node[\u0027提取任务ID\u0027].json;\n\nreturn {\n  grsaiTaskId: task.grsaiTaskId,\n  status: response.status,\n  progress: response.progress,\n  results: response.results,\n  error: response.error,\n  taskId: task.taskId,\n  subTaskId: task.subTaskId,\n  setIndex: task.setIndex,\n  imageType: task.imageType,\n  imagePosition: task.imagePosition,\n  callbackSecret: task.callbackSecret,\n  callbackUrl: task.callbackUrl\n};"
+                                     },
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       496,
+                                       64
+                                   ],
+                      "id":  "1ce91623-8342-4332-9059-6816f20ff5b1",
+                      "name":  "重组查询"
+                  },
+                  {
+                      "parameters":  {
+                                         "method":  "POST",
+                                         "url":  "={{ $json.callbackUrl }}",
+                                         "sendHeaders":  true,
+                                         "headerParameters":  {
+                                                                  "parameters":  [
+                                                                                     {
+                                                                                         "name":  "Content-Type",
+                                                                                         "value":  "application/json"
+                                                                                     }
+                                                                                 ]
+                                                              },
+                                         "sendBody":  true,
+                                         "specifyBody":  "json",
+                                         "jsonBody":  "={{\n  callback_secret: $json.callback_secret,\n  task_id: $json.task_id,\n  sub_task_id: $json.sub_task_id,\n  set_index: $json.set_index,\n  image_type: $json.image_type,\n  image_position: $json.image_position,\n  image_url: $json.image_url\n}}",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "typeVersion":  4.4,
+                      "position":  [
+                                       496,
+                                       -160
+                                   ],
+                      "id":  "d39423d9-b5a0-4118-94cc-04982c64ee11",
+                      "name":  "成功回调"
+                  },
+                  {
+                      "parameters":  {
+                                         "httpMethod":  "POST",
+                                         "path":  "vn/v3s1",
+                                         "options":  {
+                                                         "responseData":  "{\"status\":\"accepted\"}"
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.webhook",
+                      "typeVersion":  2.1,
+                      "position":  [
+                                       -1520,
+                                       16
+                                   ],
+                      "id":  "bf83be3d-18ee-4abd-b67b-3b2ee97db695",
+                      "name":  "Webhook",
+                      "webhookId":  "87806116-ea42-43a8-bdd1-ae978c5a35ac"
+                  },
+                  {
+                      "parameters":  {
+                                         "conditions":  {
+                                                            "options":  {
+                                                                            "caseSensitive":  true,
+                                                                            "leftValue":  "",
+                                                                            "typeValidation":  "strict",
+                                                                            "version":  3
+                                                                        },
+                                                            "conditions":  [
+                                                                               {
+                                                                                   "id":  "5df36ae8-9c12-4a86-8bf8-174603413907",
+                                                                                   "leftValue":  "={{ $json.status}}",
+                                                                                   "rightValue":  "succeeded",
+                                                                                   "operator":  {
+                                                                                                    "type":  "string",
+                                                                                                    "operation":  "equals",
+                                                                                                    "name":  "filter.operator.equals"
+                                                                                                }
+                                                                               }
+                                                                           ],
+                                                            "combinator":  "or"
+                                                        },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.if",
+                      "typeVersion":  2.3,
+                      "position":  [
+                                       48,
+                                       -64
+                                   ],
+                      "id":  "0e0799c4-d70d-4a0a-a2a7-24935d6037df",
+                      "name":  "任务完成"
+                  }
+              ],
+    "pinData":  {
+
+                },
+    "connections":  {
+                        "提取参数":  {
+                                     "main":  [
+                                                  [
+                                                      {
+                                                          "node":  "gpt-image-2",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
+                                                  ]
+                                              ]
+                                 },
+                        "gpt-image-2":  {
+                                            "main":  [
+                                                         [
+                                                             {
+                                                                 "node":  "提取任务ID",
+                                                                 "type":  "main",
+                                                                 "index":  0
+                                                             }
+                                                         ]
+                                                     ]
+                                        },
+                        "提取任务ID":  {
+                                       "main":  [
+                                                    [
+                                                        {
+                                                            "node":  "Wait",
+                                                            "type":  "main",
+                                                            "index":  0
+                                                        }
+                                                    ]
+                                                ]
+                                   },
+                        "查询结果":  {
+                                     "main":  [
+                                                  [
+                                                      {
+                                                          "node":  "任务完成",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
+                                                  ]
+                                              ]
+                                 },
+                        "Wait":  {
+                                     "main":  [
+                                                  [
+                                                      {
+                                                          "node":  "查询结果",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
+                                                  ]
+                                              ]
+                                 },
+                        "组装结果":  {
+                                     "main":  [
+                                                  [
+                                                      {
+                                                          "node":  "成功回调",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
+                                                  ]
+                                              ]
+                                 },
+                        "密钥校对":  {
+                                     "main":  [
+                                                  [
+                                                      {
+                                                          "node":  "提取参数",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
+                                                  ]
+                                              ]
+                                 },
+                        "任务失败":  {
+                                     "main":  [
+                                                  [
+                                                      {
+                                                          "node":  "失败通知",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
+                                                  ],
+                                                  [
+                                                      {
+                                                          "node":  "重组查询",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
+                                                  ]
+                                              ]
+                                 },
+                        "失败通知":  {
+                                     "main":  [
+                                                  [
+                                                      {
+                                                          "node":  "失败回调",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
+                                                  ]
+                                              ]
+                                 },
+                        "重组查询":  {
+                                     "main":  [
+                                                  [
+                                                      {
+                                                          "node":  "Wait",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
+                                                  ]
+                                              ]
+                                 },
+                        "Webhook":  {
+                                        "main":  [
+                                                     [
+                                                         {
+                                                             "node":  "密钥校对",
+                                                             "type":  "main",
+                                                             "index":  0
+                                                         }
+                                                     ]
+                                                 ]
+                                    },
+                        "任务完成":  {
+                                     "main":  [
+                                                  [
+                                                      {
+                                                          "node":  "组装结果",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
+                                                  ],
+                                                  [
+                                                      {
+                                                          "node":  "任务失败",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
+                                                  ]
+                                              ]
+                                 }
+                    },
+    "active":  false,
+    "settings":  {
+                     "executionOrder":  "v1",
+                     "binaryMode":  "separate",
+                     "availableInMCP":  false
+                 },
+    "versionId":  "667419ed-18b6-4e43-b95f-3defee7b58d0",
+    "meta":  {
+                 "instanceId":  "bac5a48cbfe45b4dd41ef15205e80ac0e0958f3b697c370060cb2d4c14846049"
+             },
+    "nodeGroups":  [
+
+                   ],
+    "id":  "fbcAtELpSiBgZUqP",
+    "tags":  [
+                 {
+                     "updatedAt":  "2026-07-01T09:04:36.467Z",
+                     "createdAt":  "2026-07-01T09:04:36.467Z",
+                     "id":  "6i9gzv7EOWdvH4Vl",
+                     "name":  "SKU变体图"
+                 },
+                 {
+                     "updatedAt":  "2026-07-07T11:05:30.160Z",
+                     "createdAt":  "2026-07-07T11:05:30.160Z",
+                     "id":  "dYx7pZfd01CltSoJ",
+                     "name":  "VNEC"
+                 }
+             ]
+}

@@ -13,8 +13,9 @@ async function getConfig(env, platform = '') {
     const rows = await query(env, "SELECT key, value FROM ews_config WHERE platform = ?", [platform]);
     const config = {};
     for (const row of rows.results) config[row.key] = row.value;
-    if (platform) { const common = await getConfig(env, ''); Object.assign(config, common); }
-    return config;
+    if (!platform) return config;
+    const common = await getConfig(env, '');
+    return { ...common, ...config };
   } catch { return {}; }
 }
 async function updateConfig(env, key, value, platform = '') {
@@ -45,17 +46,31 @@ async function updateUserCredits(env, userId, amount, mode) {
   else if (mode === 'add') await env.DB.prepare("UPDATE ews_users SET credits = credits + ? WHERE id = ?").bind(amount, userId).run();
   else if (mode === 'subtract') await env.DB.prepare("UPDATE ews_users SET credits = MAX(0, credits - ?) WHERE id = ?").bind(amount, userId).run();
 }
+async function consumeUserCredit(env, userId) {
+  const result = await env.DB.prepare("UPDATE ews_users SET credits = credits - 1 WHERE id = ? AND credits > 0").bind(userId).run();
+  const meta = result?.meta || {};
+  return (meta.changes ?? meta.rows_written ?? 0) > 0;
+}
 
 async function createTaskIndex(env, id, platform, name, userId) { await env.DB.prepare("INSERT INTO ews_tasks (id, platform, name, status, user_id, created_at, updated_at) VALUES (?, ?, ?, 'init', ?, datetime('now'), datetime('now'))").bind(id, platform, name || '', userId || '').run(); }
 async function updateTaskIndexStatus(env, id, status) { await env.DB.prepare("UPDATE ews_tasks SET status = ?, updated_at = datetime('now') WHERE id = ?").bind(status, id).run(); }
 async function getTaskIndex(env, id) { return await getOne(env, "SELECT * FROM ews_tasks WHERE id = ?", [id]); }
-async function getTaskList(env, platform, userId, role) {
+async function getTaskList(env, platform, userId, role, limit = 0, offset = 0) {
   let sql = "SELECT * FROM ews_tasks"; const params = []; const ws = [];
   if (platform) { ws.push("platform = ?"); params.push(platform); }
   if (role !== 'admin') { ws.push("user_id = ?"); params.push(userId); }
   if (ws.length) sql += " WHERE " + ws.join(" AND ");
   sql += " ORDER BY created_at DESC";
+  if (limit > 0) { sql += " LIMIT ? OFFSET ?"; params.push(limit, Math.max(0, offset)); }
   return await query(env, sql, params);
+}
+async function getTaskCount(env, platform, userId, role) {
+  let sql = "SELECT COUNT(*) AS cnt FROM ews_tasks"; const params = []; const ws = [];
+  if (platform) { ws.push("platform = ?"); params.push(platform); }
+  if (role !== 'admin') { ws.push("user_id = ?"); params.push(userId); }
+  if (ws.length) sql += " WHERE " + ws.join(" AND ");
+  const row = await getOne(env, sql, params);
+  return row?.cnt || 0;
 }
 async function deleteTaskIndex(env, id) { await env.DB.prepare("DELETE FROM ews_tasks WHERE id = ?").bind(id).run(); }
 
@@ -96,6 +111,12 @@ async function jstGetTask(env, tid) {
 async function jstUpdateTaskStatus(env, tid, s) { await env.DB.prepare("UPDATE ews_jst_tasks SET status=?, updated_at=datetime('now') WHERE id=?").bind(s, tid).run(); }
 async function jstCreateVariant(env, v) { await ensureJstVariantColumns(env); await env.DB.prepare("INSERT INTO ews_jst_variants (id, task_id, tier1_name, tier1_value, tier2_name, tier2_value, white_bg_image, price, price_float_enabled, price_min, price_max, price_precision, description, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))").bind(v.id, v.task_id, v.tier1_name || '', v.tier1_value, v.tier2_name || '', v.tier2_value || '', v.white_bg_image, v.price ?? null, v.price_float_enabled ? 1 : 0, v.price_min ?? null, v.price_max ?? null, v.price_precision ?? 0, v.description ?? '', v.sort_order).run(); }
 async function jstClearVariants(env, tid) { await env.DB.prepare("DELETE FROM ews_jst_variants WHERE task_id = ?").bind(tid).run(); }
+async function jstReplaceVariants(env, tid, variants) {
+  await ensureJstVariantColumns(env);
+  const statements = [env.DB.prepare("DELETE FROM ews_jst_variants WHERE task_id = ?").bind(tid)];
+  for (const v of variants) statements.push(env.DB.prepare("INSERT INTO ews_jst_variants (id, task_id, tier1_name, tier1_value, tier2_name, tier2_value, white_bg_image, price, price_float_enabled, price_min, price_max, price_precision, description, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))").bind(v.id, v.task_id, v.tier1_name || '', v.tier1_value, v.tier2_name || '', v.tier2_value || '', v.white_bg_image, v.price ?? null, v.price_float_enabled ? 1 : 0, v.price_min ?? null, v.price_max ?? null, v.price_precision ?? 0, v.description ?? '', v.sort_order));
+  await env.DB.batch(statements);
+}
 async function jstCreateSubTask(env, s) { await env.DB.prepare("INSERT INTO ews_jst_sub_tasks (id, parent_task_id, set_index, status, created_at, updated_at) VALUES (?, ?, ?, 'pending', datetime('now'), '')").bind(s.id, s.parent_task_id, s.set_index).run(); }
 async function jstGetSubTasks(env, tid) { return await query(env, "SELECT * FROM ews_jst_sub_tasks WHERE parent_task_id = ? ORDER BY set_index", [tid]); }
 async function jstUpdateSubTask(env, sid, d) {
@@ -169,6 +190,12 @@ async function shopeeGetProduct(env, pid) { await ensureShopeeProductColumns(env
 async function shopeeDeleteProduct(env, pid) { await env.DB.prepare("DELETE FROM ews_shopee_products WHERE id = ?").bind(pid).run(); }
 async function shopeeCreateVariations(env, vs) { await ensureShopeeVariationColumns(env); var s = env.DB.prepare("INSERT INTO ews_shopee_variations (id, product_id, integration_no, option1, image_per_variation, option2, image_2, price, price_float_enabled, price_min, price_max, price_precision, stock, sku, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))"); for (const v of vs) await s.bind(v.id, v.product_id, v.integration_no, v.option1, v.image_per_variation || '', v.option2 || '', v.image_2 || '', v.price, v.price_float_enabled ? 1 : 0, v.price_min ?? null, v.price_max ?? null, v.price_precision ?? 0, v.stock || 0, v.sku || '').run(); }
 async function shopeeClearVariations(env, pid) { await env.DB.prepare("DELETE FROM ews_shopee_variations WHERE product_id = ?").bind(pid).run(); }
+async function shopeeReplaceVariations(env, pid, variations) {
+  await ensureShopeeVariationColumns(env);
+  const statements = [env.DB.prepare("DELETE FROM ews_shopee_variations WHERE product_id = ?").bind(pid)];
+  for (const v of variations) statements.push(env.DB.prepare("INSERT INTO ews_shopee_variations (id, product_id, integration_no, option1, image_per_variation, option2, image_2, price, price_float_enabled, price_min, price_max, price_precision, stock, sku, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))").bind(v.id, v.product_id, v.integration_no, v.option1, v.image_per_variation || '', v.option2 || '', v.image_2 || '', v.price, v.price_float_enabled ? 1 : 0, v.price_min ?? null, v.price_max ?? null, v.price_precision ?? 0, v.stock || 0, v.sku || ''));
+  await env.DB.batch(statements);
+}
 
 // -- Shopee 子任务 & 图片
 async function shopeeCreateSubTask(env, s) { await env.DB.prepare("INSERT INTO ews_shopee_sub_tasks (id, parent_task_id, set_index, status, created_at, updated_at) VALUES (?, ?, ?, 'pending', datetime('now'), '')").bind(s.id, s.parent_task_id, s.set_index).run(); }
@@ -215,17 +242,17 @@ export {
   query, getOne,
   getConfig, updateConfig, getPlatformConfig,
   createUser, getUserByUsername, getUserList, updateUserPassword, toggleUserActive, deleteUser, updateUserPlatformAccess, updateUserWebhook,
-  getUserCredits, updateUserCredits,
-  createTaskIndex, updateTaskIndexStatus, getTaskIndex, getTaskList, deleteTaskIndex,
+  getUserCredits, updateUserCredits, consumeUserCredit,
+  createTaskIndex, updateTaskIndexStatus, getTaskIndex, getTaskList, getTaskCount, deleteTaskIndex,
   jstCreateTask, jstUpdateTask, jstGetTask, jstUpdateTaskStatus,
-  jstCreateVariant, jstClearVariants,
+  jstCreateVariant, jstClearVariants, jstReplaceVariants,
   jstCreateSubTask, jstGetSubTasks, jstUpdateSubTask, jstDeleteSubTasks,
   jstCreateSkuTitle, jstSaveImage, jstClearImages,
   jstCreateExpectedImages, jstCheckSubTaskImages, jstCheckParentCompletion, jstDeleteTaskRecord,
   jstCreatePushPlans, jstGetPushPlans, jstGetPendingPlans, jstUpdatePlanStatus, jstGetPlanStats,
   jstRefundCredits,
   shopeeCreateProduct, shopeeGetProduct, shopeeDeleteProduct,
-  shopeeCreateVariations, shopeeClearVariations,
+  shopeeCreateVariations, shopeeClearVariations, shopeeReplaceVariations,
   shopeeCreatePushPlans, shopeeGetPushPlans, shopeeGetPendingPlans, shopeeUpdatePlanStatus, shopeeGetPlanStats,
   shopeeCreateExportRecord,
   shopeeCreateSubTask, shopeeGetSubTasks, shopeeUpdateSubTask,

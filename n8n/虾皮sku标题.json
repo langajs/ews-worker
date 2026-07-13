@@ -1,0 +1,230 @@
+{
+    "name":  "虾皮sku标题",
+    "nodes":  [
+                  {
+                      "parameters":  {
+                                         "httpMethod":  "POST",
+                                         "path":  "vn/v3t2",
+                                         "options":  {
+                                                         "responseData":  "={\"status\":\"accepted\"}"
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.webhook",
+                      "typeVersion":  2.1,
+                      "position":  [
+                                       0,
+                                       0
+                                   ],
+                      "id":  "3df9086d-4e91-4eb1-9200-04c5bd94250a",
+                      "name":  "Webhook",
+                      "webhookId":  "dd5f2987-34e1-4f4b-b47a-b2ea3fc8ea09"
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const body = $input.first().json.body || {};\n\nconst taskId = body.task_id;\nconst name = String(body.name || \u0027\u0027).trim();\nconst referenceTitle = String(body.reference_title || \u0027\u0027).trim();\nconst description = String(body.description || \u0027\u0027).trim();\nconst subTaskCount = Math.max(parseInt(body.sub_task_count) || 1, 1);\nconst callbackSecret = body.callback_secret || \u0027\u0027;\nconst callbackUrl = body.callback_url || \u0027\u0027;\nlet variants = body.variants;\n\nif (typeof variants === \u0027string\u0027) {\n  try { variants = JSON.parse(variants); } catch (error) { variants = []; }\n}\nif (!taskId || !callbackUrl || !Array.isArray(variants) || variants.length === 0) {\n  throw new Error(\u0027缺少 task_id、callback_url 或 variants\u0027);\n}\n\nconst normalizedVariants = variants.map((variant, index) =\u003e ({\n  index: index + 1,\n  name: String(variant?.name || \u0027\u0027).trim(),\n  option2: String(variant?.option2 || \u0027\u0027).trim()\n}));\nif (normalizedVariants.some(variant =\u003e !variant.name)) {\n  throw new Error(\u0027变体名称不能为空\u0027);\n}\n\nconst variantCount = normalizedVariants.length;\nconst totalCount = subTaskCount * variantCount;\nconst finalPrompt = `\n你是 Shopee 越南站规格值生成专家。请为每套商品的每个变体生成“Option for Variation 1”文案。\n\n商品名称：${name}\n参考标题：${referenceTitle}\n商品描述：${description}\n子任务数量：${subTaskCount}\n每套变体：${JSON.stringify(normalizedVariants)}\n\n要求：\n1. 输出自然、明确的越南语规格值，准确保留原变体的颜色、款式、尺寸或材质语义。\n2. 二级规格 option2 已由表格单独填写，不要重复拼接到一级规格中。\n3. 每个规格值长度必须为 1~20 个字符，不加序号、营销词、价格、括号或解释。\n4. 输出顺序严格为：第1套全部变体、第2套全部变体，依此类推；每套内部保持输入 variants 顺序。\n5. 共输出 ${totalCount} 项。只返回严格 JSON 字符串数组，不要 Markdown。\n`;\n\nreturn {\n  taskId,\n  subTaskCount,\n  variantCount,\n  totalCount,\n  finalPrompt,\n  callbackSecret,\n  callbackUrl\n};"
+                                     },
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       448,
+                                       0
+                                   ],
+                      "id":  "3ba87a6c-bb42-435e-8eb1-feedd831ea6c",
+                      "name":  "提取数据"
+                  },
+                  {
+                      "parameters":  {
+                                         "method":  "POST",
+                                         "url":  "https://api.deepseek.com/chat/completions",
+                                         "authentication":  "genericCredentialType",
+                                         "genericAuthType":  "httpHeaderAuth",
+                                         "sendBody":  true,
+                                         "specifyBody":  "json",
+                                         "jsonBody":  "={{\n{\n  model: \"deepseek-v4-flash\",\n  messages: [\n    {\n      role: \"system\",\n      content: \"你只输出严格 JSON 字符串数组，不输出 Markdown 或解释。\"\n    },\n    {\n      role: \"user\",\n      content: $json.finalPrompt\n    }\n  ],\n  stream: false\n}\n}}",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "typeVersion":  4.4,
+                      "position":  [
+                                       672,
+                                       0
+                                   ],
+                      "id":  "479e8dba-bc91-48c0-8ade-012045e9cb99",
+                      "name":  "deepseek-v4-flash",
+                      "credentials":  {
+                                          "httpHeaderAuth":  {
+                                                                 "id":  "11xE3AjgQ1iUHDdR",
+                                                                 "name":  "deepseek"
+                                                             }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const response = $input.first().json;\nconst originalData = $node[\u0027提取数据\u0027].json;\nlet content = response?.choices?.[0]?.message?.content;\n\nif (typeof content !== \u0027string\u0027) {\n  throw new Error(\u0027模型未返回 SKU 标题\u0027);\n}\ncontent = content.replace(/```json\\s*/gi, \u0027\u0027).replace(/```/g, \u0027\u0027).trim();\n\nlet titles;\ntry {\n  titles = JSON.parse(content);\n} catch (error) {\n  throw new Error(\u0027SKU 标题结果不是合法 JSON 数组\u0027);\n}\nif (!Array.isArray(titles) || titles.length !== originalData.totalCount) {\n  throw new Error(`SKU 标题数量不匹配: ${Array.isArray(titles) ? titles.length : 0} / ${originalData.totalCount}`);\n}\n\ntitles = titles.map((value, index) =\u003e {\n  const title = typeof value === \u0027string\u0027 ? value.replace(/\\s+/g, \u0027 \u0027).trim() : \u0027\u0027;\n  if (title.length \u003c 1 || title.length \u003e 20) {\n    throw new Error(`SKU 标题#${index + 1}长度必须为1~20字符`);\n  }\n  return title;\n});\n\nreturn {\n  callback_secret: originalData.callbackSecret,\n  task_id: originalData.taskId,\n  sku_titles: titles,\n  callbackUrl: originalData.callbackUrl\n};"
+                                     },
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       896,
+                                       0
+                                   ],
+                      "id":  "0227749a-ac83-450c-ba2e-322e0c91de86",
+                      "name":  "结果封装"
+                  },
+                  {
+                      "parameters":  {
+                                         "method":  "POST",
+                                         "url":  "={{ $json.callbackUrl }}",
+                                         "sendHeaders":  true,
+                                         "headerParameters":  {
+                                                                  "parameters":  [
+                                                                                     {
+                                                                                         "name":  "Content-Type",
+                                                                                         "value":  "application/json"
+                                                                                     }
+                                                                                 ]
+                                                              },
+                                         "sendBody":  true,
+                                         "specifyBody":  "json",
+                                         "jsonBody":  "={{\n  callback_secret: $json.callback_secret,\n  task_id: $json.task_id,\n  sku_titles: $json.sku_titles\n}}",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "typeVersion":  4.4,
+                      "position":  [
+                                       1120,
+                                       0
+                                   ],
+                      "id":  "9848151d-879a-4426-b213-97e84f500a71",
+                      "name":  "callback"
+                  },
+                  {
+                      "parameters":  {
+                                         "conditions":  {
+                                                            "options":  {
+                                                                            "caseSensitive":  true,
+                                                                            "leftValue":  "",
+                                                                            "typeValidation":  "strict",
+                                                                            "version":  3
+                                                                        },
+                                                            "conditions":  [
+                                                                               {
+                                                                                   "id":  "7d8441ca-8e3d-459a-b083-4d27d3f612f1",
+                                                                                   "leftValue":  "={{ $json.body.callback_secret }}",
+                                                                                   "rightValue":  "v3",
+                                                                                   "operator":  {
+                                                                                                    "type":  "string",
+                                                                                                    "operation":  "equals",
+                                                                                                    "name":  "filter.operator.equals"
+                                                                                                }
+                                                                               }
+                                                                           ],
+                                                            "combinator":  "and"
+                                                        },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.if",
+                      "typeVersion":  2.3,
+                      "position":  [
+                                       224,
+                                       0
+                                   ],
+                      "id":  "564bc78a-d9bf-4612-ac12-2643c0b35309",
+                      "name":  "密钥校对"
+                  }
+              ],
+    "pinData":  {
+
+                },
+    "connections":  {
+                        "Webhook":  {
+                                        "main":  [
+                                                     [
+                                                         {
+                                                             "node":  "密钥校对",
+                                                             "type":  "main",
+                                                             "index":  0
+                                                         }
+                                                     ]
+                                                 ]
+                                    },
+                        "提取数据":  {
+                                     "main":  [
+                                                  [
+                                                      {
+                                                          "node":  "deepseek-v4-flash",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
+                                                  ]
+                                              ]
+                                 },
+                        "deepseek-v4-flash":  {
+                                                  "main":  [
+                                                               [
+                                                                   {
+                                                                       "node":  "结果封装",
+                                                                       "type":  "main",
+                                                                       "index":  0
+                                                                   }
+                                                               ]
+                                                           ]
+                                              },
+                        "结果封装":  {
+                                     "main":  [
+                                                  [
+                                                      {
+                                                          "node":  "callback",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
+                                                  ]
+                                              ]
+                                 },
+                        "密钥校对":  {
+                                     "main":  [
+                                                  [
+                                                      {
+                                                          "node":  "提取数据",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
+                                                  ]
+                                              ]
+                                 }
+                    },
+    "active":  false,
+    "settings":  {
+                     "executionOrder":  "v1",
+                     "binaryMode":  "separate",
+                     "availableInMCP":  false
+                 },
+    "versionId":  "8479df82-e5d9-41f1-9896-11353fe563e7",
+    "meta":  {
+                 "instanceId":  "bac5a48cbfe45b4dd41ef15205e80ac0e0958f3b697c370060cb2d4c14846049"
+             },
+    "nodeGroups":  [
+
+                   ],
+    "id":  "VqvHlJsAcLAyEI5I",
+    "tags":  [
+                 {
+                     "updatedAt":  "2026-07-07T11:05:30.160Z",
+                     "createdAt":  "2026-07-07T11:05:30.160Z",
+                     "id":  "dYx7pZfd01CltSoJ",
+                     "name":  "VNEC"
+                 },
+                 {
+                     "updatedAt":  "2026-07-01T09:00:17.048Z",
+                     "createdAt":  "2026-07-01T09:00:17.048Z",
+                     "id":  "wbpgmLNHFA0cOts3",
+                     "name":  "SKU标题"
+                 }
+             ]
+}
