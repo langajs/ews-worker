@@ -1483,6 +1483,29 @@ async function failImageQueuePlan(env, row, reason) {
   return plan?.status || 'missing_plan';
 }
 
+async function reconcileFailedImageQueuePlans(env, taskId, planTable) {
+  await ensureImageQueueTable(env);
+  const safeTable = normalizePushPlanTable(planTable);
+  const rows = await query(env, `SELECT q.* FROM ews_image_queue q
+    INNER JOIN ${safeTable} p
+      ON p.task_id=q.task_id AND p.sub_task_id=q.sub_task_id
+      AND p.webhook_type=(q.image_type || '_' || q.image_position)
+    WHERE q.task_id=? AND q.status='failed' AND p.status='processing'
+    ORDER BY q.updated_at ASC LIMIT 50`, [taskId]);
+  for (const row of (rows?.results || [])) {
+    await failImageQueuePlan(env, row, row.error || '图片队列处理失败');
+  }
+}
+
+async function clearFailedImageQueueForPlan(env, plan) {
+  const match = /^(main|sub|detail|sku)_(\d+)$/.exec(plan.webhook_type || '');
+  if (!match) return;
+  await ensureImageQueueTable(env);
+  await env.DB.prepare(`DELETE FROM ews_image_queue
+    WHERE task_id=? AND sub_task_id=? AND image_type=? AND image_position=? AND status='failed'`)
+    .bind(plan.task_id, plan.sub_task_id || '', match[1], parseInt(match[2])).run();
+}
+
 async function recoverStaleImageQueue(env) {
   await ensureImageQueueTable(env);
   const reason = '图片队列处理超时，已达到最大重试次数';
@@ -1655,7 +1678,7 @@ async function processImageQueueRow(env, ctx, row, limits) {
     await env.DB.prepare("DELETE FROM ews_image_queue WHERE id=? AND status='processing' AND attempts=?").bind(row.id, attempts).run();
   } catch (err) {
     const failed = err.permanent || attempts >= IMAGE_QUEUE_MAX_ATTEMPTS;
-    if (err.permanent) await failImageQueuePlan(env, row, err.message || '图片回调数据无效');
+    if (failed) await failImageQueuePlan(env, row, err.message || '图片处理达到最大重试次数');
     await env.DB.prepare("UPDATE ews_image_queue SET status=?, error=?, updated_at=datetime('now') WHERE id=? AND status='processing' AND attempts=?")
       .bind(failed ? 'failed' : 'pending', err.message || '图片处理失败', row.id, attempts).run();
     console.error('image queue item failed:', row.id, err.message);
@@ -1981,6 +2004,7 @@ async function handleGetPlans(env, path) {
   const config = await getConfig(env);
   const publicUrl = (config.r2_public_url || '').replace(/\/+$/, '');
   const plansTable = idx.platform === 'jst' ? 'ews_jst_push_plans' : 'ews_shopee_push_plans';
+  await reconcileFailedImageQueuePlans(env, taskId, plansTable);
   const plans = await query(env, `SELECT * FROM ${plansTable} WHERE task_id=? ORDER BY batch_order ASC, webhook_type ASC`, [taskId]);
   const stats = await query(env, `SELECT status, COUNT(*) as cnt FROM ${plansTable} WHERE task_id=? GROUP BY status`, [taskId]);
   const s = { pending: 0, processing: 0, done: 0, failed: 0, total: 0 };
@@ -2002,6 +2026,7 @@ async function handleRetryPlan(env, path, request, ctx) {
   const plan = await getOne(env, `SELECT * FROM ${plansTable} WHERE id=?`, [planId]);
   if (!plan || plan.task_id !== taskId) return error('计划不存在', 404);
   if (plan.status === 'processing') return error('计划正在处理中，请勿重复推送', 409);
+  await clearFailedImageQueueForPlan(env, plan);
   await env.DB.prepare(`UPDATE ${plansTable} SET status='pending', retry_count=0, error='', processing_at='', updated_at=datetime('now') WHERE id=?`).bind(planId).run();
   await reconcileTaskStatusForPushPlans(env, plansTable, taskId, 'retry plan resumed', { resumeWhenNoFailures: true });
   if (idx.platform === 'jst') ctx.waitUntil(jstReleaseTaskQueue(env, taskId, ctx));
