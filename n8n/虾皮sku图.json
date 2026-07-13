@@ -225,7 +225,7 @@
                                                               },
                                          "sendBody":  true,
                                          "specifyBody":  "json",
-                                         "jsonBody":  "={{\n  callback_secret: $json.callback_secret,\n  task_id: $json.task_id,\n  sub_task_id: $json.sub_task_id,\n  set_index: $json.set_index,\n  image_type: $json.image_type,\n  image_position: $json.image_position,\n  error: $json.error\n}}",
+                                         "jsonBody":  "={{ {\n  callback_secret: $json.callback_secret,\n  task_id: $json.task_id,\n  sub_task_id: $json.sub_task_id,\n  set_index: $json.set_index,\n  image_type: $json.image_type,\n  image_position: $json.image_position,\n  error: $json.error\n} }}",
                                          "options":  {
 
                                                      }
@@ -267,7 +267,7 @@
                                                               },
                                          "sendBody":  true,
                                          "specifyBody":  "json",
-                                         "jsonBody":  "={{\n  callback_secret: $json.callback_secret,\n  task_id: $json.task_id,\n  sub_task_id: $json.sub_task_id,\n  set_index: $json.set_index,\n  image_type: $json.image_type,\n  image_position: $json.image_position,\n  image_url: $json.image_url\n}}",
+                                         "jsonBody":  "={{ {\n  callback_secret: $json.callback_secret,\n  task_id: $json.task_id,\n  sub_task_id: $json.sub_task_id,\n  set_index: $json.set_index,\n  image_type: $json.image_type,\n  image_position: $json.image_position,\n  image_url: $json.image_url\n} }}",
                                          "options":  {
 
                                                      }

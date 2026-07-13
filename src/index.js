@@ -589,6 +589,7 @@ async function handleGetTasks(env, ctx, auth, url) {
       if (sp) t.name = sp.name;
     }
   }
+  ctx.waitUntil(runQueueStage('task list fallback release', () => releasePendingPushPlans(env, ctx)));
   return json({ success: true, tasks, total, page, limit, pages: Math.max(1, Math.ceil(total / limit)) });
 }
 
@@ -1214,31 +1215,41 @@ async function jstReleaseTaskQueue(env, taskId, ctx) {
   } catch (err) { console.error('jstReleaseTaskQueue error:', err.message); }
 }
 
-async function processPendingQueue(env, ctx) {
+async function runQueueStage(name, action) {
   try {
-    await ensurePushPlanRuntimeColumns(env);
-    await recoverStalePushPlans(env);
-    await reconcileOpenPushPlanTaskStatuses(env);
-    await processCallbackQueue(env, ctx);
-    if (ctx) ctx.waitUntil(processImageQueue(env, ctx));
-    else await processImageQueue(env, ctx);
-    const releaseLimits = await getPushReleaseLimits(env);
-    const candidateLimit = Math.min(Math.max(releaseLimits.globalPerMinute * 20, 100), 500);
-    const candidates = await query(env, `SELECT platform, task_id, MIN(created_at) AS oldest FROM (
-      SELECT 'jst' AS platform, p.task_id, p.created_at FROM ews_jst_push_plans p
-        JOIN ews_jst_tasks t ON t.id=p.task_id
-        WHERE p.status='pending' AND t.status IN ('processing','partial_failed')
-          AND COALESCE(t.queue_mode, 'auto') != 'manual'
-      UNION ALL
-      SELECT 'shopee' AS platform, p.task_id, p.created_at FROM ews_shopee_push_plans p
-        JOIN ews_tasks t ON t.id=p.task_id
-        WHERE p.status='pending' AND t.status IN ('processing','partial_failed')
-    ) GROUP BY platform, task_id ORDER BY oldest ASC LIMIT ?`, [candidateLimit]);
-    for (const row of (candidates?.results || [])) {
-      if (row.platform === 'jst') await jstReleaseTaskQueue(env, row.task_id, ctx);
-      else await shopeeReleaseTaskQueue(env, row.task_id, ctx);
-    }
-  } catch (err) { console.error('processPendingQueue error:', err.message); }
+    return await action();
+  } catch (err) {
+    console.error(`${name} error:`, err.message);
+  }
+}
+
+async function releasePendingPushPlans(env, ctx) {
+  const releaseLimits = await getPushReleaseLimits(env);
+  const candidateLimit = Math.min(Math.max(releaseLimits.globalPerMinute * 20, 100), 500);
+  const candidates = await query(env, `SELECT platform, task_id, MIN(created_at) AS oldest FROM (
+    SELECT 'jst' AS platform, p.task_id, p.created_at FROM ews_jst_push_plans p
+      JOIN ews_jst_tasks t ON t.id=p.task_id
+      WHERE p.status='pending' AND t.status IN ('processing','partial_failed')
+        AND COALESCE(t.queue_mode, 'auto') != 'manual'
+    UNION ALL
+    SELECT 'shopee' AS platform, p.task_id, p.created_at FROM ews_shopee_push_plans p
+      JOIN ews_tasks t ON t.id=p.task_id
+      WHERE p.status='pending' AND t.status IN ('processing','partial_failed')
+  ) GROUP BY platform, task_id ORDER BY oldest ASC LIMIT ?`, [candidateLimit]);
+  for (const row of (candidates?.results || [])) {
+    if (row.platform === 'jst') await jstReleaseTaskQueue(env, row.task_id, ctx);
+    else await shopeeReleaseTaskQueue(env, row.task_id, ctx);
+  }
+}
+
+async function processPendingQueue(env, ctx) {
+  const ready = await runQueueStage('push plan runtime setup', () => ensurePushPlanRuntimeColumns(env));
+  if (ready === undefined && !pushPlanColumnsReady) return;
+  await runQueueStage('stale push plan recovery', () => recoverStalePushPlans(env));
+  await runQueueStage('callback queue processing', () => processCallbackQueue(env, ctx));
+  await runQueueStage('pending push plan release', () => releasePendingPushPlans(env, ctx));
+  await runQueueStage('image queue processing', () => processImageQueue(env, ctx));
+  await runQueueStage('push plan status reconciliation', () => reconcileOpenPushPlanTaskStatuses(env));
 }
 
 // ========== 回调 ==========

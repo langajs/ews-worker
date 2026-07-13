@@ -29,7 +29,7 @@
                                                               },
                                          "sendBody":  true,
                                          "specifyBody":  "json",
-                                         "jsonBody":  "={{\n  callback_secret: $json.callback_secret,\n  task_id: $json.task_id,\n  titles: $json.titles\n}}",
+                                         "jsonBody":  "={{ {\n  callback_secret: $json.callback_secret,\n  task_id: $json.task_id,\n  titles: $json.titles\n} }}",
                                          "options":  {
 
                                                      }
