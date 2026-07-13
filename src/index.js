@@ -19,7 +19,7 @@ import {
   shopeeCreateExportRecord,
   shopeeCreateSubTask, shopeeGetSubTasks, shopeeUpdateSubTask,
   shopeeCreateExpectedImages, shopeeCheckSubTaskImages, shopeeCreateSkuTitle,
-  shopeeSaveImage, shopeeCheckParentCompletion, shopeeRefundCredits,
+  shopeeSaveImage, shopeeCheckParentCompletion, shopeeRefundCredits, shopeeUpdateVariationExports,
 } from './db.js';
 import { generateToken, hashPassword, verifyPassword, authenticateRequest, DEFAULT_PASSWORD } from './auth.js';
 
@@ -506,6 +506,20 @@ function normalizeShopeeVariationImageMode(value, fallback = 'option1') {
   return ['option1','none','combination_legacy'].includes(value) ? value : fallback;
 }
 
+function normalizeShopeeProductType(value, variations) {
+  if (['single','one','two'].includes(value)) return value;
+  return (variations || []).some(variation => String(variation?.option2 || '').trim()) ? 'two' : 'one';
+}
+
+function normalizeShopeeShippingChannels(value) {
+  let channels = value;
+  if (typeof channels === 'string') {
+    try { channels = JSON.parse(channels); } catch (_) { channels = []; }
+  }
+  const allowed = new Set(['5000','5001','5004','5012','5115','50039','50052']);
+  return [...new Set((Array.isArray(channels) ? channels : []).map(String).filter(channel => allowed.has(channel)))];
+}
+
 function shopeeVariationGroupKey(value) {
   return String(value || '').trim().toLocaleLowerCase('vi');
 }
@@ -649,47 +663,63 @@ async function handleUpdateTask(request, env, path) {
   if (!idx) return error('任务不存在', 404);
 
   if (idx.platform === 'shopee') {
-    const { name, description, task_description, main_description, detail_description, reference_title, reference_image, auxiliary_images, generate_count, main_image_count, detail_image_count, mode, category_id, brand_id, cover_image, images, weight_kg, length_cm, width_cm, height_cm, gtin, hs_code, tax_code, origin_country, variation_name1, variation_name2, variation_image_mode, pre_order_dts, shipping_channels, variations } = body || {};
+    const { name, description, task_description, source_brief, schema_version, product_type, main_description, reference_title, reference_image, auxiliary_images, generate_count, mode, category_id, cover_image, images, weight_kg, length_cm, width_cm, height_cm, gtin, variation_name1, variation_name2, variation_image_mode, max_purchase_qty, max_purchase_start_date, max_purchase_period_days, max_purchase_end_date, size_chart_template_id, size_chart_image, pre_order_dts, shipping_channels, variations } = body || {};
     if (!name) return error('商品名称不能为空', 400);
     if (!reference_image) return error('核心参考图不能为空', 400);
+    const schemaVersion = parseInt(schema_version) >= 2 ? 2 : 1;
+    const sourceBrief = String(source_brief || '').trim();
+    if (schemaVersion >= 2 && (sourceBrief.length < 10 || sourceBrief.length > 2000)) return error('商品事实必须为10~2000字符', 400);
     const shopeeGenerateCount = parseInt(generate_count);
     if (!Number.isInteger(shopeeGenerateCount) || shopeeGenerateCount < 1 || shopeeGenerateCount > MAX_GENERATE_COUNT) return error(`生成套数必须为1~${MAX_GENERATE_COUNT}`, 400);
     if (!Array.isArray(variations) || variations.length < 1 || variations.length > MAX_SHOPEE_VARIATIONS) return error(`Shopee变体数量必须为1~${MAX_SHOPEE_VARIATIONS}`, 400);
+    const productType = normalizeShopeeProductType(product_type, variations);
+    if (productType === 'single' && variations.length !== 1) return error('无规格商品只能有一条价格记录', 400);
     const variationName1 = String(variation_name1 || '').trim();
     const variationName2 = String(variation_name2 || '').trim();
-    if (!variationName1 || variationName1.length > 14) return error('一级规格名必须为1~14字符', 400);
+    if (productType !== 'single' && (!variationName1 || variationName1.length > 14)) return error('一级规格名必须为1~14字符', 400);
     const existingShopeeProduct = await shopeeGetProduct(env, taskId);
     const existingImageMode = normalizeShopeeVariationImageMode(existingShopeeProduct?.variation_image_mode, 'option1');
     const variationImageMode = normalizeShopeeVariationImageMode(variation_image_mode, existingImageMode);
     const normalizedVariations = [];
     const combinationKeys = new Set();
+    let lowestPrice = Infinity;
+    let highestPrice = 0;
     for (let i = 0; i < variations.length; i++) {
       const v = variations[i];
       const pricing = normalizeVariantPricing(v, true);
       if (pricing.error) return error('变体#' + (i + 1) + pricing.error, 400);
       const stock = v.stock === undefined || v.stock === null || v.stock === '' ? 999 : Number(v.stock);
       if (!Number.isInteger(stock) || stock < 0 || stock > 10000000) return error(`变体#${i + 1}库存必须为0~10000000`, 400);
-      const option1 = String(v.option1 || '').trim();
-      const option2 = String(v.option2 || '').trim();
-      if (!option1 || option1.length > 20) return error(`变体#${i + 1}一级规格值必须为1~20字符`, 400);
+      const option1 = productType === 'single' ? '' : String(v.option1 || '').trim();
+      const option2 = productType === 'single' ? '' : String(v.option2 || '').trim();
+      if (productType !== 'single' && (!option1 || option1.length > 20)) return error(`变体#${i + 1}一级规格值必须为1~20字符`, 400);
       if (option2.length > 20) return error(`变体#${i + 1}二级规格值不能超过20字符`, 400);
       const combinationKey = `${shopeeVariationGroupKey(option1)}|${shopeeVariationGroupKey(option2)}`;
       if (combinationKeys.has(combinationKey)) return error(`变体#${i + 1}规格组合重复`, 400);
       combinationKeys.add(combinationKey);
+      const priceLow = pricing.price_float_enabled ? pricing.price_min : pricing.price;
+      const priceHigh = pricing.price_float_enabled ? pricing.price_max : pricing.price;
+      if (priceLow < 1000 || priceHigh > 120000000) return error(`变体#${i + 1}价格必须为1000~120000000`, 400);
+      lowestPrice = Math.min(lowestPrice, priceLow);
+      highestPrice = Math.max(highestPrice, priceHigh);
       normalizedVariations.push({
         id: v.id || uuid(), product_id: taskId, integration_no: v.integration_no || taskId.slice(0,8),
-        option1, image_per_variation: v.image_per_variation || '',
-        option2, image_2: '',
+        option1, option1_export: '', image_per_variation: productType === 'single' ? '' : v.image_per_variation || '',
+        option2, option2_export: '', image_2: '',
         price: pricing.price, price_float_enabled: pricing.price_float_enabled,
         price_min: pricing.price_min, price_max: pricing.price_max, price_precision: pricing.price_precision,
         stock, sku: v.sku || '',
       });
     }
+    if (highestPrice / lowestPrice > 5) return error('最高SKU价格除以最低SKU价格不能超过5', 400);
     const hasTier2 = normalizedVariations.some(variation => variation.option2);
-    if (hasTier2 && (!variationName2 || variationName2.length > 14)) return error('存在二级规格值时，二级规格名必须为1~14字符', 400);
-    if (hasTier2 && normalizedVariations.some(variation => !variation.option2)) return error('二维规格下每个SKU组合都必须填写二级规格值', 400);
-    const variationGroups = getShopeeVariationGroups(normalizedVariations, variationImageMode);
-    if (variationImageMode === 'option1') {
+    if (productType === 'one' && hasTier2) return error('一维规格不能填写二级规格值', 400);
+    if (productType === 'one' && normalizedVariations.length > 20) return error('一维规格最多20个规格值', 400);
+    if (productType === 'two' && (!variationName2 || variationName2.length > 14)) return error('二维规格的二级规格名必须为1~14字符', 400);
+    if (productType === 'two' && normalizedVariations.some(variation => !variation.option2)) return error('二维规格下每个SKU组合都必须填写二级规格值', 400);
+    const normalizedImageMode = productType === 'single' ? 'none' : variationImageMode;
+    const variationGroups = getShopeeVariationGroups(normalizedVariations, normalizedImageMode);
+    if (normalizedImageMode === 'option1') {
       for (const group of variationGroups) {
         const imageUrls = [...new Set(group.variations.map(variation => variation.image_per_variation).filter(Boolean))];
         if (imageUrls.length !== 1) return error(`一级规格值“${group.name}”必须且只能使用一张SKU参考图`, 400);
@@ -700,26 +730,49 @@ async function handleUpdateTask(request, env, path) {
     if (submittedDescription && (submittedDescription.length < SHOPEE_DESCRIPTION_MIN_LENGTH || submittedDescription.length > SHOPEE_DESCRIPTION_MAX_LENGTH)) {
       return error(`商品描述必须为${SHOPEE_DESCRIPTION_MIN_LENGTH}~${SHOPEE_DESCRIPTION_MAX_LENGTH}字符`, 400);
     }
-    const productDescription = submittedDescription || buildShopeeProductDescription(name, normalizedVariations);
-    const shopeeDetailCount = parseInt(detail_image_count);
+    const productDescription = submittedDescription || (schemaVersion >= 2 ? '' : buildShopeeProductDescription(name, normalizedVariations));
+    const weightKg = parseFloat(weight_kg);
+    if (!Number.isFinite(weightKg) || weightKg <= 0 || weightKg * 1000 > 100000000) return error('重量必须大于0且导出后不超过100000000g', 400);
+    const dimensions = [length_cm, width_cm, height_cm].map(parseNumberOrNull);
+    const dimensionCount = dimensions.filter(value => value !== null).length;
+    if (dimensionCount !== 0 && dimensionCount !== 3) return error('长、宽、高必须同时填写或全部留空', 400);
+    if (dimensions.some(value => value !== null && (value <= 0 || value > 10000000))) return error('长、宽、高必须大于0且不超过10000000', 400);
+    const channels = normalizeShopeeShippingChannels(shipping_channels);
+    if (!channels.length) return error('至少选择一个物流渠道', 400);
+    const channelPriceLimits = { '5000': 10000000, '5001': 100000000, '5004': 100000000, '5115': 5000000 };
+    for (const channel of channels) {
+      if (channelPriceLimits[channel] && highestPrice > channelPriceLimits[channel]) return error(`物流渠道${channel}允许的最高价格为${channelPriceLimits[channel]}`, 400);
+    }
+    const maxPurchaseQty = max_purchase_qty === undefined || max_purchase_qty === null || max_purchase_qty === '' ? null : parseInt(max_purchase_qty);
+    if (maxPurchaseQty !== null && (!Number.isInteger(maxPurchaseQty) || maxPurchaseQty < 1 || maxPurchaseQty > 999999)) return error('限购数量必须为1~999999', 400);
+    const purchaseStart = String(max_purchase_start_date || '').trim();
+    const purchaseEnd = String(max_purchase_end_date || '').trim();
+    const purchasePeriod = max_purchase_period_days === undefined || max_purchase_period_days === null || max_purchase_period_days === '' ? null : parseInt(max_purchase_period_days);
+    const hasPurchasePeriod = purchaseStart || purchaseEnd || purchasePeriod !== null;
+    if (hasPurchasePeriod && (maxPurchaseQty === null || !/^\d{4}-\d{2}-\d{2}$/.test(purchaseStart) || !/^\d{4}-\d{2}-\d{2}$/.test(purchaseEnd) || !Number.isInteger(purchasePeriod) || purchasePeriod < 1 || purchasePeriod > 365)) return error('周期限购必须同时填写数量、开始日期、1~365天周期和结束日期', 400);
+    if (hasPurchasePeriod && purchaseEnd < purchaseStart) return error('周期限购结束日期不能早于开始日期', 400);
+    const sizeChartTemplate = String(size_chart_template_id || '').trim();
+    const sizeChartImage = String(size_chart_image || '').trim();
+    if (sizeChartTemplate && sizeChartImage) return error('尺码表模板和尺码表图片只能填写一个', 400);
+    const preOrderDts = pre_order_dts === undefined || pre_order_dts === null || pre_order_dts === '' ? null : parseInt(pre_order_dts);
+    if (preOrderDts !== null && (!Number.isInteger(preOrderDts) || preOrderDts < 5 || preOrderDts > 30)) return error('预售DTS必须为5~30天', 400);
     await env.DB.prepare("UPDATE ews_tasks SET name=?, status='pending', updated_at=datetime('now') WHERE id=?").bind(String(name).slice(0,30), taskId).run();
     await shopeeCreateProduct(env, {
       id: taskId, task_id: taskId, name, category_id: category_id || '',
-      description: productDescription, main_description: main_description || '', detail_description: detail_description || '',
+      description: productDescription, source_brief: sourceBrief, schema_version: schemaVersion, product_type: productType,
+      main_description: main_description || '', detail_description: '',
       reference_title: reference_title || name || '',
       reference_image: reference_image || '', auxiliary_images: auxiliary_images || '[]',
       generate_count: shopeeGenerateCount,
       mode: mode === 'dedup' ? 'dedup' : 'full',
-      main_image_count: Math.min(Math.max(parseInt(main_image_count) || 9, 5), 9),
-      detail_image_count: Math.min(Math.max(Number.isNaN(shopeeDetailCount) ? 0 : shopeeDetailCount, 0), 9),
-      brand_id: brand_id || '',
+      main_image_count: 9, detail_image_count: 0,
       cover_image: cover_image || '', images: images || '[]',
-      weight_kg: weight_kg || 0, length_cm: length_cm ?? null, width_cm: width_cm ?? null, height_cm: height_cm ?? null,
-      gtin: gtin || '', hs_code: hs_code || '', tax_code: tax_code || '', origin_country: origin_country || '',
-      variation_name1: variationName1, variation_name2: hasTier2 ? variationName2 : '',
-      variation_image_mode: variationImageMode,
-      pre_order_dts: pre_order_dts ?? null,
-      shipping_channels: shipping_channels || '["50052"]',
+      weight_kg: weightKg, length_cm: dimensions[0], width_cm: dimensions[1], height_cm: dimensions[2], gtin: gtin || '',
+      variation_name1: productType === 'single' ? '' : variationName1, variation_name2: productType === 'two' ? variationName2 : '',
+      variation_name1_export: '', variation_name2_export: '', variation_image_mode: normalizedImageMode,
+      max_purchase_qty: maxPurchaseQty, max_purchase_start_date: purchaseStart, max_purchase_period_days: purchasePeriod, max_purchase_end_date: purchaseEnd,
+      size_chart_template_id: sizeChartTemplate, size_chart_image: sizeChartImage, pre_order_dts: preOrderDts,
+      shipping_channels: JSON.stringify(channels),
     });
     await shopeeReplaceVariations(env, taskId, normalizedVariations);
     return json({ success: true, task_id: taskId, message: '商品创建成功' });
@@ -938,26 +991,21 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
   const detail = await shopeeGetProduct(env, taskId);
   if (!detail) return error('商品不存在', 404);
   if (detail.status !== 'pending') return error('只能推送等待中的任务', 400);
+  const productType = normalizeShopeeProductType(detail.product_type, detail.variations || []);
   const variationImageMode = normalizeShopeeVariationImageMode(detail.variation_image_mode, 'combination_legacy');
-  const variantCombos = detail.variations || [];
+  const variantCombos = productType === 'single' ? [] : detail.variations || [];
   const variationGroups = getShopeeVariationGroups(variantCombos, variationImageMode);
   const skuImageGroups = variationImageMode === 'none' ? [] : variationGroups;
-  const rawDetailCount = parseInt(detail.detail_image_count);
-  const detailCount = Math.min(Math.max(Number.isNaN(rawDetailCount) ? 0 : rawDetailCount, 0), 9);
   const titleWebhookUrl = workflowFlags.title ? config.n8n_title_webhook || '' : '';
-  const skuTitleWebhookUrl = workflowFlags.skuTitle ? config.n8n_sku_title_webhook || '' : '';
   const skuImageWebhookUrl = workflowFlags.skuImage ? config.n8n_sku_image_webhook || '' : '';
   const mainWebhookUrl = config.n8n_main_webhook || '';
   const subImageWebhookUrl = config.n8n_sub_image_webhook || '';
-  const detailWebhookUrl = workflowFlags.detail ? config.n8n_detail_webhook || '' : '';
   const requiredShopeeWebhooks = [
     [mainWebhookUrl, '封面图'],
     [subImageWebhookUrl, '附图'],
   ];
-  if (workflowFlags.title) requiredShopeeWebhooks.push([titleWebhookUrl, '商品标题']);
-  if (workflowFlags.skuTitle) requiredShopeeWebhooks.push([skuTitleWebhookUrl, 'SKU标题']);
+  if (workflowFlags.title) requiredShopeeWebhooks.push([titleWebhookUrl, '商品元数据']);
   if (workflowFlags.skuImage && skuImageGroups.length > 0) requiredShopeeWebhooks.push([skuImageWebhookUrl, 'SKU变体图']);
-  if (workflowFlags.detail && detailCount > 0) requiredShopeeWebhooks.push([detailWebhookUrl, '详情图']);
   const missingShopeeWebhooks = requiredShopeeWebhooks.filter(([url]) => !url).map(([, label]) => label);
   if (missingShopeeWebhooks.length)
     return error('请先在系统配置页配置 Shopee 必需工作流 Webhook: ' + missingShopeeWebhooks.join('、'), 400);
@@ -966,7 +1014,7 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
 
   const callbackSecret = config.callback_secret || '';
   const baseUrl = new URL(request.url).origin + '/api/callback';
-  const mainCount = Math.min(Math.max(detail.main_image_count || 9, 5), 9);
+  const mainCount = 9;
   const refImg = detail.reference_image || '';
   const auxImgs = detail.auxiliary_images || '';
   const generateCount = detail.generate_count || 1;
@@ -979,9 +1027,8 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
     await shopeeCreateSubTask(env, { id: subId, parent_task_id: taskId, set_index: i });
     const dedupShared = mode === 'dedup' && i > 0;
     const expectedSubCount = (!dedupShared && subImageWebhookUrl) ? mainCount : 0;
-    const expectedDetailCount = (!dedupShared && detailWebhookUrl) ? detailCount : 0;
     const skuImageCount = (!dedupShared && skuImageWebhookUrl) ? skuImageGroups.length : 0;
-    await shopeeCreateExpectedImages(env, taskId, subId, i, expectedSubCount, expectedDetailCount, skuImageCount, !!mainWebhookUrl, !!subImageWebhookUrl && !dedupShared);
+    await shopeeCreateExpectedImages(env, taskId, subId, i, expectedSubCount, 0, skuImageCount, !!mainWebhookUrl, !!subImageWebhookUrl && !dedupShared);
   }
   await updateTaskIndexStatus(env, taskId, 'processing');
   await env.DB.prepare("UPDATE ews_shopee_products SET status='processing', updated_at=datetime('now') WHERE id=?").bind(taskId).run();
@@ -989,36 +1036,25 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
   const subTasks = subTaskIds.map((id, i) => ({ sub_task_id: id, set_index: i }));
   const allJobs = [];
 
-  // title
+  // 商品元数据
   if (titleWebhookUrl) allJobs.push({ webhook_type: 'title', sub_task_id: subTasks[0]?.sub_task_id || '', url: titleWebhookUrl,
-    data: { task_id: taskId, name: detail.name, reference_title: detail.reference_title || detail.name || '', description: detail.description || '',
-      sub_task_count: generateCount, sub_tasks: subTasks, callback_secret: callbackSecret, callback_url: baseUrl } });
-  // sku_title
-  if (skuTitleWebhookUrl) allJobs.push({ webhook_type: 'sku_title', sub_task_id: subTasks[0]?.sub_task_id || '', url: skuTitleWebhookUrl,
-    data: { task_id: taskId, name: detail.name, reference_title: detail.reference_title || detail.name || '', description: detail.description || '',
-      sub_task_count: generateCount, sub_tasks: subTasks,
-      variants: variationGroups.map(group => ({ id: group.key, name: group.name, option2: group.option2 || '' })),
+    data: { task_id: taskId, name: detail.name, source_brief: detail.source_brief || detail.description || '', reference_title: detail.reference_title || '',
+      reference_image: refImg, auxiliary_images: auxImgs, sub_task_count: generateCount, sub_tasks: subTasks,
+      product_type: productType, variation_name1: detail.variation_name1 || '', variation_name2: detail.variation_name2 || '',
+      variants: variantCombos.map(variant => ({ id: variant.id, option1: variant.option1 || '', option2: variant.option2 || '' })),
       callback_secret: callbackSecret, callback_url: baseUrl } });
   // main_1
   if (mainWebhookUrl) for (const st of subTasks) allJobs.push({ webhook_type: 'main_1', sub_task_id: st.sub_task_id, url: mainWebhookUrl,
     data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: refImg,
-      main_description: detail.main_description || '', auxiliary_images: auxImgs,
+      main_description: detail.main_description || detail.source_brief || '', auxiliary_images: auxImgs,
       image_type: 'main', image_position: 1, callback_secret: callbackSecret, callback_url: baseUrl } });
   // sub_2~N
   if (subImageWebhookUrl) for (let p = 2; p <= mainCount; p++) for (const st of subTasks) {
     if (mode === 'dedup' && st.set_index > 0) continue;
     allJobs.push({ webhook_type: 'sub_' + p, sub_task_id: st.sub_task_id, url: subImageWebhookUrl,
       data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: refImg,
-        main_description: detail.main_description || '', auxiliary_images: auxImgs,
+        main_description: detail.main_description || detail.source_brief || '', auxiliary_images: auxImgs,
         image_type: 'sub', image_position: p, callback_secret: callbackSecret, callback_url: baseUrl } });
-  }
-  // detail_1~M
-  if (detailWebhookUrl) for (let p = 1; p <= detailCount; p++) for (const st of subTasks) {
-    if (mode === 'dedup' && st.set_index > 0) continue;
-    allJobs.push({ webhook_type: 'detail_' + p, sub_task_id: st.sub_task_id, url: detailWebhookUrl,
-      data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: refImg,
-        detail_description: detail.detail_description || '', auxiliary_images: auxImgs,
-        image_type: 'detail', image_position: p, callback_secret: callbackSecret, callback_url: baseUrl } });
   }
   // sku_1~V（新任务按一级规格出图；历史任务保留逐组合兼容）
   if (skuImageWebhookUrl && skuImageGroups.length > 0) for (const st of subTasks) {
@@ -1614,7 +1650,7 @@ async function failCallbackPushPlan(env, row, reason) {
   try { payload = JSON.parse(row.payload || '{}'); } catch (_) { return; }
   let webhookType = '';
   if (payload.sku_titles !== undefined) webhookType = 'sku_title';
-  else if (payload.titles !== undefined || payload.product_title) webhookType = 'title';
+  else if (payload.products !== undefined || payload.titles !== undefined || payload.product_title) webhookType = 'title';
   else if (payload.image_type && payload.image_position) webhookType = `${payload.image_type}_${parseInt(payload.image_position) || 1}`;
   if (!webhookType) return;
   const planTable = row.platform === 'shopee' ? 'ews_shopee_push_plans' : 'ews_jst_push_plans';
@@ -1774,8 +1810,9 @@ async function processImageQueuePayload(env, ctx, row) {
 
 async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
   if (!body || typeof body !== 'object') throw callbackPermanentError('无效的请求体');
-  const { task_id, sub_task_id, titles, product_title, image_type, image_position, image_url, error: errMsg } = body;
+  const { task_id, sub_task_id, products, titles, product_title, image_type, image_position, image_url, error: errMsg } = body;
   if (!task_id) throw callbackPermanentError('缺少 task_id');
+  if (products !== undefined && !Array.isArray(products)) throw callbackPermanentError('products 必须是数组');
   if (titles !== undefined && !Array.isArray(titles)) throw callbackPermanentError('titles 必须是数组');
   if (body.sku_titles !== undefined && !Array.isArray(body.sku_titles)) throw callbackPermanentError('sku_titles 必须是数组');
   const idx = await getTaskIndex(env, task_id);
@@ -1794,8 +1831,59 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
   const checkParentCompletion = isShopee ? shopeeCheckParentCompletion : jstCheckParentCompletion;
   await ensurePushPlanRuntimeColumns(env);
 
-  // 标题回调
-  if (Array.isArray(titles)) {
+  // Shopee 商品元数据回调
+  if (Array.isArray(products)) {
+    if (!isShopee) throw callbackPermanentError('products 仅支持 Shopee 任务');
+    const subTasks = await shopeeGetSubTasks(env, task_id);
+    const allSubs = (subTasks?.results || []).sort((a,b) => a.set_index - b.set_index);
+    if (products.length !== allSubs.length) throw callbackPermanentError(`商品元数据数量不匹配: ${products.length} vs ${allSubs.length}`);
+    const metadataBySubTask = new Map(products.map(item => [String(item?.sub_task_id || ''), item]));
+    if (metadataBySubTask.has('') || metadataBySubTask.size !== products.length) throw callbackPermanentError('商品元数据的sub_task_id不能为空或重复');
+    const normalizedProducts = [];
+    for (let i = 0; i < allSubs.length; i++) {
+      const item = metadataBySubTask.get(allSubs[i].id);
+      if (!item) throw callbackPermanentError(`商品元数据缺少sub_task_id: ${allSubs[i].id}`);
+      const title = normalizeGeneratedTitles([item?.product_name], 1, 10, 120, `商品标题#${i + 1}`)[0];
+      const description = normalizeGeneratedTitles([item?.product_description], 1, SHOPEE_DESCRIPTION_MIN_LENGTH, SHOPEE_DESCRIPTION_MAX_LENGTH, `商品描述#${i + 1}`)[0];
+      normalizedProducts.push({ id: allSubs[i].id, title, description });
+    }
+    if (new Set(normalizedProducts.map(item => item.title.toLocaleLowerCase('vi'))).size !== normalizedProducts.length) throw callbackPermanentError('商品标题存在重复项');
+    const detail = await shopeeGetProduct(env, task_id);
+    const productType = normalizeShopeeProductType(detail?.product_type, detail?.variations || []);
+    const sourceVariations = productType === 'single' ? [] : detail?.variations || [];
+    const variationLabels = body.variation_labels || {};
+    const labels = Array.isArray(variationLabels.values) ? variationLabels.values : [];
+    if (sourceVariations.length > 0) {
+      const name1 = String(variationLabels.name1 || '').trim();
+      const name2 = String(variationLabels.name2 || '').trim();
+      if (!name1 || name1.length > 14) throw callbackPermanentError('AI一级规格名必须为1~14字符');
+      if (productType === 'two' && (!name2 || name2.length > 14)) throw callbackPermanentError('AI二级规格名必须为1~14字符');
+      if (labels.length !== sourceVariations.length) throw callbackPermanentError(`AI规格值数量不匹配: ${labels.length} vs ${sourceVariations.length}`);
+      const labelsById = new Map(labels.map(label => [String(label?.id || ''), label]));
+      const normalizedLabels = [];
+      const option1Translations = new Map();
+      const combinationKeys = new Set();
+      for (const variation of sourceVariations) {
+        const label = labelsById.get(variation.id);
+        if (!label) throw callbackPermanentError(`AI规格值缺少变体ID: ${variation.id}`);
+        const option1 = String(label.option1 || '').trim();
+        const option2 = String(label.option2 || '').trim();
+        if (!option1 || option1.length > 20) throw callbackPermanentError('AI一级规格值必须为1~20字符');
+        if (productType === 'two' && (!option2 || option2.length > 20)) throw callbackPermanentError('AI二级规格值必须为1~20字符');
+        const sourceOption1Key = shopeeVariationGroupKey(variation.option1);
+        const translatedOption1Key = shopeeVariationGroupKey(option1);
+        if (option1Translations.has(sourceOption1Key) && option1Translations.get(sourceOption1Key) !== translatedOption1Key) throw callbackPermanentError('同一一级规格值的AI翻译不一致');
+        option1Translations.set(sourceOption1Key, translatedOption1Key);
+        const combinationKey = `${translatedOption1Key}|${shopeeVariationGroupKey(option2)}`;
+        if (combinationKeys.has(combinationKey)) throw callbackPermanentError('AI规格翻译产生重复组合');
+        combinationKeys.add(combinationKey);
+        normalizedLabels.push({ id: variation.id, option1, option2: productType === 'two' ? option2 : '' });
+      }
+      await shopeeUpdateVariationExports(env, task_id, name1, productType === 'two' ? name2 : '', normalizedLabels);
+    }
+    for (const item of normalizedProducts) await shopeeUpdateSubTask(env, item.id, { title: item.title, description: item.description });
+  // 旧版标题回调
+  } else if (Array.isArray(titles)) {
     const subTasks = await getSubTasks(env, task_id);
     const allSubs = (subTasks?.results || []).sort((a,b) => a.set_index - b.set_index);
     const normalizedTitles = normalizeGeneratedTitles(titles, allSubs.length, isShopee ? 10 : 1, isShopee ? 120 : 200, '商品标题');
@@ -1805,7 +1893,7 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
     const title = normalizeGeneratedTitles([product_title], 1, isShopee ? 10 : 1, isShopee ? 120 : 200, '商品标题')[0];
     for (const st of (subTasks?.results || [])) await updateSubTask(env, st.id, { title });
   }
-  if (titles || product_title) {
+  if (products || titles || product_title) {
     const planTable = idx.platform === 'jst' ? 'ews_jst_push_plans' : 'ews_shopee_push_plans';
     await completePushPlanFromCallback(env, planTable, task_id, 'title');
   }
@@ -2190,6 +2278,8 @@ function validateShopeeRow(product, variations) {
   var varCount = variations.length;
   var variationName1 = product.variation_name1 || '';
   var variationName2 = product.variation_name2 || '';
+  var productType = normalizeShopeeProductType(product.product_type, variations);
+  var isSingle = productType === 'single';
 
   // 必填字段
   if (!n) errors.push('任务名称不能为空');
@@ -2202,8 +2292,8 @@ function validateShopeeRow(product, variations) {
   if (varCount > 0) {
     var hasTier2 = variations.some(function(v) { return v.option2 && v.option2.trim(); });
     if (varCount > 50) errors.push('变体数量超过50上限（当前: ' + varCount + '）');
-    if (!hasTier2 && varCount > 20) errors.push('一维规格变体超过20上限（当前: ' + varCount + '）');
-    if (!variationName1) errors.push('规格名1(Variation Name1)不能为空');
+    if (!isSingle && !hasTier2 && varCount > 20) errors.push('一维规格变体超过20上限（当前: ' + varCount + '）');
+    if (!isSingle && !variationName1) errors.push('规格名1(Variation Name1)不能为空');
     if (variationName1 && (variationName1.length < 1 || variationName1.length > 14)) errors.push('规格名1(Variation Name1)必须为1~14字符（当前: ' + variationName1.length + '）');
     if (hasTier2 && !variationName2) errors.push('存在二级规格时，规格名2(Variation Name2)不能为空');
     if (variationName2 && (variationName2.length < 1 || variationName2.length > 14)) errors.push('规格名2(Variation Name2)必须为1~14字符（当前: ' + variationName2.length + '）');
@@ -2214,7 +2304,7 @@ function validateShopeeRow(product, variations) {
       var key = (variations[i].option1 || '') + '|' + (variations[i].option2 || '');
       if (combos[key]) { warnings.push('变体组合 "' + key + '" 重复（第' + (i+1) + '行）'); }
       combos[key] = true;
-      if (!variations[i].option1 || !variations[i].option1.trim()) errors.push('变体#' + (i+1) + ' 规格值1不能为空');
+      if (!isSingle && (!variations[i].option1 || !variations[i].option1.trim())) errors.push('变体#' + (i+1) + ' 规格值1不能为空');
       if (variations[i].option1 && variations[i].option1.length > 20) errors.push('变体#' + (i+1) + ' 规格值1(Option for Variation 1)必须为1~20字符（当前: ' + variations[i].option1.length + '）');
       if (hasTier2 && (!variations[i].option2 || !variations[i].option2.trim())) errors.push('变体#' + (i+1) + ' 规格值2不能为空');
       if (variations[i].option2 && variations[i].option2.length > 20) errors.push('变体#' + (i+1) + ' 规格值2(Option for Variation 2)必须为1~20字符（当前: ' + variations[i].option2.length + '）');
@@ -2232,6 +2322,31 @@ function validateShopeeRow(product, variations) {
       if (variations[i].sku && variations[i].sku.length >= 100) errors.push('变体#' + (i+1) + ' SKU必须小于100字符（当前: ' + variations[i].sku.length + '）');
     }
   }
+
+  var priceLows = []; var priceHighs = [];
+  for (var pi = 0; pi < variations.length; pi++) {
+    if (isEnabled(variations[pi].price_float_enabled)) {
+      priceLows.push(parseFloat(variations[pi].price_min));
+      priceHighs.push(parseFloat(variations[pi].price_max));
+    } else {
+      priceLows.push(parseFloat(variations[pi].price));
+      priceHighs.push(parseFloat(variations[pi].price));
+    }
+  }
+  var lowest = Math.min(...priceLows.filter(Number.isFinite));
+  var highest = Math.max(...priceHighs.filter(Number.isFinite));
+  if (Number.isFinite(lowest) && lowest > 0 && Number.isFinite(highest) && highest / lowest > 5) errors.push('最高SKU价格除以最低SKU价格不能超过5');
+  var dimensions = [product.length_cm, product.width_cm, product.height_cm].map(parseNumberOrNull);
+  var dimensionCount = dimensions.filter(function(value) { return value !== null; }).length;
+  if (dimensionCount !== 0 && dimensionCount !== 3) errors.push('长、宽、高必须同时填写或全部留空');
+  var shippingChannels = normalizeShopeeShippingChannels(product.shipping_channels);
+  if (!shippingChannels.length) errors.push('至少需要开启一个物流渠道');
+  var shippingPriceLimits = { '5000': 10000000, '5001': 100000000, '5004': 100000000, '5115': 5000000 };
+  for (var ci = 0; ci < shippingChannels.length; ci++) {
+    var channelLimit = shippingPriceLimits[shippingChannels[ci]];
+    if (channelLimit && highest > channelLimit) errors.push('物流渠道' + shippingChannels[ci] + '允许的最高价格为' + channelLimit);
+  }
+  if (product.size_chart_template_id && product.size_chart_image) errors.push('尺码表模板和尺码表图片只能填写一个');
 
   // 分类ID
   if (categoryId && !/^\d+$/.test(categoryId)) warnings.push('分类ID(Category)应为数字（当前: ' + categoryId + '）');
@@ -2262,12 +2377,16 @@ async function shopeeHandleExport(env, taskId) {
   const product = await shopeeGetProduct(env, taskId);
   if (!product) return error('商品不存在', 404);
   const variations = product.variations || [];
+  const schemaVersion = parseInt(product.schema_version) || 1;
+  const productType = normalizeShopeeProductType(product.product_type, variations);
+  const isSingleProduct = productType === 'single';
   const storedDescription = String(product.description || '').trim();
+  const firstGeneratedDescription = String(product.sub_tasks?.[0]?.description || '').trim();
   const fallbackDescription = buildShopeeProductDescription(product.name, variations, product.sub_tasks?.[0]?.title || '');
 
   // 校验
-  var validation = validateShopeeRow({ ...product, description: storedDescription || fallbackDescription }, variations);
-  if (!storedDescription) validation.warnings.push('历史任务未填写商品描述，导出时已根据AI商品标题与规格自动补全，请导入前检查');
+  var validation = validateShopeeRow({ ...product, description: firstGeneratedDescription || storedDescription || fallbackDescription }, variations);
+  if (schemaVersion < 2 && !storedDescription) validation.warnings.push('历史任务未填写商品描述，导出时已根据AI商品标题与规格自动补全，请导入前检查');
   // 有错误则拒绝导出，有警告则附带
   if (!validation.valid) {
     return json({ success: false, error: '数据校验失败', errors: validation.errors, warnings: validation.warnings }, 400);
@@ -2276,7 +2395,7 @@ async function shopeeHandleExport(env, taskId) {
   const rows = [];
   const mode = product.mode || 'full';
   const variationImageMode = normalizeShopeeVariationImageMode(product.variation_image_mode, 'combination_legacy');
-  const variationGroups = getShopeeVariationGroups(variations, variationImageMode);
+  const variationGroups = getShopeeVariationGroups(isSingleProduct ? [] : variations, variationImageMode);
   const variationImagePositions = new Map();
   for (let groupIndex = 0; groupIndex < variationGroups.length; groupIndex++) {
     for (const variation of variationGroups[groupIndex].variations) variationImagePositions.set(variation.id, groupIndex + 1);
@@ -2289,7 +2408,7 @@ async function shopeeHandleExport(env, taskId) {
 
   const subTaskIds = subTasks.map(st => st.id).filter(Boolean);
   const skuTitleMap = {};
-  if (subTaskIds.length > 0) {
+  if (schemaVersion < 2 && subTaskIds.length > 0) {
     const ph = subTaskIds.map(() => '?').join(',');
     const skuRows = await query(env, `SELECT sub_task_id, variation_id, title FROM ews_shopee_sku_titles WHERE sub_task_id IN (${ph})`, subTaskIds);
     for (const st of (skuRows?.results || [])) skuTitleMap[st.sub_task_id + '_' + st.variation_id] = st.title;
@@ -2318,9 +2437,24 @@ async function shopeeHandleExport(env, taskId) {
     return generated;
   }
   function getSkuUrl(setIdx, subTaskId, vIdx, v) {
-    if (variationImageMode === 'none') return '';
+    if (isSingleProduct || variationImageMode === 'none') return '';
     const imagePosition = variationImageMode === 'combination_legacy' ? vIdx + 1 : variationImagePositions.get(v.id);
     return imagePosition ? getImg(setIdx, subTaskId, 'sku', imagePosition) : '';
+  }
+  function productDescriptionFor(subTask) {
+    const generated = String(subTask?.description || '').trim();
+    if (generated) return generated;
+    if (storedDescription) return storedDescription;
+    return schemaVersion < 2 ? buildShopeeProductDescription(product.name, variations, subTask?.title || '') : '';
+  }
+  function option1For(subTask, variation) {
+    if (isSingleProduct) return '';
+    if (schemaVersion >= 2) return variation.option1_export || '';
+    return skuTitleMap[(subTask.id || '') + '_' + variation.id] || variation.option1 || '';
+  }
+  function option2For(variation) {
+    if (isSingleProduct) return '';
+    return schemaVersion >= 2 ? variation.option2_export || '' : variation.option2_export || variation.option2 || '';
   }
   function shipping(id) { return shippingChannels.includes(id) ? 'On' : 'Off'; }
   function weightInGrams() {
@@ -2344,22 +2478,28 @@ async function shopeeHandleExport(env, taskId) {
   }
   if (subTasks.length === 0) addExportError('请先推送并完成AI生成任务，当前没有商品套图子任务');
   if (subTasks.length > 0 && subTasks.length < expectedSetCount) addExportError('AI商品套图数量不足: ' + subTasks.length + '/' + expectedSetCount);
+  if (schemaVersion >= 2 && !isSingleProduct && !product.variation_name1_export) addExportError('缺少AI规范化一级规格名');
+  if (schemaVersion >= 2 && productType === 'two' && !product.variation_name2_export) addExportError('缺少AI规范化二级规格名');
   for (let si = 0; si < subTasks.length; si++) {
     const subTask = subTasks[si];
     const setIdx = subTask.set_index ?? si;
     const setLabel = '第' + (setIdx + 1) + '套';
     const productTitle = subTask.title || '';
     if (productTitle.length < 10 || productTitle.length > 120) addExportError(setLabel + ' 缺少合规AI商品标题(Product Name 10~120字符)');
+    const productDescription = productDescriptionFor(subTask);
+    if (productDescription.length < SHOPEE_DESCRIPTION_MIN_LENGTH || productDescription.length > SHOPEE_DESCRIPTION_MAX_LENGTH) addExportError(setLabel + ' 缺少合规AI商品描述(Product Description 100~3000字符)');
     if (!getImg(setIdx, subTask.id || '', 'main', 1)) addExportError(setLabel + ' 缺少AI封面图(main_1)，不能用参考图替代');
     for (let p = 2; p <= mainImgTotal; p++) {
       if (!getImg(setIdx, subTask.id || '', 'sub', p)) addExportError(setLabel + ' 缺少AI附图sub_' + p);
     }
     for (let vi = 0; vi < variations.length; vi++) {
       const v = variations[vi];
-      const skuTitle = skuTitleMap[(subTask.id || '') + '_' + v.id] || '';
       const skuCode = skuCodeFor(subTask, setIdx, v, vi);
-      if (skuTitle.length < 1 || skuTitle.length > 20) addExportError(setLabel + ' 变体#' + (vi + 1) + ' 缺少合规AI SKU标题(Option 1~20字符)');
-      if (variationImageMode !== 'none' && !getSkuUrl(setIdx, subTask.id || '', vi, v)) addExportError(setLabel + ' 变体#' + (vi + 1) + ' 缺少AI SKU变体图');
+      const option1 = option1For(subTask, v);
+      const option2 = option2For(v);
+      if (!isSingleProduct && (option1.length < 1 || option1.length > 20)) addExportError(setLabel + ' 变体#' + (vi + 1) + ' 缺少合规一级规格值(1~20字符)');
+      if (productType === 'two' && (option2.length < 1 || option2.length > 20)) addExportError(setLabel + ' 变体#' + (vi + 1) + ' 缺少合规二级规格值(1~20字符)');
+      if (!isSingleProduct && variationImageMode !== 'none' && !getSkuUrl(setIdx, subTask.id || '', vi, v)) addExportError(setLabel + ' 变体#' + (vi + 1) + ' 缺少AI SKU变体图');
       if (skuCode.length >= 100) addExportError(setLabel + ' 变体#' + (vi + 1) + ' 导出SKU超过100字符');
     }
   }
@@ -2373,21 +2513,25 @@ async function shopeeHandleExport(env, taskId) {
     var images = productImages(setIdx, subTask.id || '');
     var coverImage = getImg(setIdx, subTask.id || '', 'main', 1);
     var parentSku = parentSkuFor(subTask, setIdx);
-    var skuTitle = skuTitleMap[(subTask.id || '') + '_' + v.id] || '';
+    var option1 = option1For(subTask, v);
+    var option2 = option2For(v);
     var skuCode = skuCodeFor(subTask, setIdx, v, variationsIdx);
     var exportPrice = exportPriceForVariant(v, taskId, setIdx, variationsIdx);
     return [
       product.category_id || '',                          // A Category
       subTask.title || '',                                // B Product Name
-      storedDescription || buildShopeeProductDescription(product.name, variations, subTask.title || ''), // C Product Description
-      '', '', '', '',                                     // D-G MaxPQ (保留空位)
+      productDescriptionFor(subTask),                     // C Product Description
+      product.max_purchase_qty ?? '',                     // D Maximum Purchase Quantity
+      product.max_purchase_start_date || '',              // E MaxPQ Start Date
+      product.max_purchase_period_days ?? '',             // F MaxPQ Time Period
+      product.max_purchase_end_date || '',                // G MaxPQ End Date
       parentSku,                                          // H Parent SKU
-      parentSku,                                          // I Variation Integration No.
-      product.variation_name1 || '',                      // J Variation Name1
-      skuTitle,                                           // K Option for Variation 1
+      isSingleProduct ? '' : parentSku,                   // I Variation Integration No.
+      isSingleProduct ? '' : schemaVersion >= 2 ? product.variation_name1_export || '' : product.variation_name1_export || product.variation_name1 || '', // J Variation Name1
+      option1,                                            // K Option for Variation 1
       getSkuUrl(setIdx, subTask.id || '', variationsIdx, v), // L Image per Variation
-      product.variation_name2 || '',                      // M Variation Name2
-      v.option2 || '',                                    // N Option for Variation 2
+      productType === 'two' ? schemaVersion >= 2 ? product.variation_name2_export || '' : product.variation_name2_export || product.variation_name2 || '' : '', // M Variation Name2
+      option2,                                            // N Option for Variation 2
       exportPrice,                                       // O Price
       v.stock ?? '',                                      // P Stock
       skuCode,                                            // Q SKU
@@ -2427,12 +2571,15 @@ async function handleUpload(request, env) {
   if (!(formData instanceof FormData)) return error('请使用 multipart/form-data 格式上传', 400);
   const file = formData.get('file');
   if (!file) return error('请选择文件', 400);
-  if (!['image/jpeg','image/png','image/webp','image/gif'].includes(file.type)) return error('仅支持 JPG/PNG/WebP/GIF', 400);
-  if (file.size > 10 * 1024 * 1024) return error('文件大小不能超过 10MB', 400);
   const taskId = formData.get('task_id'); if (!taskId) return error('缺少 task_id', 400);
-  const folder = formData.get('folder') || 'uploads';
+  const folder = String(formData.get('folder') || 'uploads');
+  const imageTypes = ['image/jpeg','image/png','image/webp','image/gif'];
+  const isSizeChartPdf = folder === 'size-chart' && file.type === 'application/pdf';
+  if (!imageTypes.includes(file.type) && !isSizeChartPdf) return error('仅支持 JPG/PNG/WebP/GIF，尺码表可使用 PDF', 400);
+  const maxSize = folder === 'size-chart' ? 2 * 1024 * 1024 : 10 * 1024 * 1024;
+  if (file.size > maxSize) return error(folder === 'size-chart' ? '尺码表文件不能超过 2MB' : '文件大小不能超过 10MB', 400);
   const buffer = await file.arrayBuffer();
-  const key = `ews/${taskId}/${folder}/${uuid()}.jpg`;
+  const key = `ews/${taskId}/${folder}/${uuid()}.${isSizeChartPdf ? 'pdf' : 'jpg'}`;
   await env.R2.put(key, buffer, { httpMetadata: { contentType: file.type } });
   const config = await getConfig(env);
   const publicUrl = config.r2_public_url || '';

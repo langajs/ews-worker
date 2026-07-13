@@ -1,295 +1,283 @@
 {
-    "name":  "虾皮标题",
-    "nodes":  [
-                  {
-                      "parameters":  {
-                                         "jsCode":  "const response = $input.first().json;\nconst originalData = $node[\u0027提取参数\u0027].json;\nlet content = response?.choices?.[0]?.message?.content;\n\nif (typeof content !== \u0027string\u0027) {\n  throw new Error(\u0027模型未返回标题文本\u0027);\n}\n\ncontent = content.replace(/```json\\s*/gi, \u0027\u0027).replace(/```/g, \u0027\u0027).trim();\nlet titles;\ntry {\n  titles = JSON.parse(content);\n} catch (error) {\n  throw new Error(\u0027标题结果不是合法 JSON 数组\u0027);\n}\n\nif (!Array.isArray(titles) || titles.length !== originalData.subTaskCount) {\n  throw new Error(`标题数量不匹配: ${Array.isArray(titles) ? titles.length : 0} / ${originalData.subTaskCount}`);\n}\n\ntitles = titles.map((value, index) =\u003e {\n  const title = typeof value === \u0027string\u0027 ? value.replace(/\\s+/g, \u0027 \u0027).trim() : \u0027\u0027;\n  if (title.length \u003c 10 || title.length \u003e 120) {\n    throw new Error(`标题#${index + 1}长度必须为10~120字符`);\n  }\n  return title;\n});\n\nif (new Set(titles.map(title =\u003e title.toLocaleLowerCase(\u0027vi\u0027))).size !== titles.length) {\n  throw new Error(\u0027标题结果存在重复项\u0027);\n}\n\nreturn {\n  callback_secret: originalData.callbackSecret,\n  task_id: originalData.taskId,\n  titles,\n  callbackUrl: originalData.callbackUrl\n};"
-                                     },
-                      "type":  "n8n-nodes-base.code",
-                      "typeVersion":  2,
-                      "position":  [
-                                       512,
-                                       -32
-                                   ],
-                      "id":  "8730dda7-9c0c-4eee-81b8-10e263ccc33c",
-                      "name":  "提取标题列表"
-                  },
-                  {
-                      "parameters":  {
-                                         "method":  "POST",
-                                         "url":  "={{ $json.callbackUrl }}",
-                                         "sendHeaders":  true,
-                                         "headerParameters":  {
-                                                                  "parameters":  [
-                                                                                     {
-                                                                                         "name":  "Content-Type",
-                                                                                         "value":  "application/json"
-                                                                                     }
-                                                                                 ]
-                                                              },
-                                         "sendBody":  true,
-                                         "specifyBody":  "json",
-                                         "jsonBody":  "={{ {\n  callback_secret: $json.callback_secret,\n  task_id: $json.task_id,\n  titles: $json.titles\n} }}",
-                                         "options":  {
-
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.httpRequest",
-                      "typeVersion":  4.4,
-                      "position":  [
-                                       736,
-                                       -32
-                                   ],
-                      "id":  "abcb7dcc-11bd-4366-a712-a6bf5950feed",
-                      "name":  "callback",
-                      "retryOnFail":  true,
-                      "maxTries":  3,
-                      "waitBetweenTries":  5000
-                  },
-                  {
-                      "parameters":  {
-                                         "method":  "POST",
-                                         "url":  "https://api.deepseek.com/chat/completions",
-                                         "authentication":  "genericCredentialType",
-                                         "genericAuthType":  "httpHeaderAuth",
-                                         "sendBody":  true,
-                                         "specifyBody":  "json",
-                                         "jsonBody":  "={{\n{\n  model: \"deepseek-v4-flash\",\n  messages: [\n    {\n      role: \"system\",\n      content: \"你只输出符合要求的严格 JSON，不输出 Markdown 或解释。\"\n    },\n    {\n      role: \"user\",\n      content: $json.finalPrompt\n    }\n  ],\n  stream: false\n}\n}}",
-                                         "options":  {
-
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.httpRequest",
-                      "typeVersion":  4.4,
-                      "position":  [
-                                       288,
-                                       -32
-                                   ],
-                      "id":  "d71d77d8-54d5-4794-9951-1796aa6077b3",
-                      "name":  "deepseek-v4-flash",
-                      "retryOnFail":  true,
-                      "maxTries":  3,
-                      "waitBetweenTries":  5000,
-                      "credentials":  {
-                                          "httpHeaderAuth":  {
-                                                                 "id":  "11xE3AjgQ1iUHDdR",
-                                                                 "name":  "deepseek"
-                                                             }
-                                      }
-                  },
-                  {
-                      "parameters":  {
-                                         "jsCode":  "const body = $input.first().json.body || {};\n\nconst taskId = body.task_id;\nconst name = String(body.name || \u0027\u0027).trim();\nconst referenceTitle = String(body.reference_title || \u0027\u0027).trim();\nconst description = String(body.description || \u0027\u0027).trim();\nconst subTaskCount = Math.max(parseInt(body.sub_task_count) || 1, 1);\nconst callbackSecret = body.callback_secret || \u0027\u0027;\nconst callbackUrl = body.callback_url || \u0027\u0027;\n\nif (!taskId || !callbackUrl) {\n  throw new Error(\u0027缺少 task_id 或 callback_url\u0027);\n}\n\nconst finalPrompt = `\n你是 Shopee 越南站商品标题生成专家。请基于输入商品信息生成 ${subTaskCount} 个互不重复的越南语商品标题。\n\n商品名称：${name}\n参考标题：${referenceTitle}\n商品描述：${description}\n\n每个标题必须按以下语义顺序自然组合，不要输出括号或字段标签：\n【主关键词】+【副关键词】+【长尾词】+【属性词】\n\n要求：\n1. 主关键词必须是准确的商品品类词，并放在标题开头。\n2. 副关键词补充常用搜索同义词或功能词，不得重复堆砌主关键词。\n3. 长尾词体现适用人群、使用场景或明确需求。\n4. 属性词只能使用输入中能确认的材质、颜色、规格、功能或风格，禁止臆造。\n5. 全部使用自然越南语，不得出现中文、序号、价格、店铺名、夸大承诺或无关热词。\n6. 每个标题长度控制在 60~110 个字符，系统硬限制为 10~120 个字符。\n7. 同批标题保持同一商品语义，但关键词组合和长尾方向必须有明显差异。\n\n只返回严格 JSON 字符串数组，数组长度必须等于 ${subTaskCount}，不要 Markdown，不要解释。\n`;\n\nreturn {\n  taskId,\n  subTaskCount,\n  finalPrompt,\n  callbackSecret,\n  callbackUrl\n};"
-                                     },
-                      "type":  "n8n-nodes-base.code",
-                      "typeVersion":  2,
-                      "position":  [
-                                       64,
-                                       -32
-                                   ],
-                      "id":  "f64518e8-9108-46c0-a54f-4de340ec6daf",
-                      "name":  "提取参数"
-                  },
-                  {
-                      "parameters":  {
-                                         "httpMethod":  "POST",
-                                         "path":  "vn/v3t1",
-                                         "responseMode":  "responseNode",
-                                         "options":  {
-
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.webhook",
-                      "typeVersion":  2.1,
-                      "position":  [
-                                       -384,
-                                       -32
-                                   ],
-                      "id":  "45498374-da9b-4a15-ab2b-49a260770746",
-                      "name":  "test-title",
-                      "webhookId":  "78519397-39bd-4d70-a3dd-2c70ac869e44"
-                  },
-                  {
-                      "parameters":  {
-                                         "conditions":  {
-                                                            "options":  {
-                                                                            "caseSensitive":  true,
-                                                                            "leftValue":  "",
-                                                                            "typeValidation":  "strict",
-                                                                            "version":  3
-                                                                        },
-                                                            "conditions":  [
-                                                                               {
-                                                                                   "id":  "7d8441ca-8e3d-459a-b083-4d27d3f612f1",
-                                                                                   "leftValue":  "={{ $json.body.callback_secret }}",
-                                                                                   "rightValue":  "v3",
-                                                                                   "operator":  {
-                                                                                                    "type":  "string",
-                                                                                                    "operation":  "equals",
-                                                                                                    "name":  "filter.operator.equals"
-                                                                                                }
-                                                                               }
-                                                                           ],
-                                                            "combinator":  "and"
-                                                        },
-                                         "options":  {
-
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.if",
-                      "typeVersion":  2.3,
-                      "position":  [
-                                       -160,
-                                       -32
-                                   ],
-                      "id":  "405083e4-4cd0-4b1c-9bbf-47af8d4e8714",
-                      "name":  "密钥校对"
-                  },
-                  {
-                      "parameters":  {
-                                         "respondWith":  "json",
-                                         "responseBody":  "={{ { success: true, status: 'accepted' } }}",
-                                         "options":  {
-                                                         "responseCode":  202
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.respondToWebhook",
-                      "typeVersion":  1.4,
-                      "position":  [
-                                       64,
-                                       -192
-                                   ],
-                      "id":  "a4000000-0000-4000-8000-000000000004",
-                      "name":  "接受请求"
-                  },
-                  {
-                      "parameters":  {
-                                         "respondWith":  "json",
-                                         "responseBody":  "={{ { success: false, error: 'callback_secret 校验失败', retryable: false } }}",
-                                         "options":  {
-                                                         "responseCode":  401
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.respondToWebhook",
-                      "typeVersion":  1.4,
-                      "position":  [
-                                       64,
-                                       128
-                                   ],
-                      "id":  "b4000000-0000-4000-8000-000000000004",
-                      "name":  "拒绝请求"
-                  }
-              ],
-    "pinData":  {
-
-                },
-    "connections":  {
-                        "提取标题列表":  {
-                                       "main":  [
-                                                    [
-                                                        {
-                                                            "node":  "callback",
-                                                            "type":  "main",
-                                                            "index":  0
-                                                        }
-                                                    ]
-                                                ]
-                                   },
-                        "deepseek-v4-flash":  {
-                                                  "main":  [
-                                                               [
-                                                                   {
-                                                                       "node":  "提取标题列表",
-                                                                       "type":  "main",
-                                                                       "index":  0
-                                                                   }
-                                                               ]
-                                                           ]
-                                              },
-                        "提取参数":  {
-                                     "main":  [
-                                                  [
-                                                      {
-                                                          "node":  "deepseek-v4-flash",
-                                                          "type":  "main",
-                                                          "index":  0
-                                                      }
-                                                  ]
-                                              ]
-                                 },
-                        "test-title":  {
-                                           "main":  [
-                                                        [
-                                                            {
-                                                                "node":  "密钥校对",
-                                                                "type":  "main",
-                                                                "index":  0
-                                                            }
-                                                        ]
-                                                    ]
-                                       },
-                        "密钥校对":  {
-                                     "main":  [
-                                                  [
-                                                      {
-                                                          "node":  "接受请求",
-                                                          "type":  "main",
-                                                          "index":  0
-                                                      }
-                                                  ],
-                                                  [
-                                                      {
-                                                          "node":  "拒绝请求",
-                                                          "type":  "main",
-                                                          "index":  0
-                                                      }
-                                                  ]
-                                              ]
-                                 },
-                        "接受请求":  {
-                                     "main":  [
-                                                  [
-                                                      {
-                                                          "node":  "提取参数",
-                                                          "type":  "main",
-                                                          "index":  0
-                                                      }
-                                                  ]
-                                              ]
-                                 }
-                    },
-    "active":  false,
-    "settings":  {
-                     "executionOrder":  "v1",
-                     "binaryMode":  "separate",
-                     "availableInMCP":  false
-                 },
-    "versionId":  "dd770455-446f-4017-81fc-8d2f78b9eb1a",
-    "meta":  {
-                 "instanceId":  "bac5a48cbfe45b4dd41ef15205e80ac0e0958f3b697c370060cb2d4c14846049"
-             },
-    "nodeGroups":  [
-
-                   ],
-    "id":  "xVSBMYSVJD9dhOLF",
-    "tags":  [
-                 {
-                     "updatedAt":  "2026-07-10T01:42:16.053Z",
-                     "createdAt":  "2026-07-10T01:42:16.053Z",
-                     "id":  "3jFkRnXqIMlSDFy0",
-                     "name":  "v3"
-                 },
-                 {
-                     "updatedAt":  "2026-07-01T08:59:46.679Z",
-                     "createdAt":  "2026-07-01T08:59:46.679Z",
-                     "id":  "UM8CfYPKINtnZnA2",
-                     "name":  "标题"
-                 },
-                 {
-                     "updatedAt":  "2026-07-07T11:05:30.160Z",
-                     "createdAt":  "2026-07-07T11:05:30.160Z",
-                     "id":  "dYx7pZfd01CltSoJ",
-                     "name":  "VNEC"
-                 }
-             ]
+  "name": "虾皮商品元数据",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\n  const originalData = $node['提取参数'].json;\n  let content = response?.choices?.[0]?.message?.content;\n  if (typeof content !== 'string') {\n    throw new Error('模型未返回商品元数据');\n  }\n\n  content = content.replace(/```json\\s*/gi, '').replace(/```/g, '').trim();\n  let parsed;\n  try {\n    parsed = JSON.parse(content);\n  } catch (error) {\n    throw new Error('商品元数据不是合法 JSON 对象');\n  }\n\n  if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {\n    throw new Error('商品元数据必须为 JSON 对象');\n  }\n  if (!Array.isArray(parsed.products) || parsed.products.length !== originalData.subTasks.length) {\n    throw new Error(`products 数量不匹配: ${Array.isArray(parsed.products) ? parsed.products.length : 0} / ${originalData.subTasks.length}`);\n  }\n\n  const productMap = new Map(parsed.products.map(item => [String(item?.sub_task_id || ''), item]));\n  if (productMap.size !== originalData.subTasks.length) {\n    throw new Error('products 中的 sub_task_id 缺失或重复');\n  }\n  const products = originalData.subTasks.map((subTask, index) => {\n    const item = productMap.get(subTask.sub_task_id);\n    if (!item) {\n      throw new Error(`缺少 sub_task_id: ${subTask.sub_task_id}`);\n    }\n    const productName = String(item.product_name || '').replace(/\\s+/g, ' ').trim();\n    const productDescription = String(item.product_description || '').replace(/\\s+/g, ' ').trim();\n    if (productName.length < 10 || productName.length > 120) {\n      throw new Error(`商品标题#${index + 1}长度必须为10~120字符`);\n    }\n    if (productDescription.length < 100 || productDescription.length > 3000) {\n      throw new Error(`商品描述#${index + 1}长度必须为100~3000字符`);\n    }\n    return {\n      sub_task_id: subTask.sub_task_id,\n      product_name: productName,\n      product_description: productDescription,\n    };\n  });\n  if (new Set(products.map(item => item.product_name.toLocaleLowerCase('vi'))).size !== products.length) {\n    throw new Error('商品标题存在重复项');\n  }\n\n  let variationLabels = { name1: '', name2: '', values: [] };\n  if (originalData.productType !== 'single') {\n    const labels = parsed.variation_labels;\n    if (!labels || !Array.isArray(labels.values) || labels.values.length !== originalData.variants.length) {\n      throw new Error('variation_labels 数量不匹配');\n    }\n    const name1 = String(labels.name1 || '').trim();\n    const name2 = String(labels.name2 || '').trim();\n    if (!name1 || name1.length > 14) {\n      throw new Error('一级规格名必须为1~14字符');\n    }\n    if (originalData.productType === 'two' && (!name2 || name2.length > 14)) {\n      throw new Error('二级规格名必须为1~14字符');\n    }\n    const labelMap = new Map(labels.values.map(item => [String(item?.id || ''), item]));\n    if (labelMap.size !== originalData.variants.length) {\n      throw new Error('variation_labels 中的 id 缺失或重复');\n    }\n    const translatedPrimary = new Map();\n    const combinations = new Set();\n    const values = originalData.variants.map(source => {\n      const item = labelMap.get(source.id);\n      if (!item) {\n        throw new Error(`缺少规格 ID: ${source.id}`);\n      }\n      const option1 = String(item.option1 || '').trim();\n      const option2 = String(item.option2 || '').trim();\n      if (!option1 || option1.length > 20) {\n        throw new Error(`规格 ${source.id} 的 option1 必须为1~20字符`);\n      }\n      if (originalData.productType === 'two' && (!option2 || option2.length > 20)) {\n        throw new Error(`规格 ${source.id} 的 option2 必须为1~20字符`);\n      }\n      const sourceKey = source.option1.toLocaleLowerCase('vi');\n      const translatedKey = option1.toLocaleLowerCase('vi');\n      if (translatedPrimary.has(sourceKey) && translatedPrimary.get(sourceKey) !== translatedKey) {\n        throw new Error(`一级规格 ${source.option1} 的翻译不一致`);\n      }\n      translatedPrimary.set(sourceKey, translatedKey);\n      const combinationKey = `${translatedKey}|${originalData.productType === 'two' ? option2.toLocaleLowerCase('vi') : ''}`;\n      if (combinations.has(combinationKey)) {\n        throw new Error('规格翻译产生重复组合');\n      }\n      combinations.add(combinationKey);\n      return { id: source.id, option1, option2: originalData.productType === 'two' ? option2 : '' };\n    });\n    variationLabels = { name1, name2: originalData.productType === 'two' ? name2 : '', values };\n  }\n\n  return {\n    callback_secret: originalData.callbackSecret,\n    task_id: originalData.taskId,\n    products,\n    variation_labels: variationLabels,\n    callbackUrl: originalData.callbackUrl,\n  };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        512,
+        -32
+      ],
+      "id": "8730dda7-9c0c-4eee-81b8-10e263ccc33c",
+      "name": "校验商品元数据"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.callbackUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  callback_secret: $json.callback_secret,\n  task_id: $json.task_id,\n  products: $json.products,\n  variation_labels: $json.variation_labels\n} }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        736,
+        -32
+      ],
+      "id": "abcb7dcc-11bd-4366-a712-a6bf5950feed",
+      "name": "callback",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.deepseek.com/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n{\n  model: \"deepseek-v4-flash\",\n  messages: [\n    {\n      role: \"system\",\n      content: \"你只输出符合要求的严格 JSON，不输出 Markdown 或解释。\"\n    },\n    {\n      role: \"user\",\n      content: $json.finalPrompt\n    }\n  ],\n  stream: false\n}\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        288,
+        -32
+      ],
+      "id": "d71d77d8-54d5-4794-9951-1796aa6077b3",
+      "name": "deepseek-v4-flash",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "11xE3AjgQ1iUHDdR",
+          "name": "deepseek"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || {};\n  const taskId = String(body.task_id || '').trim();\n  const sourceBrief = String(body.source_brief || '').trim();\n  const referenceTitle = String(body.reference_title || '').trim();\n  const productType = ['single', 'one', 'two'].includes(body.product_type) ? body.product_type : 'one';\n  const variationName1 = String(body.variation_name1 || '').trim();\n  const variationName2 = String(body.variation_name2 || '').trim();\n  const subTasks = Array.isArray(body.sub_tasks) ? body.sub_tasks.map(item => ({\n    sub_task_id: String(item?.sub_task_id || '').trim(),\n    set_index: Number(item?.set_index) || 0,\n  })) : [];\n  const variants = productType === 'single' ? [] : (Array.isArray(body.variants) ? body.variants.map(item => ({\n    id: String(item?.id || '').trim(),\n    option1: String(item?.option1 || '').trim(),\n    option2: String(item?.option2 || '').trim(),\n  })) : []);\n  const callbackSecret = String(body.callback_secret || '');\n  const callbackUrl = String(body.callback_url || '').trim();\n\n  if (!taskId || !callbackUrl || !callbackSecret) {\n    throw new Error('缺少 task_id、callback_url 或 callback_secret');\n  }\n  if (sourceBrief.length < 10 || sourceBrief.length > 2000) {\n    throw new Error('source_brief 必须为10~2000字符');\n  }\n  if (!subTasks.length || subTasks.some(item => !item.sub_task_id)) {\n    throw new Error('sub_tasks 无效');\n  }\n  if (Number(body.sub_task_count) !== subTasks.length) {\n    throw new Error('sub_task_count 与 sub_tasks 数量不一致');\n  }\n  if (productType !== 'single' && (!variationName1 || !variants.length)) {\n    throw new Error('规格商品缺少一级规格信息');\n  }\n  if (productType === 'two' && (!variationName2 || variants.some(item => !item.option2))) {\n    throw new Error('二维规格信息不完整');\n  }\n  if (variants.some(item => !item.id || !item.option1)) {\n    throw new Error('variants 包含无效记录');\n  }\n\n  const outputShape = {\n    products: subTasks.map(item => ({\n      sub_task_id: item.sub_task_id,\n      product_name: '越南语商品标题',\n      product_description: '越南语商品描述',\n    })),\n    variation_labels: productType === 'single' ? { name1: '', name2: '', values: [] } : {\n      name1: '越南语一级规格名',\n      name2: productType === 'two' ? '越南语二级规格名' : '',\n      values: variants.map(item => ({\n        id: item.id,\n        option1: '越南语一级规格值',\n        option2: productType === 'two' ? '越南语二级规格值' : '',\n      })),\n    },\n  };\n\n  const finalPrompt = `\n你是 Shopee 越南站商品信息编辑。根据用户确认的商品事实，生成可直接写入官方批量上传模板的商品元数据。\n\n商品事实：\n${sourceBrief}\n\n可选参考标题：\n${referenceTitle || '无'}\n\n商品规格结构：\n${JSON.stringify({\n    product_type: productType,\n    variation_name1: variationName1,\n    variation_name2: variationName2,\n    variants,\n  }, null, 2)}\n\n输出对象结构：\n${JSON.stringify(outputShape, null, 2)}\n\n必须遵守：\n1. 只输出一个严格 JSON 对象，不要 Markdown、代码围栏、注释或解释。\n2. products 必须严格对应输入的 ${subTasks.length} 个 sub_task_id，不得增删或改写 ID。\n3. product_name 使用自然越南语，按“主关键词 + 副关键词 + 长尾词 + 属性词”的语义顺序组织，长度60~110字符，硬限制10~120字符；同批标题不得重复。\n4. product_description 使用自然越南语，长度建议300~800字符，硬限制100~3000字符。描述产品类型、已知材质、功能、规格、适用场景、包装或使用注意事项，只能使用商品事实中明确的信息。\n5. 禁止虚构品牌、材质、认证、产地、赠品、保修、疗效、销量、价格或夸大承诺；不要写店铺名、联系方式、外链或标签词堆砌。\n6. variation_labels 只做规格标签规范化或越南语翻译，不改变含义、不合并组合、不生成营销文案。\n7. 规格名长度1~14字符，规格值长度1~20字符。相同原始 option1 在不同组合中必须返回完全相同的 option1。\n8. product_type=single 时 variation_labels 必须保持空名称和空 values；product_type=one 时 name2 和每个 option2 必须为空；product_type=two 时两级名称和值都必须填写。\n9. variation_labels.values 必须严格保留输入 variants 的 id 和数量。\n`;\n\n  return {\n    taskId,\n    productType,\n    subTasks,\n    variants,\n    finalPrompt,\n    callbackSecret,\n    callbackUrl,\n  };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        64,
+        -32
+      ],
+      "id": "f64518e8-9108-46c0-a54f-4de340ec6daf",
+      "name": "提取参数"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "vn/v3t1",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -384,
+        -32
+      ],
+      "id": "45498374-da9b-4a15-ab2b-49a260770746",
+      "name": "test-title",
+      "webhookId": "78519397-39bd-4d70-a3dd-2c70ac869e44"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "7d8441ca-8e3d-459a-b083-4d27d3f612f1",
+              "leftValue": "={{ $json.body.callback_secret }}",
+              "rightValue": "v3",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -160,
+        -32
+      ],
+      "id": "405083e4-4cd0-4b1c-9bbf-47af8d4e8714",
+      "name": "密钥校对"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { success: true, status: 'accepted' } }}",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        64,
+        -192
+      ],
+      "id": "a4000000-0000-4000-8000-000000000004",
+      "name": "接受请求"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { success: false, error: 'callback_secret 校验失败', retryable: false } }}",
+        "options": {
+          "responseCode": 401
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        64,
+        128
+      ],
+      "id": "b4000000-0000-4000-8000-000000000004",
+      "name": "拒绝请求"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "校验商品元数据": {
+      "main": [
+        [
+          {
+            "node": "callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "deepseek-v4-flash": {
+      "main": [
+        [
+          {
+            "node": "校验商品元数据",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "提取参数": {
+      "main": [
+        [
+          {
+            "node": "deepseek-v4-flash",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "test-title": {
+      "main": [
+        [
+          {
+            "node": "密钥校对",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "密钥校对": {
+      "main": [
+        [
+          {
+            "node": "接受请求",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "拒绝请求",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "接受请求": {
+      "main": [
+        [
+          {
+            "node": "提取参数",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "dd770455-446f-4017-81fc-8d2f78b9eb1a",
+  "meta": {
+    "instanceId": "bac5a48cbfe45b4dd41ef15205e80ac0e0958f3b697c370060cb2d4c14846049"
+  },
+  "nodeGroups": [],
+  "id": "xVSBMYSVJD9dhOLF",
+  "tags": [
+    {
+      "updatedAt": "2026-07-10T01:42:16.053Z",
+      "createdAt": "2026-07-10T01:42:16.053Z",
+      "id": "3jFkRnXqIMlSDFy0",
+      "name": "v3"
+    },
+    {
+      "updatedAt": "2026-07-01T08:59:46.679Z",
+      "createdAt": "2026-07-01T08:59:46.679Z",
+      "id": "UM8CfYPKINtnZnA2",
+      "name": "标题"
+    },
+    {
+      "updatedAt": "2026-07-07T11:05:30.160Z",
+      "createdAt": "2026-07-07T11:05:30.160Z",
+      "id": "dYx7pZfd01CltSoJ",
+      "name": "VNEC"
+    }
+  ]
 }

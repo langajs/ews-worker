@@ -274,7 +274,15 @@ CREATE TABLE IF NOT EXISTS ews_shopee_products (
   variation_name1 TEXT NOT NULL DEFAULT '',  -- 第一层规格名
   variation_name2 TEXT NOT NULL DEFAULT '',  -- 第二层规格名
   variation_image_mode TEXT NOT NULL DEFAULT 'option1', -- option1 / none / combination_legacy
+  source_brief TEXT NOT NULL DEFAULT '',
+  schema_version INTEGER NOT NULL DEFAULT 1,
+  product_type TEXT NOT NULL DEFAULT 'variant', -- single / one / two / legacy variant
+  variation_name1_export TEXT NOT NULL DEFAULT '',
+  variation_name2_export TEXT NOT NULL DEFAULT '',
   max_purchase_qty INTEGER,
+  max_purchase_start_date TEXT NOT NULL DEFAULT '',
+  max_purchase_period_days INTEGER,
+  max_purchase_end_date TEXT NOT NULL DEFAULT '',
   size_chart_template_id TEXT NOT NULL DEFAULT '',
   size_chart_image TEXT NOT NULL DEFAULT '',
   pre_order_dts INTEGER,
@@ -291,8 +299,10 @@ CREATE TABLE IF NOT EXISTS ews_shopee_variations (
   product_id TEXT NOT NULL,
   integration_no TEXT NOT NULL,         -- 变体集成号（同一商品一致）
   option1 TEXT NOT NULL,                -- 第一层规格值
+  option1_export TEXT NOT NULL DEFAULT '',
   image_per_variation TEXT NOT NULL DEFAULT '',
   option2 TEXT NOT NULL DEFAULT '',     -- 第二层规格值
+  option2_export TEXT NOT NULL DEFAULT '',
   image_2 TEXT NOT NULL DEFAULT '',
   price REAL NOT NULL,
   price_float_enabled INTEGER NOT NULL DEFAULT 0,
@@ -310,6 +320,7 @@ CREATE TABLE IF NOT EXISTS ews_shopee_sub_tasks (
   id TEXT PRIMARY KEY,
   parent_task_id TEXT NOT NULL,
   title TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
   set_index INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -349,7 +360,7 @@ CREATE TABLE IF NOT EXISTS ews_shopee_push_plans (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL,
   sub_task_id TEXT NOT NULL DEFAULT '',
-  webhook_type TEXT NOT NULL,           -- title / sku_title / main_1 / sub_{pos} / detail_{pos} / sku_{pos}
+  webhook_type TEXT NOT NULL,           -- title(metadata) / sku_title(legacy) / main_1 / sub_{pos} / detail_{pos}(legacy) / sku_{pos}
   webhook_url TEXT NOT NULL,
   payload TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',
