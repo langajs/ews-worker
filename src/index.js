@@ -499,6 +499,8 @@ function getTaskId(path) { return path.split('/')[3]; }
 const MAX_GENERATE_COUNT = 100;
 const MAX_JST_VARIANTS = 10;
 const MAX_SHOPEE_VARIATIONS = 50;
+const SHOPEE_DESCRIPTION_MIN_LENGTH = 100;
+const SHOPEE_DESCRIPTION_MAX_LENGTH = 3000;
 
 function normalizeShopeeVariationImageMode(value, fallback = 'option1') {
   return ['option1','none','combination_legacy'].includes(value) ? value : fallback;
@@ -532,6 +534,20 @@ function getShopeeVariationGroups(variations, imageMode) {
     group.variations.push(variation);
   }
   return groups;
+}
+
+function buildShopeeProductDescription(name, variations, generatedTitle = '') {
+  const title = String(generatedTitle || name || 'Product').trim();
+  const optionLabels = [...new Set((variations || []).map(variation =>
+    [variation.option1, variation.option2].map(value => String(value || '').trim()).filter(Boolean).join(' / ')
+  ).filter(Boolean))].slice(0, 20);
+  const lines = [
+    `Tên sản phẩm: ${title}`,
+    optionLabels.length ? `Phân loại: ${optionLabels.join(', ')}` : '',
+    'Thông tin sản phẩm: Vui lòng tham khảo tên sản phẩm, phân loại và hình ảnh để xác nhận đầy đủ thông tin trước khi mua.',
+    'Lưu ý: Vui lòng kiểm tra kỹ phân loại, số lượng và thông tin nhận hàng trước khi đặt hàng. Nếu cần hỗ trợ, vui lòng liên hệ qua kênh chăm sóc khách hàng của sàn.',
+  ];
+  return lines.filter(Boolean).join('\n').slice(0, SHOPEE_DESCRIPTION_MAX_LENGTH);
 }
 
 async function resetGeneratedTaskArtifacts(env, taskId, platform) {
@@ -680,11 +696,16 @@ async function handleUpdateTask(request, env, path) {
         for (const variation of group.variations) variation.image_per_variation = imageUrls[0];
       }
     }
+    const submittedDescription = String(description ?? task_description ?? '').trim();
+    if (submittedDescription && (submittedDescription.length < SHOPEE_DESCRIPTION_MIN_LENGTH || submittedDescription.length > SHOPEE_DESCRIPTION_MAX_LENGTH)) {
+      return error(`商品描述必须为${SHOPEE_DESCRIPTION_MIN_LENGTH}~${SHOPEE_DESCRIPTION_MAX_LENGTH}字符`, 400);
+    }
+    const productDescription = submittedDescription || buildShopeeProductDescription(name, normalizedVariations);
     const shopeeDetailCount = parseInt(detail_image_count);
     await env.DB.prepare("UPDATE ews_tasks SET name=?, status='pending', updated_at=datetime('now') WHERE id=?").bind(String(name).slice(0,30), taskId).run();
     await shopeeCreateProduct(env, {
       id: taskId, task_id: taskId, name, category_id: category_id || '',
-      description: description ?? task_description ?? '', main_description: main_description || '', detail_description: detail_description || '',
+      description: productDescription, main_description: main_description || '', detail_description: detail_description || '',
       reference_title: reference_title || name || '',
       reference_image: reference_image || '', auxiliary_images: auxiliary_images || '[]',
       generate_count: shopeeGenerateCount,
@@ -2173,7 +2194,7 @@ function validateShopeeRow(product, variations) {
   // 必填字段
   if (!n) errors.push('任务名称不能为空');
   if (!desc) errors.push('商品描述(Product Description)不能为空');
-  if (desc && (desc.length < 100 || desc.length > 3000)) errors.push('商品描述(Product Description)必须为100~3000字符（当前: ' + desc.length + '）');
+  if (desc && (desc.length < SHOPEE_DESCRIPTION_MIN_LENGTH || desc.length > SHOPEE_DESCRIPTION_MAX_LENGTH)) errors.push('商品描述(Product Description)必须为100~3000字符（当前: ' + desc.length + '）');
   if (varCount === 0) errors.push('至少需要一个变体');
   if (isNaN(weightKg) || weightKg <= 0 || weightG > 100000000) errors.push('重量(Weight)导出为g，必须在0~100000000g之间（当前: ' + (isNaN(weightKg) ? '空' : weightG + 'g') + '）');
 
@@ -2241,9 +2262,12 @@ async function shopeeHandleExport(env, taskId) {
   const product = await shopeeGetProduct(env, taskId);
   if (!product) return error('商品不存在', 404);
   const variations = product.variations || [];
+  const storedDescription = String(product.description || '').trim();
+  const fallbackDescription = buildShopeeProductDescription(product.name, variations, product.sub_tasks?.[0]?.title || '');
 
   // 校验
-  var validation = validateShopeeRow(product, variations);
+  var validation = validateShopeeRow({ ...product, description: storedDescription || fallbackDescription }, variations);
+  if (!storedDescription) validation.warnings.push('历史任务未填写商品描述，导出时已根据AI商品标题与规格自动补全，请导入前检查');
   // 有错误则拒绝导出，有警告则附带
   if (!validation.valid) {
     return json({ success: false, error: '数据校验失败', errors: validation.errors, warnings: validation.warnings }, 400);
@@ -2355,7 +2379,7 @@ async function shopeeHandleExport(env, taskId) {
     return [
       product.category_id || '',                          // A Category
       subTask.title || '',                                // B Product Name
-      product.description || '',                          // C Product Description
+      storedDescription || buildShopeeProductDescription(product.name, variations, subTask.title || ''), // C Product Description
       '', '', '', '',                                     // D-G MaxPQ (保留空位)
       parentSku,                                          // H Parent SKU
       parentSku,                                          // I Variation Integration No.
