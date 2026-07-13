@@ -285,8 +285,9 @@
                       "parameters":  {
                                          "httpMethod":  "POST",
                                          "path":  "vn/v3s1",
+                                         "responseMode":  "responseNode",
                                          "options":  {
-                                                         "responseData":  "{\"status\":\"accepted\"}"
+
                                                      }
                                      },
                       "type":  "n8n-nodes-base.webhook",
@@ -334,6 +335,40 @@
                                    ],
                       "id":  "0e0799c4-d70d-4a0a-a2a7-24935d6037df",
                       "name":  "任务完成"
+                  },
+                  {
+                      "parameters":  {
+                                         "respondWith":  "json",
+                                         "responseBody":  "={{ { success: true, status: 'accepted' } }}",
+                                         "options":  {
+                                                         "responseCode":  202
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.respondToWebhook",
+                      "typeVersion":  1.4,
+                      "position":  [
+                                       -1072,
+                                       -144
+                                   ],
+                      "id":  "a1000000-0000-4000-8000-000000000001",
+                      "name":  "接受请求"
+                  },
+                  {
+                      "parameters":  {
+                                         "respondWith":  "json",
+                                         "responseBody":  "={{ { success: false, error: 'callback_secret 校验失败', retryable: false } }}",
+                                         "options":  {
+                                                         "responseCode":  401
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.respondToWebhook",
+                      "typeVersion":  1.4,
+                      "position":  [
+                                       -1072,
+                                       176
+                                   ],
+                      "id":  "b1000000-0000-4000-8000-000000000001",
+                      "name":  "拒绝请求"
                   }
               ],
     "pinData":  {
@@ -407,6 +442,24 @@
                                               ]
                                  },
                         "密钥校对":  {
+                                     "main":  [
+                                                  [
+                                                      {
+                                                          "node":  "接受请求",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
+                                                  ],
+                                                  [
+                                                      {
+                                                          "node":  "拒绝请求",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
+                                                  ]
+                                              ]
+                                 },
+                        "接受请求":  {
                                      "main":  [
                                                   [
                                                       {

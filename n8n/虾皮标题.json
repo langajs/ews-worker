@@ -88,8 +88,9 @@
                       "parameters":  {
                                          "httpMethod":  "POST",
                                          "path":  "vn/v3t1",
+                                         "responseMode":  "responseNode",
                                          "options":  {
-                                                         "responseData":  "={\"status\":\"accepted\"}"
+
                                                      }
                                      },
                       "type":  "n8n-nodes-base.webhook",
@@ -137,6 +138,40 @@
                                    ],
                       "id":  "405083e4-4cd0-4b1c-9bbf-47af8d4e8714",
                       "name":  "密钥校对"
+                  },
+                  {
+                      "parameters":  {
+                                         "respondWith":  "json",
+                                         "responseBody":  "={{ { success: true, status: 'accepted' } }}",
+                                         "options":  {
+                                                         "responseCode":  202
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.respondToWebhook",
+                      "typeVersion":  1.4,
+                      "position":  [
+                                       64,
+                                       -192
+                                   ],
+                      "id":  "a4000000-0000-4000-8000-000000000004",
+                      "name":  "接受请求"
+                  },
+                  {
+                      "parameters":  {
+                                         "respondWith":  "json",
+                                         "responseBody":  "={{ { success: false, error: 'callback_secret 校验失败', retryable: false } }}",
+                                         "options":  {
+                                                         "responseCode":  401
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.respondToWebhook",
+                      "typeVersion":  1.4,
+                      "position":  [
+                                       64,
+                                       128
+                                   ],
+                      "id":  "b4000000-0000-4000-8000-000000000004",
+                      "name":  "拒绝请求"
                   }
               ],
     "pinData":  {
@@ -191,13 +226,28 @@
                                      "main":  [
                                                   [
                                                       {
-                                                          "node":  "提取参数",
+                                                          "node":  "接受请求",
                                                           "type":  "main",
                                                           "index":  0
                                                       }
                                                   ],
                                                   [
-
+                                                      {
+                                                          "node":  "拒绝请求",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
+                                                  ]
+                                              ]
+                                 },
+                        "接受请求":  {
+                                     "main":  [
+                                                  [
+                                                      {
+                                                          "node":  "提取参数",
+                                                          "type":  "main",
+                                                          "index":  0
+                                                      }
                                                   ]
                                               ]
                                  }
