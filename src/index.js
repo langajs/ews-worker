@@ -74,6 +74,7 @@ function isWorkflowEnabled(config, key) {
 function workflowExecutionFlags(config) {
   const primaryImagesOnly = isEnabled(config?.push_primary_images_only);
   return {
+    primaryImagesOnly,
     title: !primaryImagesOnly && isWorkflowEnabled(config, 'n8n_title_enabled'),
     skuTitle: !primaryImagesOnly && isWorkflowEnabled(config, 'n8n_sku_title_enabled'),
     skuImage: !primaryImagesOnly && isWorkflowEnabled(config, 'n8n_sku_image_enabled'),
@@ -1028,27 +1029,34 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
   return json({ success: true, task_id: taskId, sub_tasks: subTasks, total_plans: planRecords.length, jobs_count: planRecords.length, message: '已创建 ' + planRecords.length + ' 个推送计划' });
 }
 
-function primaryImagePlanWhereClause(primaryOnly, alias = '') {
+function workflowPlanWhereClause(flags, alias = '') {
   const column = alias ? `${alias}.webhook_type` : 'webhook_type';
-  return primaryOnly ? ` AND (${column}='main' OR ${column}='main_1' OR ${column} LIKE 'sub_%')` : '';
+  if (flags.primaryImagesOnly) return ` AND (${column}='main' OR ${column}='main_1' OR ${column} LIKE 'sub_%')`;
+  const conditions = [];
+  if (!flags.title) conditions.push(`${column}<>'title'`);
+  if (!flags.skuTitle) conditions.push(`${column}<>'sku_title'`);
+  if (!flags.skuImage) conditions.push(`${column} NOT GLOB 'sku_[0-9]*'`);
+  return conditions.length ? ` AND ${conditions.join(' AND ')}` : '';
 }
 
-async function getPendingPlansForRelease(env, planTable, taskId, limit, primaryOnly) {
+async function getPendingPlansForRelease(env, planTable, taskId, limit, flags) {
   const safeTable = normalizePushPlanTable(planTable);
-  const primaryWhere = primaryImagePlanWhereClause(primaryOnly);
-  return await query(env, `SELECT * FROM ${safeTable} WHERE task_id = ? AND status='pending'${primaryWhere} ORDER BY batch_order ASC LIMIT ?`, [taskId, limit]);
+  const workflowWhere = workflowPlanWhereClause(flags);
+  return await query(env, `SELECT * FROM ${safeTable} WHERE task_id = ? AND status='pending'${workflowWhere} ORDER BY batch_order ASC LIMIT ?`, [taskId, limit]);
 }
 
 async function shopeeReleaseTaskQueue(env, taskId, ctx) {
   try {
     await ensurePushPlanRuntimeColumns(env);
     const config = await getConfig(env, 'shopee');
+    const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
+    const workflowUser = taskOwner?.user_id ? await getUserByUsername(env, taskOwner.user_id) : null;
+    applyUserWorkflowOverrides(config, workflowUser?.webhook_config, 'shopee');
+    const workflowFlags = workflowExecutionFlags(config);
     const batchSize = parseInt(config.push_batch_size) || 20;
     const release = await getPushReleaseWindow(env, 'ews_shopee_push_plans', taskId, batchSize);
     if (release.limit <= 0) return;
-    const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
-    const primaryOnly = isEnabled(config.push_primary_images_only);
-    const pendingPlans = await getPendingPlansForRelease(env, 'ews_shopee_push_plans', taskId, release.limit, primaryOnly);
+    const pendingPlans = await getPendingPlansForRelease(env, 'ews_shopee_push_plans', taskId, release.limit, workflowFlags);
     const plans = pendingPlans?.results || [];
     if (!plans.length) return;
     for (const plan of plans) {
@@ -1176,12 +1184,14 @@ async function jstReleaseTaskQueue(env, taskId, ctx) {
   try {
     await ensurePushPlanRuntimeColumns(env);
     const config = await getConfig(env, 'jst');
+    const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
+    const workflowUser = taskOwner?.user_id ? await getUserByUsername(env, taskOwner.user_id) : null;
+    applyUserWorkflowOverrides(config, workflowUser?.webhook_config, 'jst');
+    const workflowFlags = workflowExecutionFlags(config);
     const batchSize = parseInt(config.push_batch_size) || 20;
     const release = await getPushReleaseWindow(env, 'ews_jst_push_plans', taskId, batchSize);
     if (release.limit <= 0) return;
-    const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
-    const primaryOnly = isEnabled(config.push_primary_images_only);
-    const pendingPlans = await getPendingPlansForRelease(env, 'ews_jst_push_plans', taskId, release.limit, primaryOnly);
+    const pendingPlans = await getPendingPlansForRelease(env, 'ews_jst_push_plans', taskId, release.limit, workflowFlags);
     const plans = pendingPlans?.results || [];
     if (!plans.length) return;
     for (const plan of plans) {
@@ -1210,21 +1220,18 @@ async function processPendingQueue(env, ctx) {
     await processCallbackQueue(env, ctx);
     if (ctx) ctx.waitUntil(processImageQueue(env, ctx));
     else await processImageQueue(env, ctx);
-    const [jstConfig, shopeeConfig, releaseLimits] = await Promise.all([
-      getConfig(env, 'jst'), getConfig(env, 'shopee'), getPushReleaseLimits(env),
-    ]);
-    const jstPrimary = primaryImagePlanWhereClause(isEnabled(jstConfig.push_primary_images_only), 'p');
-    const shopeePrimary = primaryImagePlanWhereClause(isEnabled(shopeeConfig.push_primary_images_only), 'p');
+    const releaseLimits = await getPushReleaseLimits(env);
+    const candidateLimit = Math.min(Math.max(releaseLimits.globalPerMinute * 20, 100), 500);
     const candidates = await query(env, `SELECT platform, task_id, MIN(created_at) AS oldest FROM (
       SELECT 'jst' AS platform, p.task_id, p.created_at FROM ews_jst_push_plans p
         JOIN ews_jst_tasks t ON t.id=p.task_id
         WHERE p.status='pending' AND t.status IN ('processing','partial_failed')
-          AND COALESCE(t.queue_mode, 'auto') != 'manual'${jstPrimary}
+          AND COALESCE(t.queue_mode, 'auto') != 'manual'
       UNION ALL
       SELECT 'shopee' AS platform, p.task_id, p.created_at FROM ews_shopee_push_plans p
         JOIN ews_tasks t ON t.id=p.task_id
-        WHERE p.status='pending' AND t.status IN ('processing','partial_failed')${shopeePrimary}
-    ) GROUP BY platform, task_id ORDER BY oldest ASC LIMIT ?`, [releaseLimits.globalPerMinute]);
+        WHERE p.status='pending' AND t.status IN ('processing','partial_failed')
+    ) GROUP BY platform, task_id ORDER BY oldest ASC LIMIT ?`, [candidateLimit]);
     for (const row of (candidates?.results || [])) {
       if (row.platform === 'jst') await jstReleaseTaskQueue(env, row.task_id, ctx);
       else await shopeeReleaseTaskQueue(env, row.task_id, ctx);
