@@ -60,6 +60,60 @@ function isEnabled(value) {
   return value === true || value === 1 || value === '1' || value === 'true';
 }
 
+const USER_WORKFLOW_SWITCH_KEYS = new Set([
+  'n8n_title_enabled',
+  'n8n_sku_title_enabled',
+  'n8n_sku_image_enabled',
+]);
+
+function isWorkflowEnabled(config, key) {
+  const value = config?.[key];
+  return value === undefined || value === null || value === '' ? true : isEnabled(value);
+}
+
+function workflowExecutionFlags(config) {
+  const primaryImagesOnly = isEnabled(config?.push_primary_images_only);
+  return {
+    title: !primaryImagesOnly && isWorkflowEnabled(config, 'n8n_title_enabled'),
+    skuTitle: !primaryImagesOnly && isWorkflowEnabled(config, 'n8n_sku_title_enabled'),
+    skuImage: !primaryImagesOnly && isWorkflowEnabled(config, 'n8n_sku_image_enabled'),
+    detail: !primaryImagesOnly,
+  };
+}
+
+function applyUserWorkflowOverrides(config, rawConfig, platform) {
+  if (!rawConfig) return;
+  try {
+    const platformConfig = JSON.parse(rawConfig)?.[platform];
+    if (!platformConfig || typeof platformConfig !== 'object' || Array.isArray(platformConfig)) return;
+    for (const [key, value] of Object.entries(platformConfig)) {
+      if (value === undefined || value === null || value === '' || value === 'inherit') continue;
+      config[key] = value;
+    }
+  } catch (_) {}
+}
+
+function normalizeUserWorkflowConfig(body) {
+  const normalized = {};
+  for (const platform of ['jst', 'shopee']) {
+    const source = body?.[platform];
+    if (!source || typeof source !== 'object' || Array.isArray(source)) continue;
+    const target = {};
+    for (const [key, value] of Object.entries(source)) {
+      if (USER_WORKFLOW_SWITCH_KEYS.has(key)) {
+        if (typeof value === 'boolean') target[key] = value;
+        else if (value === 'true' || value === 'false') target[key] = value === 'true';
+      } else if (typeof value === 'string' && value.trim()) {
+        target[key] = value.trim();
+      } else if (typeof value === 'number' || typeof value === 'boolean') {
+        target[key] = value;
+      }
+    }
+    normalized[platform] = target;
+  }
+  return normalized;
+}
+
 function clampPricePrecision(value) {
   const n = parseInt(value);
   if (Number.isNaN(n)) return 0;
@@ -396,8 +450,8 @@ async function handleUpdateUserWebhook(request, env, path) {
   const body = await parseBody(request);
   const user = await getUserByUsername(env, userId);
   if (!user) return error('用户不存在', 404);
-  await updateUserWebhook(env, user.id, JSON.stringify(body));
-  return json({ success: true, message: '用户工作流地址已更新' });
+  await updateUserWebhook(env, user.id, JSON.stringify(normalizeUserWorkflowConfig(body)));
+  return json({ success: true, message: '用户工作流配置已更新' });
 }
 
 async function handleGetMyCredits(request, env) {
@@ -749,42 +803,50 @@ async function jstHandlePush(env, taskId, ctx, request) {
   if (!detail) return error('任务不存在', 404);
   if (detail.status !== 'pending') return error('只能推送等待中的任务', 400);
   const config = await getConfig(env, 'jst');
-  const pushUser = await getUserByUsername(env, request.auth?.username || '');
-  if (pushUser?.webhook_config) {
-    try { const wh = JSON.parse(pushUser.webhook_config); Object.assign(config, wh.jst || {}); } catch (_) {}
-  }
+  const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
+  const pushUser = await getUserByUsername(env, taskOwner?.user_id || request.auth?.username || '');
+  applyUserWorkflowOverrides(config, pushUser?.webhook_config, 'jst');
+  const workflowFlags = workflowExecutionFlags(config);
   const callbackSecret = config.callback_secret || '';
   const baseUrl = `${new URL(request.url).origin}/api/callback`;
+  const titleWebhookUrl = workflowFlags.title ? config.n8n_title_webhook || '' : '';
+  const skuTitleWebhookUrl = workflowFlags.skuTitle ? config.n8n_sku_title_webhook || '' : '';
+  const skuImageWebhookUrl = workflowFlags.skuImage ? config.n8n_sku_image_webhook || '' : '';
   const mainWebhookUrl = config.n8n_main_webhook || '';
   const subImageWebhookUrl = config.n8n_sub_image_webhook || '';
-  const detailWebhookUrl = config.n8n_detail_webhook || '';
+  const detailWebhookUrl = workflowFlags.detail ? config.n8n_detail_webhook || '' : '';
   const mainImageCount = Math.min(Math.max(detail.main_image_count || 5, 5), 9);
   const detailImageCount = Math.min(Math.max(detail.detail_image_count || 5, 5), 9);
+  const generateCount = detail.generate_count || 1;
+  const variantCount = detail.variants?.length || 0;
 
-  if (!config.n8n_title_webhook && !config.n8n_sku_title_webhook && !mainWebhookUrl && !subImageWebhookUrl && !detailWebhookUrl && !config.n8n_sku_image_webhook)
+  const missingEnabledWebhooks = [];
+  if (workflowFlags.title && !titleWebhookUrl) missingEnabledWebhooks.push('商品标题');
+  if (workflowFlags.skuTitle && variantCount > 0 && !skuTitleWebhookUrl) missingEnabledWebhooks.push('SKU标题');
+  if (workflowFlags.skuImage && variantCount > 0 && !skuImageWebhookUrl) missingEnabledWebhooks.push('SKU图片');
+  if (missingEnabledWebhooks.length) return error('请先配置已开启的 JST 工作流 Webhook: ' + missingEnabledWebhooks.join('、'), 400);
+  if (!titleWebhookUrl && !skuTitleWebhookUrl && !mainWebhookUrl && !subImageWebhookUrl && !detailWebhookUrl && !skuImageWebhookUrl)
     return error('请先在系统配置页配置 JST 工作流 Webhook 地址后再推送', 400);
 
   await resetGeneratedTaskArtifacts(env, taskId, 'jst');
 
-  const generateCount = detail.generate_count || 1;
-  const variantCount = detail.variants?.length || 0;
   const subTaskIds = [];
   for (let i = 0; i < generateCount; i++) {
     const subId = uuid(); subTaskIds.push(subId);
     await jstCreateSubTask(env, { id: subId, parent_task_id: taskId, set_index: i });
     await jstCreateExpectedImages(env, taskId, subId, i, variantCount, detail.mode || 'full', mainImageCount, detailImageCount,
-      !!mainWebhookUrl, !!subImageWebhookUrl, !!detailWebhookUrl, !!config.n8n_sku_image_webhook);
+      !!mainWebhookUrl, !!subImageWebhookUrl, !!detailWebhookUrl, !!skuImageWebhookUrl);
   }
   await env.DB.prepare("UPDATE ews_jst_tasks SET status='processing', queue_mode='auto', updated_at=datetime('now') WHERE id=?").bind(taskId).run();
   const subTasks = subTaskIds.map((id, i) => ({ sub_task_id: id, set_index: i, style_code: id.slice(0, 8) }));
   const allJobs = [];
 
   // title
-  if (config.n8n_title_webhook) allJobs.push({ webhook_type: 'title', sub_task_id: subTasks[0]?.sub_task_id || "", url: config.n8n_title_webhook,
+  if (titleWebhookUrl) allJobs.push({ webhook_type: 'title', sub_task_id: subTasks[0]?.sub_task_id || "", url: titleWebhookUrl,
     data: { task_id: taskId, name: detail.name, reference_title: detail.topic_items || '', description: detail.description || '',
       sub_task_count: generateCount, sub_tasks: subTasks, callback_secret: callbackSecret, callback_url: baseUrl } });
   // sku_title
-  if (config.n8n_sku_title_webhook && variantCount > 0) allJobs.push({ webhook_type: 'sku_title', sub_task_id: subTasks[0]?.sub_task_id || "", url: config.n8n_sku_title_webhook,
+  if (skuTitleWebhookUrl && variantCount > 0) allJobs.push({ webhook_type: 'sku_title', sub_task_id: subTasks[0]?.sub_task_id || "", url: skuTitleWebhookUrl,
     data: { task_id: taskId, name: detail.name, reference_title: detail.topic_items || '', description: detail.description || '',
       sub_task_count: generateCount, sub_tasks: subTasks, variants: (detail.variants||[]).map(v=>({id:v.id,name:v.tier1_value})), callback_secret: callbackSecret, callback_url: baseUrl } });
   // main_1
@@ -806,10 +868,10 @@ async function jstHandlePush(env, taskId, ctx, request) {
         detail_description: detail.detail_description || '', auxiliary_images: detail.auxiliary_images || '', image_type: 'detail', image_position: pos, callback_secret: callbackSecret, callback_url: baseUrl } });
   }
   // sku
-  if (config.n8n_sku_image_webhook) for (const st of subTasks) {
+  if (skuImageWebhookUrl) for (const st of subTasks) {
     if ((detail.mode||'full') === 'dedup' && st.set_index > 0) continue;
     for (let v = 0; v < (detail.variants||[]).length; v++) {
-      allJobs.push({ webhook_type: 'sku_' + (v+1), sub_task_id: st.sub_task_id, url: config.n8n_sku_image_webhook,
+      allJobs.push({ webhook_type: 'sku_' + (v+1), sub_task_id: st.sub_task_id, url: skuImageWebhookUrl,
         data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: detail.reference_image,
           variant_name: detail.variants[v].tier1_value, sku_image: detail.variants[v].white_bg_image || '',
           sku_description: detail.variants[v].description || '', image_type: 'sku', image_position: v+1, callback_secret: callbackSecret, callback_url: baseUrl } });
@@ -844,10 +906,10 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
   const body = await parseBody(request).catch(() => ({}));
   const testMode = body?.test_mode === true;
   const config = await getConfig(env, 'shopee');
-  const pushUser = await getUserByUsername(env, request.auth?.username || '');
-  if (pushUser?.webhook_config) {
-    try { const wh = JSON.parse(pushUser.webhook_config); Object.assign(config, wh.shopee || {}); } catch (_) {}
-  }
+  const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
+  const pushUser = await getUserByUsername(env, taskOwner?.user_id || request.auth?.username || '');
+  applyUserWorkflowOverrides(config, pushUser?.webhook_config, 'shopee');
+  const workflowFlags = workflowExecutionFlags(config);
   const detail = await shopeeGetProduct(env, taskId);
   if (!detail) return error('商品不存在', 404);
   if (detail.status !== 'pending') return error('只能推送等待中的任务', 400);
@@ -857,15 +919,21 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
   const skuImageGroups = variationImageMode === 'none' ? [] : variationGroups;
   const rawDetailCount = parseInt(detail.detail_image_count);
   const detailCount = Math.min(Math.max(Number.isNaN(rawDetailCount) ? 0 : rawDetailCount, 0), 9);
+  const titleWebhookUrl = workflowFlags.title ? config.n8n_title_webhook || '' : '';
+  const skuTitleWebhookUrl = workflowFlags.skuTitle ? config.n8n_sku_title_webhook || '' : '';
+  const skuImageWebhookUrl = workflowFlags.skuImage ? config.n8n_sku_image_webhook || '' : '';
+  const mainWebhookUrl = config.n8n_main_webhook || '';
+  const subImageWebhookUrl = config.n8n_sub_image_webhook || '';
+  const detailWebhookUrl = workflowFlags.detail ? config.n8n_detail_webhook || '' : '';
   const requiredShopeeWebhooks = [
-    ['n8n_title_webhook', '商品标题'],
-    ['n8n_sku_title_webhook', 'SKU标题'],
-    ['n8n_main_webhook', '封面图'],
-    ['n8n_sub_image_webhook', '附图'],
+    [mainWebhookUrl, '封面图'],
+    [subImageWebhookUrl, '附图'],
   ];
-  if (skuImageGroups.length > 0) requiredShopeeWebhooks.push(['n8n_sku_image_webhook', 'SKU变体图']);
-  if (detailCount > 0) requiredShopeeWebhooks.push(['n8n_detail_webhook', '详情图']);
-  const missingShopeeWebhooks = requiredShopeeWebhooks.filter(([key]) => !config[key]).map(([, label]) => label);
+  if (workflowFlags.title) requiredShopeeWebhooks.push([titleWebhookUrl, '商品标题']);
+  if (workflowFlags.skuTitle) requiredShopeeWebhooks.push([skuTitleWebhookUrl, 'SKU标题']);
+  if (workflowFlags.skuImage && skuImageGroups.length > 0) requiredShopeeWebhooks.push([skuImageWebhookUrl, 'SKU变体图']);
+  if (workflowFlags.detail && detailCount > 0) requiredShopeeWebhooks.push([detailWebhookUrl, '详情图']);
+  const missingShopeeWebhooks = requiredShopeeWebhooks.filter(([url]) => !url).map(([, label]) => label);
   if (missingShopeeWebhooks.length)
     return error('请先在系统配置页配置 Shopee 必需工作流 Webhook: ' + missingShopeeWebhooks.join('、'), 400);
 
@@ -885,11 +953,10 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
     const subId = uuid(); subTaskIds.push(subId);
     await shopeeCreateSubTask(env, { id: subId, parent_task_id: taskId, set_index: i });
     const dedupShared = mode === 'dedup' && i > 0;
-    const expectedMainCount = config.n8n_main_webhook ? mainCount : 0;
-    const expectedSubCount = (!dedupShared && config.n8n_sub_image_webhook) ? mainCount : 0;
-    const expectedDetailCount = (!dedupShared && config.n8n_detail_webhook) ? detailCount : 0;
-    const skuImageCount = (!dedupShared && config.n8n_sku_image_webhook) ? skuImageGroups.length : 0;
-    await shopeeCreateExpectedImages(env, taskId, subId, i, expectedSubCount, expectedDetailCount, skuImageCount, !!config.n8n_main_webhook, !!config.n8n_sub_image_webhook && !dedupShared);
+    const expectedSubCount = (!dedupShared && subImageWebhookUrl) ? mainCount : 0;
+    const expectedDetailCount = (!dedupShared && detailWebhookUrl) ? detailCount : 0;
+    const skuImageCount = (!dedupShared && skuImageWebhookUrl) ? skuImageGroups.length : 0;
+    await shopeeCreateExpectedImages(env, taskId, subId, i, expectedSubCount, expectedDetailCount, skuImageCount, !!mainWebhookUrl, !!subImageWebhookUrl && !dedupShared);
   }
   await updateTaskIndexStatus(env, taskId, 'processing');
   await env.DB.prepare("UPDATE ews_shopee_products SET status='processing', updated_at=datetime('now') WHERE id=?").bind(taskId).run();
@@ -898,42 +965,42 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
   const allJobs = [];
 
   // title
-  if (config.n8n_title_webhook) allJobs.push({ webhook_type: 'title', sub_task_id: subTasks[0]?.sub_task_id || '', url: config.n8n_title_webhook,
+  if (titleWebhookUrl) allJobs.push({ webhook_type: 'title', sub_task_id: subTasks[0]?.sub_task_id || '', url: titleWebhookUrl,
     data: { task_id: taskId, name: detail.name, reference_title: detail.reference_title || detail.name || '', description: detail.description || '',
       sub_task_count: generateCount, sub_tasks: subTasks, callback_secret: callbackSecret, callback_url: baseUrl } });
   // sku_title
-  if (config.n8n_sku_title_webhook) allJobs.push({ webhook_type: 'sku_title', sub_task_id: subTasks[0]?.sub_task_id || '', url: config.n8n_sku_title_webhook,
+  if (skuTitleWebhookUrl) allJobs.push({ webhook_type: 'sku_title', sub_task_id: subTasks[0]?.sub_task_id || '', url: skuTitleWebhookUrl,
     data: { task_id: taskId, name: detail.name, reference_title: detail.reference_title || detail.name || '', description: detail.description || '',
       sub_task_count: generateCount, sub_tasks: subTasks,
       variants: variationGroups.map(group => ({ id: group.key, name: group.name, option2: group.option2 || '' })),
       callback_secret: callbackSecret, callback_url: baseUrl } });
   // main_1
-  if (config.n8n_main_webhook) for (const st of subTasks) allJobs.push({ webhook_type: 'main_1', sub_task_id: st.sub_task_id, url: config.n8n_main_webhook,
+  if (mainWebhookUrl) for (const st of subTasks) allJobs.push({ webhook_type: 'main_1', sub_task_id: st.sub_task_id, url: mainWebhookUrl,
     data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: refImg,
       main_description: detail.main_description || '', auxiliary_images: auxImgs,
       image_type: 'main', image_position: 1, callback_secret: callbackSecret, callback_url: baseUrl } });
   // sub_2~N
-  if (config.n8n_sub_image_webhook) for (let p = 2; p <= mainCount; p++) for (const st of subTasks) {
+  if (subImageWebhookUrl) for (let p = 2; p <= mainCount; p++) for (const st of subTasks) {
     if (mode === 'dedup' && st.set_index > 0) continue;
-    allJobs.push({ webhook_type: 'sub_' + p, sub_task_id: st.sub_task_id, url: config.n8n_sub_image_webhook,
+    allJobs.push({ webhook_type: 'sub_' + p, sub_task_id: st.sub_task_id, url: subImageWebhookUrl,
       data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: refImg,
         main_description: detail.main_description || '', auxiliary_images: auxImgs,
         image_type: 'sub', image_position: p, callback_secret: callbackSecret, callback_url: baseUrl } });
   }
   // detail_1~M
-  if (config.n8n_detail_webhook) for (let p = 1; p <= detailCount; p++) for (const st of subTasks) {
+  if (detailWebhookUrl) for (let p = 1; p <= detailCount; p++) for (const st of subTasks) {
     if (mode === 'dedup' && st.set_index > 0) continue;
-    allJobs.push({ webhook_type: 'detail_' + p, sub_task_id: st.sub_task_id, url: config.n8n_detail_webhook,
+    allJobs.push({ webhook_type: 'detail_' + p, sub_task_id: st.sub_task_id, url: detailWebhookUrl,
       data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: refImg,
         detail_description: detail.detail_description || '', auxiliary_images: auxImgs,
         image_type: 'detail', image_position: p, callback_secret: callbackSecret, callback_url: baseUrl } });
   }
   // sku_1~V（新任务按一级规格出图；历史任务保留逐组合兼容）
-  if (config.n8n_sku_image_webhook && skuImageGroups.length > 0) for (const st of subTasks) {
+  if (skuImageWebhookUrl && skuImageGroups.length > 0) for (const st of subTasks) {
     if (mode === 'dedup' && st.set_index > 0) continue;
     for (let vi = 0; vi < skuImageGroups.length; vi++) {
       const group = skuImageGroups[vi];
-      allJobs.push({ webhook_type: 'sku_' + (vi+1), sub_task_id: st.sub_task_id, url: config.n8n_sku_image_webhook,
+      allJobs.push({ webhook_type: 'sku_' + (vi+1), sub_task_id: st.sub_task_id, url: skuImageWebhookUrl,
         data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: refImg,
           variant_name: group.name,
           variant_option2: group.option2 || '',

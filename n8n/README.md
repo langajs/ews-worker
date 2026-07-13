@@ -17,7 +17,7 @@ Shopee basic template 不包含详情图字段，因此当前不提供详情图�
 1. 为 DeepSeek 和图片生成 HTTP 节点选择对应的 Header Auth credential。
 2. 将每个 Webhook 的 Production URL 填入系统配置页对应字段。
 3. 保证工作流“密钥校对”中的值与系统 `callback_secret` 一致。
-4. 所有工作流准备完成后，将 `push_primary_images_only` 设为 `false`，系统才会自动派发标题、SKU 标题和 SKU 图计划。
+4. 将 `push_primary_images_only` 设为 `false`，并在对应平台配置中开启 `n8n_title_enabled`、`n8n_sku_title_enabled`、`n8n_sku_image_enabled`。关闭的工作流不会构造推送计划；三个开关也可由管理员为单个用户设置继承、开启或关闭。
 
 所有工作流均使用 `Respond to Webhook` 显式响应：密钥正确时立即返回 HTTP `202` 和 `{"success":true,"status":"accepted"}`，随后继续执行生成流程；密钥错误时立即返回 HTTP `401` 和 `{"success":false,"retryable":false}`。Worker 收到非 2xx 后会立即把对应推送计划标记为失败并显示原因，不再等待回调超时。更新 JSON 后需要重新导入或同步到 n8n 中，仓库文件不会自动覆盖线上工作流。
 

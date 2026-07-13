@@ -32,6 +32,9 @@ INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_main_webhoo
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sub_image_webhook', '', 'jst');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_detail_webhook', '', 'jst');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_image_webhook', '', 'jst');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_title_enabled', 'true', 'jst');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_title_enabled', 'true', 'jst');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_image_enabled', 'true', 'jst');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_batch_size', '20', 'jst');
 
 -- Shopee 默认配置
@@ -41,6 +44,9 @@ INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_main_webhoo
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sub_image_webhook', '', 'shopee');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_detail_webhook', '', 'shopee');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_image_webhook', '', 'shopee');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_title_enabled', 'true', 'shopee');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_title_enabled', 'true', 'shopee');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_image_enabled', 'true', 'shopee');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_batch_size', '20', 'shopee');
 
 -- 共享用户表
