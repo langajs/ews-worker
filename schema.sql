@@ -267,6 +267,7 @@ CREATE TABLE IF NOT EXISTS ews_shopee_products (
   origin_country TEXT NOT NULL DEFAULT '',
   variation_name1 TEXT NOT NULL DEFAULT '',  -- 第一层规格名
   variation_name2 TEXT NOT NULL DEFAULT '',  -- 第二层规格名
+  variation_image_mode TEXT NOT NULL DEFAULT 'option1', -- option1 / none / combination_legacy
   max_purchase_qty INTEGER,
   size_chart_template_id TEXT NOT NULL DEFAULT '',
   size_chart_image TEXT NOT NULL DEFAULT '',

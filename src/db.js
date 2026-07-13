@@ -174,6 +174,7 @@ async function ensureShopeeProductColumns(env) {
     ['mode', "TEXT NOT NULL DEFAULT 'full'"],
     ['main_image_count', "INTEGER NOT NULL DEFAULT 9"],
     ['detail_image_count', "INTEGER NOT NULL DEFAULT 0"],
+    ['variation_image_mode', "TEXT NOT NULL DEFAULT 'combination_legacy'"],
   ];
   for (const [name, type] of cols) {
     try { await env.DB.prepare(`ALTER TABLE ews_shopee_products ADD COLUMN ${name} ${type}`).run(); } catch (_) {}
@@ -184,7 +185,31 @@ async function ensureShopeeProductColumns(env) {
 }
 async function shopeeCreateProduct(env, p) {
   await ensureShopeeProductColumns(env);
-  await env.DB.prepare("INSERT INTO ews_shopee_products (id, task_id, category_id, name, description, main_description, detail_description, reference_title, reference_image, auxiliary_images, generate_count, mode, main_image_count, detail_image_count, parent_sku, cover_image, images, weight_kg, length_cm, width_cm, height_cm, gtin, brand_id, hs_code, tax_code, origin_country, variation_name1, variation_name2, max_purchase_qty, size_chart_template_id, size_chart_image, pre_order_dts, shipping_channels, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now')) ON CONFLICT(id) DO UPDATE SET task_id=excluded.task_id, category_id=excluded.category_id, name=excluded.name, description=excluded.description, main_description=excluded.main_description, detail_description=excluded.detail_description, reference_title=excluded.reference_title, reference_image=excluded.reference_image, auxiliary_images=excluded.auxiliary_images, generate_count=excluded.generate_count, mode=excluded.mode, main_image_count=excluded.main_image_count, detail_image_count=excluded.detail_image_count, parent_sku=excluded.parent_sku, cover_image=excluded.cover_image, images=excluded.images, weight_kg=excluded.weight_kg, length_cm=excluded.length_cm, width_cm=excluded.width_cm, height_cm=excluded.height_cm, gtin=excluded.gtin, brand_id=excluded.brand_id, hs_code=excluded.hs_code, tax_code=excluded.tax_code, origin_country=excluded.origin_country, variation_name1=excluded.variation_name1, variation_name2=excluded.variation_name2, max_purchase_qty=excluded.max_purchase_qty, size_chart_template_id=excluded.size_chart_template_id, size_chart_image=excluded.size_chart_image, pre_order_dts=excluded.pre_order_dts, shipping_channels=excluded.shipping_channels, status='pending', updated_at=datetime('now')").bind(p.id, p.task_id, p.category_id || '', p.name, p.description || '', p.main_description || '', p.detail_description || '', p.reference_title || '', p.reference_image || '', p.auxiliary_images || '[]', p.generate_count || 1, p.mode || 'full', p.main_image_count || 9, p.detail_image_count ?? 0, p.parent_sku || '', p.cover_image || '', p.images || '[]', p.weight_kg || 0, p.length_cm ?? null, p.width_cm ?? null, p.height_cm ?? null, p.gtin || '', p.brand_id || '', p.hs_code || '', p.tax_code || '', p.origin_country || '', p.variation_name1 || '', p.variation_name2 || '', p.max_purchase_qty ?? null, p.size_chart_template_id || '', p.size_chart_image || '', p.pre_order_dts ?? null, p.shipping_channels || '[]').run();
+  await env.DB.prepare(`INSERT INTO ews_shopee_products
+    (id, task_id, category_id, name, description, main_description, detail_description, reference_title, reference_image, auxiliary_images, generate_count, mode, main_image_count, detail_image_count, parent_sku, cover_image, images, weight_kg, length_cm, width_cm, height_cm, gtin, brand_id, hs_code, tax_code, origin_country, variation_name1, variation_name2, variation_image_mode, max_purchase_qty, size_chart_template_id, size_chart_image, pre_order_dts, shipping_channels, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))
+    ON CONFLICT(id) DO UPDATE SET
+      task_id=excluded.task_id, category_id=excluded.category_id, name=excluded.name, description=excluded.description,
+      main_description=excluded.main_description, detail_description=excluded.detail_description,
+      reference_title=excluded.reference_title, reference_image=excluded.reference_image, auxiliary_images=excluded.auxiliary_images,
+      generate_count=excluded.generate_count, mode=excluded.mode, main_image_count=excluded.main_image_count,
+      detail_image_count=excluded.detail_image_count, parent_sku=excluded.parent_sku, cover_image=excluded.cover_image,
+      images=excluded.images, weight_kg=excluded.weight_kg, length_cm=excluded.length_cm, width_cm=excluded.width_cm,
+      height_cm=excluded.height_cm, gtin=excluded.gtin, brand_id=excluded.brand_id, hs_code=excluded.hs_code,
+      tax_code=excluded.tax_code, origin_country=excluded.origin_country, variation_name1=excluded.variation_name1,
+      variation_name2=excluded.variation_name2, variation_image_mode=excluded.variation_image_mode,
+      max_purchase_qty=excluded.max_purchase_qty, size_chart_template_id=excluded.size_chart_template_id,
+      size_chart_image=excluded.size_chart_image, pre_order_dts=excluded.pre_order_dts,
+      shipping_channels=excluded.shipping_channels, status='pending', updated_at=datetime('now')`)
+    .bind(
+      p.id, p.task_id, p.category_id || '', p.name, p.description || '', p.main_description || '', p.detail_description || '',
+      p.reference_title || '', p.reference_image || '', p.auxiliary_images || '[]', p.generate_count || 1, p.mode || 'full',
+      p.main_image_count || 9, p.detail_image_count ?? 0, p.parent_sku || '', p.cover_image || '', p.images || '[]',
+      p.weight_kg || 0, p.length_cm ?? null, p.width_cm ?? null, p.height_cm ?? null, p.gtin || '', p.brand_id || '',
+      p.hs_code || '', p.tax_code || '', p.origin_country || '', p.variation_name1 || '', p.variation_name2 || '',
+      p.variation_image_mode || 'option1', p.max_purchase_qty ?? null, p.size_chart_template_id || '',
+      p.size_chart_image || '', p.pre_order_dts ?? null, p.shipping_channels || '[]'
+    ).run();
 }
 async function shopeeGetProduct(env, pid) { await ensureShopeeProductColumns(env); await ensureShopeeVariationColumns(env); var p = await getOne(env, "SELECT * FROM ews_shopee_products WHERE id = ?", [pid]); if (!p) return null; p.variations = (await query(env, "SELECT * FROM ews_shopee_variations WHERE product_id = ? ORDER BY rowid", [pid])).results; p.sub_tasks = (await query(env, "SELECT * FROM ews_shopee_sub_tasks WHERE parent_task_id = ? ORDER BY set_index", [pid])).results; p.images_rec = (await query(env, "SELECT * FROM ews_shopee_task_images WHERE parent_task_id = ? ORDER BY set_index,image_type,position", [pid])).results; return p; }
 async function shopeeDeleteProduct(env, pid) { await env.DB.prepare("DELETE FROM ews_shopee_products WHERE id = ?").bind(pid).run(); }
