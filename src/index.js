@@ -703,7 +703,9 @@ async function handleUpdateTask(request, env, path) {
 
   if (idx.platform === 'shopee') {
     const { name, source_brief, product_type, main_description, reference_title, reference_image, auxiliary_images, generate_count, mode, category_id, cover_image, images, weight_kg, length_cm, width_cm, height_cm, gtin, variation_name1, variation_name2, variation_image_mode, max_purchase_qty, max_purchase_start_date, max_purchase_period_days, max_purchase_end_date, size_chart_template_id, size_chart_image, pre_order_dts, shipping_channels, variations } = body || {};
-    if (!name) return error('商品名称不能为空', 400);
+    const taskName = String(name || '').trim();
+    if (!taskName) return error('任务名称不能为空', 400);
+    if (taskName.length > 30) return error('任务名称不能超过30字符', 400);
     if (!reference_image) return error('核心参考图不能为空', 400);
     const sourceBrief = String(source_brief || '').trim();
     if (sourceBrief.length < 10 || sourceBrief.length > 2000) return error('商品事实必须为10~2000字符', 400);
@@ -788,12 +790,12 @@ async function handleUpdateTask(request, env, path) {
     if (sizeChartTemplate && sizeChartImage) return error('尺码表模板和尺码表图片只能填写一个', 400);
     const preOrderDts = pre_order_dts === undefined || pre_order_dts === null || pre_order_dts === '' ? null : parseInt(pre_order_dts);
     if (preOrderDts !== null && (!Number.isInteger(preOrderDts) || preOrderDts < 5 || preOrderDts > 30)) return error('预售DTS必须为5~30天', 400);
-    await env.DB.prepare("UPDATE ews_tasks SET name=?, status='pending', updated_at=datetime('now') WHERE id=?").bind(String(name).slice(0,30), taskId).run();
+    await env.DB.prepare("UPDATE ews_tasks SET name=?, status='pending', updated_at=datetime('now') WHERE id=?").bind(taskName, taskId).run();
     await shopeeCreateProduct(env, {
-      id: taskId, task_id: taskId, name, category_id: category_id || '',
+      id: taskId, task_id: taskId, name: taskName, category_id: category_id || '',
       source_brief: sourceBrief, product_type: productType,
       main_description: main_description || '',
-      reference_title: reference_title || name || '',
+      reference_title: String(reference_title || '').trim(),
       reference_image: reference_image || '', auxiliary_images: auxiliary_images || '[]',
       generate_count: shopeeGenerateCount,
       mode: mode === 'dedup' ? 'dedup' : 'full',
@@ -1139,7 +1141,7 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
 
   // 商品元数据
   if (titleWebhookUrl) allJobs.push({ webhook_type: 'title', sub_task_id: subTasks[0]?.sub_task_id || '', url: titleWebhookUrl,
-    data: { task_id: taskId, name: detail.name, source_brief: detail.source_brief || '', reference_title: detail.reference_title || '',
+    data: { task_id: taskId, source_brief: detail.source_brief || '', reference_title: detail.reference_title || '',
       reference_image: refImg, auxiliary_images: auxImgs, sub_task_count: generateCount, sub_tasks: subTasks,
       product_type: productType, variation_name1: detail.variation_name1 || '', variation_name2: detail.variation_name2 || '',
       variants: variantCombos.map(variant => ({ id: variant.id, option1: variant.option1 || '', option2: variant.option2 || '' })),
