@@ -628,7 +628,7 @@ async function getTaskSummaryRows(env, sqlPrefix, ids, sqlSuffix = '') {
 async function handleGetTasks(env, ctx, auth, url) {
   const platform = ['jst','shopee'].includes(url.searchParams.get('platform')) ? url.searchParams.get('platform') : '';
   const page = Math.max(parseInt(url.searchParams.get('page')) || 1, 1);
-  const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit')) || 50, 1), 100);
+  const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit')) || 10, 1), 100);
   const [result, total] = await Promise.all([
     getTaskList(env, platform, auth.username, auth.role, limit, (page - 1) * limit),
     getTaskCount(env, platform, auth.username, auth.role),
@@ -975,7 +975,8 @@ async function jstHandlePush(env, taskId, ctx, request) {
   if (detail.status !== 'pending') return error('只能推送等待中的任务', 400);
   const config = await getConfig(env, 'jst');
   const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
-  const pushUser = await getUserByUsername(env, taskOwner?.user_id || request.auth?.username || '');
+  const ownerId = taskOwner?.user_id || request.auth?.username || '';
+  const pushUser = await getUserByUsername(env, ownerId);
   applyUserWorkflowOverrides(config, pushUser?.webhook_config, 'jst');
   const workflowFlags = workflowExecutionFlags(config);
   const callbackSecret = config.callback_secret || '';
@@ -1060,7 +1061,7 @@ async function jstHandlePush(env, taskId, ctx, request) {
   const planRecords = [];
   for (let bi = 0; bi < allJobs.length; bi++) {
     const j = allJobs[bi];
-    planRecords.push({ id: uuid(), task_id: taskId, sub_task_id: j.sub_task_id, webhook_type: j.webhook_type, webhook_url: j.url || '',
+    planRecords.push({ id: uuid(), task_id: taskId, sub_task_id: j.sub_task_id, webhook_type: j.webhook_type, webhook_url: j.url || '', user_id: ownerId,
       payload: JSON.stringify(j.data), batch_order: bi });
   }
   if (planRecords.length > 0) await jstCreatePushPlans(env, planRecords);
@@ -1084,7 +1085,8 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
   const testMode = body?.test_mode === true;
   const config = await getConfig(env, 'shopee');
   const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
-  const pushUser = await getUserByUsername(env, taskOwner?.user_id || request.auth?.username || '');
+  const ownerId = taskOwner?.user_id || request.auth?.username || '';
+  const pushUser = await getUserByUsername(env, ownerId);
   applyUserWorkflowOverrides(config, pushUser?.webhook_config, 'shopee');
   const workflowFlags = workflowExecutionFlags(config);
   const detail = await shopeeGetProduct(env, taskId);
@@ -1172,7 +1174,7 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
   const planRecords = [];
   for (let bi = 0; bi < allJobs.length; bi++) {
     const j = allJobs[bi];
-    planRecords.push({ id: uuid(), task_id: taskId, sub_task_id: j.sub_task_id, webhook_type: j.webhook_type,
+    planRecords.push({ id: uuid(), task_id: taskId, sub_task_id: j.sub_task_id, webhook_type: j.webhook_type, user_id: ownerId,
       webhook_url: j.url || '', payload: JSON.stringify(j.data), batch_order: bi });
   }
   if (planRecords.length > 0) await shopeeCreatePushPlans(env, planRecords);
@@ -1198,16 +1200,9 @@ function workflowPlanWhereClause(flags, alias = '') {
 }
 
 const FAST_PLAN_RELEASE_BATCH = 10;
-const MAX_QUEUE_TASK_CANDIDATES = 100;
+const MAX_QUEUE_USERS_PER_RUN = 100;
 const MAX_QUEUE_DISPATCHES_PER_RUN = 100;
-
-function imagePushPlanSql(column = 'webhook_type') {
-  return `(${column} IN ('main','main_1') OR ${column} GLOB 'sub_[0-9]*' OR ${column} GLOB 'detail_[0-9]*' OR ${column} GLOB 'sku_[0-9]*')`;
-}
-
-function isImagePushPlanType(webhookType) {
-  return webhookType === 'main' || webhookType === 'main_1' || /^(sub|detail|sku)_\d+$/.test(webhookType || '');
-}
+const QUEUE_USER_TURN_SIZE = 10;
 
 async function getPendingPlansForRelease(env, planTable, taskId, imageLimit, flags, dispatchBudget) {
   const safeTable = normalizePushPlanTable(planTable);
@@ -1216,14 +1211,14 @@ async function getPendingPlansForRelease(env, planTable, taskId, imageLimit, fla
   if (budget < 1) return { results: [] };
   const fastLimit = Math.min(FAST_PLAN_RELEASE_BATCH, budget);
   const fast = await query(env, `SELECT * FROM ${safeTable}
-    WHERE task_id=? AND status='pending'${workflowWhere} AND NOT ${imagePushPlanSql()}
+    WHERE task_id=? AND status='pending'${workflowWhere} AND is_image=0
     ORDER BY batch_order ASC, created_at ASC LIMIT ?`, [taskId, fastLimit]);
   const fastPlans = fast?.results || [];
   const remaining = Math.max(0, budget - fastPlans.length);
   const allowedImages = Math.min(Math.max(0, imageLimit), remaining);
   if (allowedImages < 1) return { results: fastPlans };
   const images = await query(env, `SELECT * FROM ${safeTable}
-    WHERE task_id=? AND status='pending'${workflowWhere} AND ${imagePushPlanSql()}
+    WHERE task_id=? AND status='pending'${workflowWhere} AND is_image=1
     ORDER BY batch_order ASC, created_at ASC LIMIT ?`, [taskId, allowedImages]);
   return { results: fastPlans.concat(images?.results || []) };
 }
@@ -1243,7 +1238,6 @@ async function pushToWebhook(url, data) {
 }
 
 async function markPushPlanFailed(env, planTable, planId, message) {
-  await ensurePushPlanRuntimeColumns(env);
   const safeTable = normalizePushPlanTable(planTable);
   const plan = await getOne(env, `SELECT task_id FROM ${safeTable} WHERE id=?`, [planId]);
   const result = await env.DB.prepare(`UPDATE ${safeTable} SET status='failed', retry_count=3, error=?, updated_at=datetime('now') WHERE id=?`)
@@ -1273,19 +1267,15 @@ async function completePushPlanFromCallback(env, planTable, taskId, webhookType,
 }
 
 async function getUserImageActiveCount(env, userId) {
-  await ensurePushPlanRuntimeColumns(env);
   const active = await getOne(env, `SELECT
-    ((SELECT COUNT(*) FROM ews_jst_push_plans p JOIN ews_tasks t ON t.id=p.task_id
-      WHERE t.user_id=? AND p.status='processing' AND ${imagePushPlanSql('p.webhook_type')})
-    + (SELECT COUNT(*) FROM ews_shopee_push_plans p JOIN ews_tasks t ON t.id=p.task_id
-      WHERE t.user_id=? AND p.status='processing' AND ${imagePushPlanSql('p.webhook_type')})) AS cnt`, [userId, userId]);
+    ((SELECT COUNT(*) FROM ews_jst_push_plans WHERE user_id=? AND status='processing' AND is_image=1)
+    + (SELECT COUNT(*) FROM ews_shopee_push_plans WHERE user_id=? AND status='processing' AND is_image=1)) AS cnt`, [userId, userId]);
   return active?.cnt || 0;
 }
 
 async function claimPushPlan(env, planTable, plan, taskId, userId, imageConcurrencyLimit) {
-  await ensurePushPlanRuntimeColumns(env);
   const safeTable = normalizePushPlanTable(planTable);
-  if (!isImagePushPlanType(plan.webhook_type)) {
+  if (!plan.is_image) {
     const claim = await env.DB.prepare(`UPDATE ${safeTable}
       SET status='processing', error='', processing_at=datetime('now'), updated_at=datetime('now')
       WHERE id=? AND task_id=? AND status='pending'`)
@@ -1293,12 +1283,10 @@ async function claimPushPlan(env, planTable, plan, taskId, userId, imageConcurre
     return d1Changes(claim) > 0;
   }
   const claim = await env.DB.prepare(`UPDATE ${safeTable}
-    SET status='processing', error='', processing_at=datetime('now'), updated_at=datetime('now')
-    WHERE id=? AND task_id=? AND status='pending'
-      AND ((SELECT COUNT(*) FROM ews_jst_push_plans p JOIN ews_tasks t ON t.id=p.task_id
-        WHERE t.user_id=? AND p.status='processing' AND ${imagePushPlanSql('p.webhook_type')})
-      + (SELECT COUNT(*) FROM ews_shopee_push_plans p JOIN ews_tasks t ON t.id=p.task_id
-        WHERE t.user_id=? AND p.status='processing' AND ${imagePushPlanSql('p.webhook_type')})) < ?`)
+      SET status='processing', error='', processing_at=datetime('now'), updated_at=datetime('now')
+      WHERE id=? AND task_id=? AND status='pending'
+      AND ((SELECT COUNT(*) FROM ews_jst_push_plans WHERE user_id=? AND status='processing' AND is_image=1)
+      + (SELECT COUNT(*) FROM ews_shopee_push_plans WHERE user_id=? AND status='processing' AND is_image=1)) < ?`)
     .bind(plan.id, taskId, userId, userId, imageConcurrencyLimit).run();
   return d1Changes(claim) > 0;
 }
@@ -1313,7 +1301,6 @@ async function dispatchPushPlan(env, planTable, taskId, plan) {
 }
 
 async function releaseTaskPlans(env, planTable, platform, taskId, ctx, dispatchBudget) {
-  await ensurePushPlanRuntimeColumns(env);
   const config = await getConfig(env, platform);
   const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
   const ownerId = taskOwner?.user_id || '';
@@ -1359,30 +1346,79 @@ async function runQueueStage(name, action) {
   }
 }
 
+async function acquirePushPlanSchedulerLease(env) {
+  const result = await env.DB.prepare(`UPDATE ews_queue_scheduler_state
+    SET state_value=datetime('now', '+55 seconds'), updated_at=datetime('now')
+    WHERE state_key='push_plan_dispatch_lease'
+      AND (state_value='' OR state_value < datetime('now'))`).run();
+  return d1Changes(result) > 0;
+}
+
 async function releasePendingPushPlans(env, ctx) {
-  const candidates = await query(env, `SELECT platform, task_id, MIN(created_at) AS oldest FROM (
-    SELECT 'jst' AS platform, p.task_id, p.created_at FROM ews_jst_push_plans p
+  if (!(await acquirePushPlanSchedulerLease(env))) return;
+  try {
+    await dispatchPendingPushPlansFairly(env, ctx);
+  } finally {
+    await env.DB.prepare(`UPDATE ews_queue_scheduler_state
+      SET state_value='', updated_at=datetime('now')
+      WHERE state_key='push_plan_dispatch_lease'`).run();
+  }
+}
+
+async function dispatchPendingPushPlansFairly(env, ctx) {
+  const cursor = await getOne(env, "SELECT state_value FROM ews_queue_scheduler_state WHERE state_key='push_plan_last_user'");
+  const lastUserId = cursor?.state_value || '';
+  const result = await query(env, `WITH task_candidates AS (
+    SELECT 'jst' AS platform, p.task_id,
+      COALESCE(NULLIF(p.user_id, ''), NULLIF(i.user_id, ''), 'admin') AS user_id,
+      MIN(p.created_at) AS oldest, MAX(CASE WHEN p.is_image=0 THEN 1 ELSE 0 END) AS has_fast
+    FROM ews_jst_push_plans p
+      JOIN ews_tasks i ON i.id=p.task_id
       JOIN ews_jst_tasks t ON t.id=p.task_id
-      WHERE p.status='pending' AND t.status IN ('processing','partial_failed')
-        AND COALESCE(t.queue_mode, 'auto') != 'manual'
+    WHERE p.status='pending' AND t.status IN ('processing','partial_failed')
+      AND COALESCE(t.queue_mode, 'auto') != 'manual'
+    GROUP BY p.task_id, COALESCE(NULLIF(p.user_id, ''), NULLIF(i.user_id, ''), 'admin')
     UNION ALL
-    SELECT 'shopee' AS platform, p.task_id, p.created_at FROM ews_shopee_push_plans p
-      JOIN ews_tasks t ON t.id=p.task_id
-      WHERE p.status='pending' AND t.status IN ('processing','partial_failed')
-  ) GROUP BY platform, task_id ORDER BY oldest ASC LIMIT ?`, [MAX_QUEUE_TASK_CANDIDATES]);
+    SELECT 'shopee' AS platform, p.task_id,
+      COALESCE(NULLIF(p.user_id, ''), NULLIF(i.user_id, ''), 'admin') AS user_id,
+      MIN(p.created_at) AS oldest, MAX(CASE WHEN p.is_image=0 THEN 1 ELSE 0 END) AS has_fast
+    FROM ews_shopee_push_plans p
+      JOIN ews_tasks i ON i.id=p.task_id
+    WHERE p.status='pending' AND i.status IN ('processing','partial_failed')
+    GROUP BY p.task_id, COALESCE(NULLIF(p.user_id, ''), NULLIF(i.user_id, ''), 'admin')
+  ), ranked AS (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY has_fast DESC, oldest ASC, task_id ASC) AS task_rank
+    FROM task_candidates
+  )
+  SELECT platform, task_id, user_id, oldest FROM ranked
+  WHERE task_rank=1
+  ORDER BY CASE WHEN user_id > ? THEN 0 ELSE 1 END, user_id ASC LIMIT ?`, [lastUserId, MAX_QUEUE_USERS_PER_RUN]);
+  let candidates = result?.results || [];
   let remainingDispatches = MAX_QUEUE_DISPATCHES_PER_RUN;
-  for (const row of (candidates?.results || [])) {
-    if (remainingDispatches < 1) break;
-    const dispatched = row.platform === 'jst'
-      ? await jstReleaseTaskQueue(env, row.task_id, ctx, remainingDispatches)
-      : await shopeeReleaseTaskQueue(env, row.task_id, ctx, remainingDispatches);
-    remainingDispatches -= dispatched || 0;
+  let servedUserId = '';
+  while (remainingDispatches > 0 && candidates.length) {
+    const nextRound = [];
+    for (const row of candidates) {
+      if (remainingDispatches < 1) break;
+      const turnBudget = Math.min(QUEUE_USER_TURN_SIZE, remainingDispatches);
+      const dispatched = row.platform === 'jst'
+        ? await jstReleaseTaskQueue(env, row.task_id, ctx, turnBudget)
+        : await shopeeReleaseTaskQueue(env, row.task_id, ctx, turnBudget);
+      servedUserId = row.user_id;
+      remainingDispatches -= dispatched || 0;
+      if (dispatched === turnBudget && remainingDispatches > 0) nextRound.push(row);
+    }
+    candidates = nextRound;
+  }
+  if (servedUserId) {
+    await env.DB.prepare(`INSERT INTO ews_queue_scheduler_state (state_key, state_value, updated_at)
+      VALUES ('push_plan_last_user', ?, datetime('now'))
+      ON CONFLICT(state_key) DO UPDATE SET state_value=excluded.state_value, updated_at=excluded.updated_at`)
+      .bind(servedUserId).run();
   }
 }
 
 async function processPendingQueue(env, ctx) {
-  const ready = await runQueueStage('push plan runtime setup', () => ensurePushPlanRuntimeColumns(env));
-  if (ready === undefined && !pushPlanColumnsReady) return;
   await runQueueStage('stale push plan recovery', () => recoverStalePushPlans(env));
   await runQueueStage('callback queue processing', () => processCallbackQueue(env, ctx));
   await runQueueStage('pending push plan release', () => releasePendingPushPlans(env, ctx));
@@ -1400,9 +1436,6 @@ const MAX_IMAGE_QUEUE_ACTIVE = 12;
 const IMAGE_QUEUE_MAX_ATTEMPTS = 5;
 const DEFAULT_PUSH_PLAN_TIMEOUT_MINUTES = 20;
 const MAX_PUSH_PLAN_TIMEOUT_MINUTES = 1440;
-let callbackQueueReady = false;
-let imageQueueReady = false;
-let pushPlanColumnsReady = false;
 
 function d1Changes(result) {
   const meta = result?.meta || {};
@@ -1434,7 +1467,6 @@ async function getPushPlanTimeoutMinutes(env) {
 }
 
 async function getImageQueueLimits(env) {
-  await ensureImageQueueTable(env);
   const stats = await getOne(env, `SELECT
     SUM(CASE WHEN status='processing' AND processing_at >= datetime('now', '-5 minutes') THEN 1 ELSE 0 END) AS active,
     SUM(CASE WHEN status='pending' OR (status='processing' AND processing_at < datetime('now', '-5 minutes')) THEN 1 ELSE 0 END) AS queued
@@ -1446,25 +1478,6 @@ async function getImageQueueLimits(env) {
     batchSize: Math.max(1, Math.min(MAX_IMAGE_QUEUE_ACTIVE, maxActive - active)),
     maxActive,
   };
-}
-
-async function ensurePushPlanRuntimeColumns(env) {
-  if (pushPlanColumnsReady) return;
-  for (const table of ['ews_jst_push_plans', 'ews_shopee_push_plans']) {
-    const indexName = table === 'ews_jst_push_plans' ? 'idx_jst_plans_processing' : 'idx_shopee_plans_processing';
-    const dispatchIndexName = table === 'ews_jst_push_plans' ? 'idx_jst_plans_processing_at' : 'idx_shopee_plans_processing_at';
-    try { await env.DB.prepare(`ALTER TABLE ${table} ADD COLUMN processing_at TEXT NOT NULL DEFAULT ''`).run(); } catch (_) {}
-    try { await env.DB.prepare(`ALTER TABLE ${table} ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''`).run(); } catch (_) {}
-    try { await env.DB.prepare(`CREATE INDEX IF NOT EXISTS ${indexName} ON ${table}(status, processing_at)`).run(); } catch (_) {}
-    try { await env.DB.prepare(`CREATE INDEX IF NOT EXISTS ${dispatchIndexName} ON ${table}(processing_at)`).run(); } catch (_) {}
-    await env.DB.prepare(`UPDATE ${table}
-      SET processing_at=datetime('now'), updated_at=datetime('now')
-      WHERE status='processing' AND (processing_at IS NULL OR processing_at='')`).run();
-    await env.DB.prepare(`UPDATE ${table}
-      SET updated_at=COALESCE(NULLIF(updated_at, ''), created_at, datetime('now'))
-      WHERE updated_at IS NULL OR updated_at=''`).run();
-  }
-  pushPlanColumnsReady = true;
 }
 
 async function failTaskForPushPlan(env, planTable, taskId, message) {
@@ -1497,7 +1510,6 @@ async function reconcileTaskStatusForPushPlans(env, planTable, taskId, message, 
 }
 
 async function reconcileOpenPushPlanTaskStatuses(env) {
-  await ensurePushPlanRuntimeColumns(env);
   const jstRows = await query(env, `SELECT DISTINCT task_id FROM ews_jst_push_plans
     WHERE status IN ('failed','pending','processing') LIMIT 100`);
   for (const row of (jstRows?.results || [])) await reconcileTaskStatusForPushPlans(env, 'ews_jst_push_plans', row.task_id);
@@ -1507,7 +1519,6 @@ async function reconcileOpenPushPlanTaskStatuses(env) {
 }
 
 async function recoverStalePushPlans(env) {
-  await ensurePushPlanRuntimeColumns(env);
   const timeoutMinutes = await getPushPlanTimeoutMinutes(env);
   const staleModifier = `-${timeoutMinutes} minutes`;
   for (const table of ['ews_jst_push_plans', 'ews_shopee_push_plans']) {
@@ -1547,53 +1558,7 @@ function normalizeGeneratedTitles(values, expectedCount, minLength, maxLength, l
   });
 }
 
-async function ensureCallbackQueueTable(env) {
-  if (callbackQueueReady) return;
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS ews_callback_queue (
-    id TEXT PRIMARY KEY,
-    task_id TEXT NOT NULL,
-    platform TEXT NOT NULL DEFAULT '',
-    payload TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',
-    attempts INTEGER NOT NULL DEFAULT 0,
-    error TEXT DEFAULT '',
-    received_at TEXT NOT NULL DEFAULT (datetime('now')),
-    processing_at TEXT DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-  )`).run();
-  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_callback_queue_status ON ews_callback_queue(status, received_at)").run();
-  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_callback_queue_processing ON ews_callback_queue(status, processing_at)").run();
-  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_callback_queue_task ON ews_callback_queue(task_id)").run();
-  callbackQueueReady = true;
-}
-
-async function ensureImageQueueTable(env) {
-  if (imageQueueReady) return;
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS ews_image_queue (
-    id TEXT PRIMARY KEY,
-    task_id TEXT NOT NULL,
-    platform TEXT NOT NULL DEFAULT '',
-    sub_task_id TEXT NOT NULL DEFAULT '',
-    set_index INTEGER NOT NULL DEFAULT 0,
-    image_type TEXT NOT NULL,
-    image_position INTEGER NOT NULL DEFAULT 1,
-    image_url TEXT DEFAULT '',
-    error_message TEXT DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'pending',
-    attempts INTEGER NOT NULL DEFAULT 0,
-    error TEXT DEFAULT '',
-    received_at TEXT NOT NULL DEFAULT (datetime('now')),
-    processing_at TEXT DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-  )`).run();
-  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_image_queue_status ON ews_image_queue(status, received_at)").run();
-  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_image_queue_processing ON ews_image_queue(status, processing_at)").run();
-  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_image_queue_task ON ews_image_queue(task_id)").run();
-  imageQueueReady = true;
-}
-
 async function recoverStaleCallbackQueue(env) {
-  await ensureCallbackQueueTable(env);
   await env.DB.prepare(`UPDATE ews_callback_queue
     SET status='failed', error='回调队列处理超时，已达到最大重试次数', updated_at=datetime('now')
     WHERE status='processing' AND attempts >= ?
@@ -1609,7 +1574,6 @@ async function recoverStaleCallbackQueue(env) {
 async function failImageQueuePlan(env, row, reason) {
   const idx = await getTaskIndex(env, row.task_id);
   if (!idx) return 'missing_task';
-  await ensurePushPlanRuntimeColumns(env);
   const planTable = idx.platform === 'shopee' ? 'ews_shopee_push_plans' : 'ews_jst_push_plans';
   const whType = `${row.image_type}_${parseInt(row.image_position) || 1}`;
   const result = await env.DB.prepare(`UPDATE ${planTable}
@@ -1628,14 +1592,12 @@ async function failImageQueuePlan(env, row, reason) {
 async function clearFailedImageQueueForPlan(env, plan) {
   const match = /^(main|sub|detail|sku)_(\d+)$/.exec(plan.webhook_type || '');
   if (!match) return;
-  await ensureImageQueueTable(env);
   await env.DB.prepare(`DELETE FROM ews_image_queue
     WHERE task_id=? AND sub_task_id=? AND image_type=? AND image_position=? AND status='failed'`)
     .bind(plan.task_id, plan.sub_task_id || '', match[1], parseInt(match[2])).run();
 }
 
 async function recoverStaleImageQueue(env) {
-  await ensureImageQueueTable(env);
   const reason = '图片队列处理超时，已达到最大重试次数';
   const exhausted = await query(env, `SELECT * FROM ews_image_queue
     WHERE status='processing' AND attempts >= ?
@@ -1673,7 +1635,6 @@ async function handleCallback(request, env, ctx) {
   if (config.callback_secret && receivedSecret !== config.callback_secret) return error('回调密钥无效', 403);
 
   try {
-    await ensureCallbackQueueTable(env);
     const queueId = uuid(16);
     await env.DB.prepare("INSERT INTO ews_callback_queue (id, task_id, platform, payload, status, received_at, updated_at) VALUES (?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))")
       .bind(queueId, task_id, idx.platform || '', JSON.stringify(body)).run();
@@ -1687,7 +1648,6 @@ async function handleCallback(request, env, ctx) {
 
 async function processCallbackQueue(env, ctx, preferredId) {
   try {
-    await ensureCallbackQueueTable(env);
     if (preferredId) {
       const preferred = await getOne(env, "SELECT * FROM ews_callback_queue WHERE id=?", [preferredId]);
       const claimed = preferred ? await processCallbackQueueRow(env, ctx, preferred) : false;
@@ -1749,7 +1709,6 @@ async function processCallbackQueueRow(env, ctx, row) {
 }
 
 async function enqueueImageCallback(env, idx, body) {
-  await ensureImageQueueTable(env);
   const imageId = uuid(16);
   await env.DB.prepare(`INSERT INTO ews_image_queue
     (id, task_id, platform, sub_task_id, set_index, image_type, image_position, image_url, error_message, status, received_at, updated_at)
@@ -1770,7 +1729,6 @@ async function enqueueImageCallback(env, idx, body) {
 
 async function processImageQueue(env, ctx, preferredId) {
   try {
-    await ensureImageQueueTable(env);
     const limits = await getImageQueueLimits(env);
     if (preferredId) {
       const preferred = await getOne(env, "SELECT * FROM ews_image_queue WHERE id=?", [preferredId]);
@@ -1828,7 +1786,6 @@ async function processImageQueuePayload(env, ctx, row) {
   const checkParentCompletion = isShopee ? shopeeCheckParentCompletion : jstCheckParentCompletion;
   const refundCredits = isShopee ? shopeeRefundCredits : jstRefundCredits;
   const planTable = isShopee ? 'ews_shopee_push_plans' : 'ews_jst_push_plans';
-  await ensurePushPlanRuntimeColumns(env);
   const sub_task_id = row.sub_task_id || '';
   if (!sub_task_id) throw callbackPermanentError('图片回调缺少 sub_task_id');
   const subTaskTable = isShopee ? 'ews_shopee_sub_tasks' : 'ews_jst_sub_tasks';
@@ -1904,7 +1861,6 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
   const updateSubTask = isShopee ? shopeeUpdateSubTask : jstUpdateSubTask;
   const checkSubTaskImages = isShopee ? shopeeCheckSubTaskImages : jstCheckSubTaskImages;
   const checkParentCompletion = isShopee ? shopeeCheckParentCompletion : jstCheckParentCompletion;
-  await ensurePushPlanRuntimeColumns(env);
 
   // Shopee 商品元数据回调
   if (Array.isArray(products)) {
@@ -2191,7 +2147,8 @@ async function handleGetPlans(env, path) {
   return json({ success: true, plans: plans.map(p => {
     let preview_url = '';
     try { const pl = JSON.parse(p.payload); if (pl.image_type && pl.image_position && pl.sub_task_id && publicUrl) preview_url = `${publicUrl}/ews/${pl.task_id}/${pl.sub_task_id}/${pl.image_type}_${pl.image_position}.jpg`; } catch(_) {}
-    return { ...p, preview_url };
+    const { user_id, is_image, ...publicPlan } = p;
+    return { ...publicPlan, preview_url };
   }), stats: s });
 }
 
@@ -2201,7 +2158,6 @@ async function handleRetryPlan(env, path, request, ctx) {
   const idx = await getTaskIndex(env, taskId);
   if (!idx) return error('任务不存在', 404);
   const plansTable = idx.platform === 'jst' ? 'ews_jst_push_plans' : 'ews_shopee_push_plans';
-  await ensurePushPlanRuntimeColumns(env);
   const plan = await getOne(env, `SELECT * FROM ${plansTable} WHERE id=?`, [planId]);
   if (!plan || plan.task_id !== taskId) return error('计划不存在', 404);
   if (plan.status === 'processing') return error('计划正在处理中，请勿重复推送', 409);
@@ -2237,24 +2193,26 @@ async function jstHandleExport(env, taskId) {
   const variationImageMode = normalizeJstVariationImageMode(detail.variation_image_mode, productType);
   const variationGroups = productType === 'single' ? [] : getJstVariationGroups(variants);
   const groupPosition = new Map(variationGroups.map((group, index) => [group.key, index + 1]));
-  const subTasks = await jstGetSubTasks(env, taskId);
-  const subTaskIds = (subTasks?.results || []).map(st => st.id);
-  const plans = await query(env, 'SELECT webhook_type FROM ews_jst_push_plans WHERE task_id=?', [taskId]);
-  const plannedTypes = new Set((plans?.results || []).map(plan => plan.webhook_type));
+  const subTaskRecords = detail.sub_tasks || [];
+  const subTaskIds = subTaskRecords.map(st => st.id);
+  const exportStatements = [env.DB.prepare('SELECT webhook_type FROM ews_jst_push_plans WHERE task_id=?').bind(taskId)];
+  if (subTaskIds.length > 0) {
+    const placeholders = subTaskIds.map(() => '?').join(',');
+    exportStatements.push(env.DB.prepare(`SELECT sub_task_id, variant_id, title FROM ews_jst_sku_titles WHERE sub_task_id IN (${placeholders})`).bind(...subTaskIds));
+  }
+  const exportResults = await env.DB.batch(exportStatements);
+  const plannedTypes = new Set((exportResults[0]?.results || []).map(plan => plan.webhook_type));
   const titlePlanned = plannedTypes.has('title');
   const skuTitlePlanned = plannedTypes.has('sku_title');
   const skuImagePlanned = [...plannedTypes].some(type => /^sku_\d+$/.test(type));
 
   const skuTitleMap = {};
-  if (subTaskIds.length > 0) {
-    const ph = subTaskIds.map(() => '?').join(',');
-    const skuRows = await query(env, `SELECT sub_task_id, variant_id, title FROM ews_jst_sku_titles WHERE sub_task_id IN (${ph})`, subTaskIds);
-    for (const st of (skuRows?.results || [])) skuTitleMap[st.sub_task_id + '_' + st.variant_id] = st.title;
-  }
+  for (const row of (exportResults[1]?.results || [])) skuTitleMap[row.sub_task_id + '_' + row.variant_id] = row.title;
+  const imageMap = new Map(images.map(image => [image.sub_task_id + '|' + image.image_type + '|' + image.position, image.image_url || '']));
+  const subTaskMap = new Map(subTaskRecords.map(subTask => [subTask.id, subTask]));
 
   function recordedImg(subTaskId, type, pos) {
-    const found = images.find(img => img.sub_task_id === subTaskId && img.image_type === type && img.position === pos);
-    return found?.image_url || '';
+    return imageMap.get(subTaskId + '|' + type + '|' + pos) || '';
   }
   function getImg(setIdx, subTaskId, type, pos) {
     const direct = recordedImg(subTaskId, type, pos);
@@ -2283,7 +2241,7 @@ async function jstHandleExport(env, taskId) {
   if (subTaskIds.length > 0 && subTaskIds.length < generateCount) addExportError('AI商品套图数量不足: ' + subTaskIds.length + '/' + generateCount);
   for (let setIdx = 0; setIdx < generateCount; setIdx++) {
     const subTaskId = subTaskIds[setIdx] || '';
-    const subTask = (detail.sub_tasks || []).find(st => st.id === subTaskId);
+    const subTask = subTaskMap.get(subTaskId);
     const setLabel = '第' + (setIdx + 1) + '套';
     if (!subTaskId) { addExportError(setLabel + ' 缺少子任务'); continue; }
     if (titlePlanned && !(subTask?.title || '').trim()) addExportError(setLabel + ' 缺少AI商品标题');
@@ -2312,7 +2270,7 @@ async function jstHandleExport(env, taskId) {
   for (let setIdx = 0; setIdx < generateCount; setIdx++) {
     const subTaskId = subTaskIds[setIdx] || '';
     const styleCode = subTaskId ? subTaskId.slice(0, 8) : `${taskId.slice(0, 8)}-S${setIdx + 1}`;
-    const subTask = (detail.sub_tasks || []).find(st => st.id === subTaskId);
+    const subTask = subTaskMap.get(subTaskId);
     const productTitle = subTask?.title || detail.name || '';
     for (let vIdx = 0; vIdx < variants.length; vIdx++) {
       const variant = variants[vIdx];
@@ -2479,12 +2437,12 @@ async function shopeeHandleExport(env, taskId) {
   const mainImgTotal = Math.min(Math.max(product.main_image_count || 9, 5), 9);
   const expectedSetCount = Math.max(parseInt(product.generate_count) || 1, 1);
   const subTasks = (product.sub_tasks && product.sub_tasks.length) ? product.sub_tasks : [];
+  const imageMap = new Map((product.images_rec || []).map(image => [image.sub_task_id + '|' + image.image_type + '|' + image.position, image.image_url || '']));
   var shippingChannels = [];
   try { shippingChannels = JSON.parse(product.shipping_channels || '[]'); } catch(e) {}
 
   function generatedImage(type, pos, setIdx, subTaskId) {
-    const rec = (product.images_rec || []).find(img => img.sub_task_id === subTaskId && img.image_type === type && img.position === pos);
-    return rec?.image_url || '';
+    return imageMap.get(subTaskId + '|' + type + '|' + pos) || '';
   }
   function getImg(setIdx, subTaskId, type, pos) {
     const direct = generatedImage(type, pos, setIdx, subTaskId);

@@ -10,12 +10,12 @@ async function getOne(env, sql, params = []) {
 // ==================== 共享层 ews_ ====================
 async function getConfig(env, platform = '') {
   try {
-    const rows = await query(env, "SELECT key, value FROM ews_config WHERE platform = ?", [platform]);
+    const rows = platform
+      ? await query(env, "SELECT key, value, platform FROM ews_config WHERE platform IN ('', ?) ORDER BY CASE WHEN platform = '' THEN 0 ELSE 1 END", [platform])
+      : await query(env, "SELECT key, value FROM ews_config WHERE platform = ''");
     const config = {};
     for (const row of rows.results) config[row.key] = row.value;
-    if (!platform) return config;
-    const common = await getConfig(env, '');
-    return { ...common, ...config };
+    return config;
   } catch { return {}; }
 }
 async function updateConfig(env, key, value, platform = '') {
@@ -23,15 +23,8 @@ async function updateConfig(env, key, value, platform = '') {
 }
 async function getPlatformConfig(env, platform) { return getConfig(env, platform); }
 
-let userColumnsReady = false;
 const DEFAULT_USER_IMAGE_CONCURRENCY = 20;
 const MAX_USER_IMAGE_CONCURRENCY = 20;
-async function ensureUserColumns(env) {
-  if (userColumnsReady) return;
-  try { await env.DB.prepare("ALTER TABLE ews_users ADD COLUMN platform_access TEXT NOT NULL DEFAULT 'allow'").run(); } catch (_) {}
-  try { await env.DB.prepare("ALTER TABLE ews_users ADD COLUMN image_concurrency_limit INTEGER NOT NULL DEFAULT 20").run(); } catch (_) {}
-  userColumnsReady = true;
-}
 function normalizePlatformAccess(value) {
   return ['allow','jst','shopee'].includes(value) ? value : 'allow';
 }
@@ -40,14 +33,14 @@ function normalizeUserImageConcurrencyLimit(value) {
   if (!Number.isInteger(limit) || limit < 1) return DEFAULT_USER_IMAGE_CONCURRENCY;
   return Math.min(limit, MAX_USER_IMAGE_CONCURRENCY);
 }
-async function createUser(env, user) { await ensureUserColumns(env); await env.DB.prepare("INSERT INTO ews_users (id, username, password_hash, role, display_name, platform_access, image_concurrency_limit, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(user.id, user.username, user.password_hash, user.role || 'user', user.display_name || '', normalizePlatformAccess(user.platform_access), normalizeUserImageConcurrencyLimit(user.image_concurrency_limit), user.created_by || '').run(); }
-async function getUserByUsername(env, username) { await ensureUserColumns(env); return await getOne(env, "SELECT * FROM ews_users WHERE username = ?", [username]); }
-async function getUserList(env) { await ensureUserColumns(env); return await query(env, "SELECT id, username, role, display_name, platform_access, image_concurrency_limit, is_active, credits, created_at FROM ews_users ORDER BY created_at ASC"); }
+async function createUser(env, user) { await env.DB.prepare("INSERT INTO ews_users (id, username, password_hash, role, display_name, platform_access, image_concurrency_limit, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(user.id, user.username, user.password_hash, user.role || 'user', user.display_name || '', normalizePlatformAccess(user.platform_access), normalizeUserImageConcurrencyLimit(user.image_concurrency_limit), user.created_by || '').run(); }
+async function getUserByUsername(env, username) { return await getOne(env, "SELECT * FROM ews_users WHERE username = ?", [username]); }
+async function getUserList(env) { return await query(env, "SELECT id, username, role, display_name, platform_access, image_concurrency_limit, is_active, credits, created_at FROM ews_users ORDER BY created_at ASC"); }
 async function updateUserPassword(env, userId, pw) { await env.DB.prepare("UPDATE ews_users SET password_hash = ? WHERE id = ?").bind(pw, userId).run(); }
 async function toggleUserActive(env, userId, a) { await env.DB.prepare("UPDATE ews_users SET is_active = ? WHERE id = ?").bind(a ? 1 : 0, userId).run(); }
 async function deleteUser(env, userId) { await env.DB.prepare("DELETE FROM ews_users WHERE id = ?").bind(userId).run(); }
-async function updateUserPlatformAccess(env, userId, access) { await ensureUserColumns(env); await env.DB.prepare("UPDATE ews_users SET platform_access = ? WHERE id = ?").bind(normalizePlatformAccess(access), userId).run(); }
-async function updateUserImageConcurrencyLimit(env, userId, limit) { await ensureUserColumns(env); await env.DB.prepare("UPDATE ews_users SET image_concurrency_limit = ? WHERE id = ?").bind(normalizeUserImageConcurrencyLimit(limit), userId).run(); }
+async function updateUserPlatformAccess(env, userId, access) { await env.DB.prepare("UPDATE ews_users SET platform_access = ? WHERE id = ?").bind(normalizePlatformAccess(access), userId).run(); }
+async function updateUserImageConcurrencyLimit(env, userId, limit) { await env.DB.prepare("UPDATE ews_users SET image_concurrency_limit = ? WHERE id = ?").bind(normalizeUserImageConcurrencyLimit(limit), userId).run(); }
 async function updateUserWebhook(env, userId, cfg) { await env.DB.prepare("UPDATE ews_users SET webhook_config = ? WHERE id = ?").bind(cfg, userId).run(); }
 async function getUserCredits(env, userId) { const r = await getOne(env, "SELECT credits FROM ews_users WHERE id = ?", [userId]); return r?.credits ?? 0; }
 async function updateUserCredits(env, userId, amount, mode) {
@@ -83,64 +76,9 @@ async function getTaskCount(env, platform, userId, role) {
 }
 async function deleteTaskIndex(env, id) { await env.DB.prepare("DELETE FROM ews_tasks WHERE id = ?").bind(id).run(); }
 
-const PRICE_FLOAT_COLUMNS = [
-  ['price_float_enabled', "INTEGER NOT NULL DEFAULT 0"],
-  ['price_min', "REAL"],
-  ['price_max', "REAL"],
-  ['price_precision', "INTEGER NOT NULL DEFAULT 0"],
-];
-const SHOPEE_VARIATION_COLUMNS = [
-  ...PRICE_FLOAT_COLUMNS,
-  ['option1_export', "TEXT NOT NULL DEFAULT ''"],
-  ['option2_export', "TEXT NOT NULL DEFAULT ''"],
-];
-const JST_TASK_COLUMNS = [
-  ['recommended_copy', "TEXT NOT NULL DEFAULT ''"],
-  ['product_link', "TEXT NOT NULL DEFAULT ''"],
-  ['supplier_name', "TEXT NOT NULL DEFAULT ''"],
-  ['product_type', "TEXT NOT NULL DEFAULT 'one'"],
-  ['variation_image_mode', "TEXT NOT NULL DEFAULT 'option1'"],
-];
-const JST_VARIATION_COLUMNS = [
-  ...PRICE_FLOAT_COLUMNS,
-  ['sku_image', "TEXT NOT NULL DEFAULT ''"],
-  ['market_price', 'REAL'],
-  ['min_distribution_price', 'REAL'],
-  ['max_distribution_price', 'REAL'],
-  ['stock', 'INTEGER NOT NULL DEFAULT 999'],
-  ['sku_code', "TEXT NOT NULL DEFAULT ''"],
-];
-let jstTaskColumnsReady = false;
-async function ensureJstTaskColumns(env) {
-  if (jstTaskColumnsReady) return;
-  for (const [name, type] of JST_TASK_COLUMNS) {
-    try { await env.DB.prepare(`ALTER TABLE ews_jst_tasks ADD COLUMN ${name} ${type}`).run(); } catch (_) {}
-  }
-  jstTaskColumnsReady = true;
-}
-let jstVariantColumnsReady = false;
-async function ensureJstVariantColumns(env) {
-  if (jstVariantColumnsReady) return;
-  for (const [name, type] of JST_VARIATION_COLUMNS) {
-    try { await env.DB.prepare(`ALTER TABLE ews_jst_variants ADD COLUMN ${name} ${type}`).run(); } catch (_) {}
-  }
-  try { await env.DB.prepare("UPDATE ews_jst_variants SET sku_image=white_bg_image WHERE sku_image='' AND white_bg_image<>''").run(); } catch (_) {}
-  try { await env.DB.prepare('ALTER TABLE ews_jst_variants DROP COLUMN white_bg_image').run(); } catch (_) {}
-  jstVariantColumnsReady = true;
-}
-let shopeeVariationColumnsReady = false;
-async function ensureShopeeVariationColumns(env) {
-  if (shopeeVariationColumnsReady) return;
-  for (const [name, type] of SHOPEE_VARIATION_COLUMNS) {
-    try { await env.DB.prepare(`ALTER TABLE ews_shopee_variations ADD COLUMN ${name} ${type}`).run(); } catch (_) {}
-  }
-  shopeeVariationColumnsReady = true;
-}
-
 // ==================== JST 模块 ====================
 async function jstCreateTask(env, t) { await env.DB.prepare("INSERT INTO ews_jst_tasks (id, name, topic_items, description, main_description, detail_description, reference_image, auxiliary_images, generate_count, stock, weight, variant_count, main_image_count, detail_image_count, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))").bind(t.id, t.name ?? '', t.topic_items ?? '', t.description, t.main_description ?? '', t.detail_description ?? '', t.reference_image, t.auxiliary_images ?? '', t.generate_count, t.stock, t.weight, t.variant_count, t.main_image_count ?? 5, t.detail_image_count ?? 5).run(); }
 async function jstUpdateTask(env, tid, d) {
-  await ensureJstTaskColumns(env);
   await env.DB.prepare("UPDATE ews_jst_tasks SET name=?, topic_items=?, description=?, recommended_copy=?, product_link=?, supplier_name=?, main_description=?, detail_description=?, reference_image=?, auxiliary_images=?, generate_count=?, stock=?, weight=?, variant_count=?, main_image_count=?, detail_image_count=?, product_type=?, variation_image_mode=?, mode=?, status='pending', updated_at=datetime('now') WHERE id=?")
     .bind(d.name ?? '', d.topic_items ?? '', d.description ?? '', d.recommended_copy ?? '', d.product_link ?? '', d.supplier_name ?? '', d.main_description ?? '', d.detail_description ?? '', d.reference_image ?? '', d.auxiliary_images ?? '', d.generate_count ?? 1, d.stock ?? 999, d.weight ?? 1.0, d.variant_count ?? 1, d.main_image_count ?? 5, d.detail_image_count ?? 5, d.product_type ?? 'one', d.variation_image_mode ?? 'option1', d.mode ?? 'full', tid).run();
 }
@@ -159,10 +97,9 @@ async function jstGetTask(env, tid) {
   return t;
 }
 async function jstUpdateTaskStatus(env, tid, s) { await env.DB.prepare("UPDATE ews_jst_tasks SET status=?, updated_at=datetime('now') WHERE id=?").bind(s, tid).run(); }
-async function jstCreateVariant(env, v) { await ensureJstVariantColumns(env); await env.DB.prepare("INSERT INTO ews_jst_variants (id, task_id, tier1_name, tier1_value, tier2_name, tier2_value, sku_image, price, market_price, min_distribution_price, max_distribution_price, stock, sku_code, price_float_enabled, price_min, price_max, price_precision, description, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))").bind(v.id, v.task_id, v.tier1_name || '', v.tier1_value, v.tier2_name || '', v.tier2_value || '', v.sku_image || '', v.price ?? null, v.market_price ?? null, v.min_distribution_price ?? null, v.max_distribution_price ?? null, v.stock ?? 999, v.sku_code || '', v.price_float_enabled ? 1 : 0, v.price_min ?? null, v.price_max ?? null, v.price_precision ?? 0, v.description ?? '', v.sort_order).run(); }
+async function jstCreateVariant(env, v) { await env.DB.prepare("INSERT INTO ews_jst_variants (id, task_id, tier1_name, tier1_value, tier2_name, tier2_value, sku_image, price, market_price, min_distribution_price, max_distribution_price, stock, sku_code, price_float_enabled, price_min, price_max, price_precision, description, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))").bind(v.id, v.task_id, v.tier1_name || '', v.tier1_value, v.tier2_name || '', v.tier2_value || '', v.sku_image || '', v.price ?? null, v.market_price ?? null, v.min_distribution_price ?? null, v.max_distribution_price ?? null, v.stock ?? 999, v.sku_code || '', v.price_float_enabled ? 1 : 0, v.price_min ?? null, v.price_max ?? null, v.price_precision ?? 0, v.description ?? '', v.sort_order).run(); }
 async function jstClearVariants(env, tid) { await env.DB.prepare("DELETE FROM ews_jst_variants WHERE task_id = ?").bind(tid).run(); }
 async function jstReplaceVariants(env, tid, variants) {
-  await ensureJstVariantColumns(env);
   const statements = [env.DB.prepare("DELETE FROM ews_jst_variants WHERE task_id = ?").bind(tid)];
   for (const v of variants) statements.push(env.DB.prepare("INSERT INTO ews_jst_variants (id, task_id, tier1_name, tier1_value, tier2_name, tier2_value, sku_image, price, market_price, min_distribution_price, max_distribution_price, stock, sku_code, price_float_enabled, price_min, price_max, price_precision, description, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))").bind(v.id, v.task_id, v.tier1_name || '', v.tier1_value, v.tier2_name || '', v.tier2_value || '', v.sku_image || '', v.price ?? null, v.market_price ?? null, v.min_distribution_price ?? null, v.max_distribution_price ?? null, v.stock ?? 999, v.sku_code || '', v.price_float_enabled ? 1 : 0, v.price_min ?? null, v.price_max ?? null, v.price_precision ?? 0, v.description ?? '', v.sort_order));
   await env.DB.batch(statements);
@@ -203,7 +140,16 @@ async function jstCheckParentCompletion(env, tid) {
   if (r && r.total > 0 && r.total === r.done && (p?.active || 0) === 0) { await env.DB.prepare("UPDATE ews_jst_tasks SET status='completed', updated_at=datetime('now') WHERE id=?").bind(tid).run(); await updateTaskIndexStatus(env, tid, 'completed'); }
 }
 async function jstDeleteTaskRecord(env, tid) { await env.DB.prepare("DELETE FROM ews_jst_tasks WHERE id = ?").bind(tid).run(); }
-async function jstCreatePushPlans(env, plans) { var s = env.DB.prepare("INSERT INTO ews_jst_push_plans (id, task_id, sub_task_id, webhook_type, webhook_url, payload, status, batch_order, retry_count, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 0, datetime('now'))"); for (const p of plans) await s.bind(p.id, p.task_id, p.sub_task_id, p.webhook_type, p.webhook_url, p.payload, p.batch_order).run(); }
+async function createPushPlans(env, table, plans) {
+  const sql = `INSERT INTO ${table} (id, task_id, sub_task_id, webhook_type, webhook_url, payload, user_id, is_image, status, batch_order, retry_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, datetime('now'))`;
+  const statements = plans.map(p => env.DB.prepare(sql).bind(
+    p.id, p.task_id, p.sub_task_id || '', p.webhook_type, p.webhook_url, p.payload, p.user_id || '',
+    /^(main|main_1|sub_\d+|detail_\d+|sku_\d+)$/.test(p.webhook_type || '') ? 1 : 0,
+    p.batch_order
+  ));
+  for (let i = 0; i < statements.length; i += 50) await env.DB.batch(statements.slice(i, i + 50));
+}
+async function jstCreatePushPlans(env, plans) { await createPushPlans(env, 'ews_jst_push_plans', plans); }
 async function jstGetPushPlans(env, tid) { return await query(env, "SELECT * FROM ews_jst_push_plans WHERE task_id = ? ORDER BY batch_order ASC, webhook_type ASC", [tid]); }
 async function jstGetPendingPlans(env, tid, lim) { return await query(env, "SELECT * FROM ews_jst_push_plans WHERE task_id = ? AND status='pending' ORDER BY batch_order ASC LIMIT ?", [tid, lim]); }
 async function jstUpdatePlanStatus(env, pid, s, e) { await env.DB.prepare("UPDATE ews_jst_push_plans SET status=?, error=? WHERE id=?").bind(s, e || '', pid).run(); }
@@ -211,35 +157,7 @@ async function jstGetPlanStats(env, tid) { var r = await query(env, "SELECT stat
 async function jstRefundCredits(env, tid) { var t = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id = ?", [tid]); if (t?.user_id) await env.DB.prepare("UPDATE ews_users SET credits = credits + 1 WHERE id = ?").bind(t.user_id).run(); }
 
 // ==================== Shopee 模块 ====================
-let shopeeColumnsReady = false;
-async function ensureShopeeProductColumns(env) {
-  if (shopeeColumnsReady) return;
-  const cols = [
-    ['main_description', "TEXT NOT NULL DEFAULT ''"],
-    ['reference_title', "TEXT NOT NULL DEFAULT ''"],
-    ['reference_image', "TEXT NOT NULL DEFAULT ''"],
-    ['auxiliary_images', "TEXT NOT NULL DEFAULT '[]'"],
-    ['generate_count', "INTEGER NOT NULL DEFAULT 1"],
-    ['mode', "TEXT NOT NULL DEFAULT 'full'"],
-    ['main_image_count', "INTEGER NOT NULL DEFAULT 9"],
-    ['detail_image_count', "INTEGER NOT NULL DEFAULT 0"],
-    ['variation_image_mode', "TEXT NOT NULL DEFAULT 'option1'"],
-    ['source_brief', "TEXT NOT NULL DEFAULT ''"],
-    ['product_type', "TEXT NOT NULL DEFAULT 'one'"],
-    ['variation_name1_export', "TEXT NOT NULL DEFAULT ''"],
-    ['variation_name2_export', "TEXT NOT NULL DEFAULT ''"],
-    ['max_purchase_start_date', "TEXT NOT NULL DEFAULT ''"],
-    ['max_purchase_period_days', "INTEGER"],
-    ['max_purchase_end_date', "TEXT NOT NULL DEFAULT ''"],
-  ];
-  for (const [name, type] of cols) {
-    try { await env.DB.prepare(`ALTER TABLE ews_shopee_products ADD COLUMN ${name} ${type}`).run(); } catch (_) {}
-  }
-  try { await env.DB.prepare("ALTER TABLE ews_shopee_sub_tasks ADD COLUMN description TEXT NOT NULL DEFAULT ''").run(); } catch (_) {}
-  shopeeColumnsReady = true;
-}
 async function shopeeCreateProduct(env, p) {
-  await ensureShopeeProductColumns(env);
   await env.DB.prepare(`INSERT INTO ews_shopee_products
     (id, task_id, category_id, name, main_description, reference_title, reference_image, auxiliary_images, generate_count, mode, main_image_count, detail_image_count, parent_sku, cover_image, images, weight_kg, length_cm, width_cm, height_cm, gtin, brand_id, hs_code, tax_code, origin_country, variation_name1, variation_name2, variation_image_mode, max_purchase_qty, size_chart_template_id, size_chart_image, pre_order_dts, shipping_channels, source_brief, product_type, variation_name1_export, variation_name2_export, max_purchase_start_date, max_purchase_period_days, max_purchase_end_date, status, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))
@@ -287,17 +205,16 @@ async function shopeeGetProduct(env, pid) {
   return product;
 }
 async function shopeeDeleteProduct(env, pid) { await env.DB.prepare("DELETE FROM ews_shopee_products WHERE id = ?").bind(pid).run(); }
-async function shopeeCreateVariations(env, vs) { await ensureShopeeVariationColumns(env); var s = env.DB.prepare("INSERT INTO ews_shopee_variations (id, product_id, integration_no, option1, option1_export, image_per_variation, option2, option2_export, image_2, price, price_float_enabled, price_min, price_max, price_precision, stock, sku, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))"); for (const v of vs) await s.bind(v.id, v.product_id, v.integration_no, v.option1, v.option1_export || '', v.image_per_variation || '', v.option2 || '', v.option2_export || '', v.image_2 || '', v.price, v.price_float_enabled ? 1 : 0, v.price_min ?? null, v.price_max ?? null, v.price_precision ?? 0, v.stock ?? 999, v.sku || '').run(); }
+async function shopeeCreateVariations(env, vs) { var s = env.DB.prepare("INSERT INTO ews_shopee_variations (id, product_id, integration_no, option1, option1_export, image_per_variation, option2, option2_export, image_2, price, price_float_enabled, price_min, price_max, price_precision, stock, sku, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))"); for (const v of vs) await s.bind(v.id, v.product_id, v.integration_no, v.option1, v.option1_export || '', v.image_per_variation || '', v.option2 || '', v.option2_export || '', v.image_2 || '', v.price, v.price_float_enabled ? 1 : 0, v.price_min ?? null, v.price_max ?? null, v.price_precision ?? 0, v.stock ?? 999, v.sku || '').run(); }
 async function shopeeClearVariations(env, pid) { await env.DB.prepare("DELETE FROM ews_shopee_variations WHERE product_id = ?").bind(pid).run(); }
 async function shopeeReplaceVariations(env, pid, variations) {
-  await ensureShopeeVariationColumns(env);
   const statements = [env.DB.prepare("DELETE FROM ews_shopee_variations WHERE product_id = ?").bind(pid)];
   for (const v of variations) statements.push(env.DB.prepare("INSERT INTO ews_shopee_variations (id, product_id, integration_no, option1, option1_export, image_per_variation, option2, option2_export, image_2, price, price_float_enabled, price_min, price_max, price_precision, stock, sku, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))").bind(v.id, v.product_id, v.integration_no, v.option1, v.option1_export || '', v.image_per_variation || '', v.option2 || '', v.option2_export || '', v.image_2 || '', v.price, v.price_float_enabled ? 1 : 0, v.price_min ?? null, v.price_max ?? null, v.price_precision ?? 0, v.stock ?? 999, v.sku || ''));
   await env.DB.batch(statements);
 }
 
 // -- Shopee 子任务 & 图片
-async function shopeeCreateSubTask(env, s) { await ensureShopeeProductColumns(env); await env.DB.prepare("INSERT INTO ews_shopee_sub_tasks (id, parent_task_id, set_index, status, created_at, updated_at) VALUES (?, ?, ?, 'pending', datetime('now'), '')").bind(s.id, s.parent_task_id, s.set_index).run(); }
+async function shopeeCreateSubTask(env, s) { await env.DB.prepare("INSERT INTO ews_shopee_sub_tasks (id, parent_task_id, set_index, status, created_at, updated_at) VALUES (?, ?, ?, 'pending', datetime('now'), '')").bind(s.id, s.parent_task_id, s.set_index).run(); }
 async function shopeeGetSubTasks(env, tid) { return await query(env, "SELECT * FROM ews_shopee_sub_tasks WHERE parent_task_id = ? ORDER BY set_index", [tid]); }
 async function shopeeUpdateSubTask(env, sid, d) {
   var sc = []; var p = [];
@@ -309,8 +226,6 @@ async function shopeeUpdateSubTask(env, sid, d) {
   await env.DB.prepare(`UPDATE ews_shopee_sub_tasks SET ${sc.join(', ')} WHERE id = ?`).bind(...p).run();
 }
 async function shopeeUpdateVariationExports(env, productId, name1, name2, labels) {
-  await ensureShopeeProductColumns(env);
-  await ensureShopeeVariationColumns(env);
   const statements = [env.DB.prepare("UPDATE ews_shopee_products SET variation_name1_export=?, variation_name2_export=?, updated_at=datetime('now') WHERE id=?").bind(name1 || '', name2 || '', productId)];
   for (const label of labels) statements.push(env.DB.prepare("UPDATE ews_shopee_variations SET option1_export=?, option2_export=? WHERE id=? AND product_id=?").bind(label.option1 || '', label.option2 || '', label.id, productId));
   await env.DB.batch(statements);
@@ -334,7 +249,7 @@ async function shopeeCheckParentCompletion(env, tid) {
 async function shopeeRefundCredits(env, tid) { var t = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id = ?", [tid]); if (t?.user_id) await env.DB.prepare("UPDATE ews_users SET credits = credits + 1 WHERE id = ?").bind(t.user_id).run(); }
 
 // -- Shopee 推送计划
-async function shopeeCreatePushPlans(env, plans) { var s = env.DB.prepare("INSERT INTO ews_shopee_push_plans (id, task_id, sub_task_id, webhook_type, webhook_url, payload, status, batch_order, retry_count, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 0, datetime('now'))"); for (const p of plans) await s.bind(p.id, p.task_id, p.sub_task_id || '', p.webhook_type, p.webhook_url, p.payload, p.batch_order).run(); }
+async function shopeeCreatePushPlans(env, plans) { await createPushPlans(env, 'ews_shopee_push_plans', plans); }
 async function shopeeGetPushPlans(env, tid) { return await query(env, "SELECT * FROM ews_shopee_push_plans WHERE task_id = ? ORDER BY batch_order ASC, webhook_type ASC", [tid]); }
 async function shopeeGetPendingPlans(env, tid, lim) { return await query(env, "SELECT * FROM ews_shopee_push_plans WHERE task_id = ? AND status='pending' ORDER BY batch_order ASC LIMIT ?", [tid, lim]); }
 async function shopeeUpdatePlanStatus(env, pid, s, e) { await env.DB.prepare("UPDATE ews_shopee_push_plans SET status=?, error=? WHERE id=?").bind(s, e || '', pid).run(); }

@@ -11,6 +11,7 @@ crons = ["*/1 * * * *"]
 binding = "DB"
 database_name = "baseapac"
 database_id = "8a323729-e862-4daf-b29d-24eb4f840715"
+migrations_dir = "migrations"
 
 # R2 存储桶绑定
 [[r2_buckets]]

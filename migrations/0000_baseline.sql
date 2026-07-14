@@ -74,16 +74,6 @@ CREATE INDEX IF NOT EXISTS idx_ews_tasks_created ON ews_tasks(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ews_tasks_user_created ON ews_tasks(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ews_tasks_platform_created ON ews_tasks(platform, created_at DESC);
 
-CREATE TABLE IF NOT EXISTS ews_queue_scheduler_state (
-  state_key TEXT PRIMARY KEY,
-  state_value TEXT NOT NULL DEFAULT '',
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-INSERT OR IGNORE INTO ews_queue_scheduler_state (state_key, state_value)
-  VALUES ('push_plan_last_user', '');
-INSERT OR IGNORE INTO ews_queue_scheduler_state (state_key, state_value)
-  VALUES ('push_plan_dispatch_lease', '');
-
 -- 共享回调队列：工作流回调先入队备份，处理成功后删除，失败保留重试/排查
 CREATE TABLE IF NOT EXISTS ews_callback_queue (
   id TEXT PRIMARY KEY,
@@ -229,8 +219,6 @@ CREATE TABLE IF NOT EXISTS ews_jst_push_plans (
   webhook_type TEXT NOT NULL,       -- title / sku_title / main_1 / sub_{pos} / detail_{pos} / sku_{pos}
   webhook_url TEXT NOT NULL,
   payload TEXT NOT NULL,
-  user_id TEXT NOT NULL DEFAULT '',
-  is_image INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'pending',
   error TEXT DEFAULT '',
   batch_order INTEGER NOT NULL DEFAULT 0,
@@ -243,7 +231,6 @@ CREATE TABLE IF NOT EXISTS ews_jst_push_plans (
 CREATE INDEX IF NOT EXISTS idx_jst_plans_status ON ews_jst_push_plans(task_id, status);
 CREATE INDEX IF NOT EXISTS idx_jst_plans_processing ON ews_jst_push_plans(status, processing_at);
 CREATE INDEX IF NOT EXISTS idx_jst_plans_processing_at ON ews_jst_push_plans(processing_at);
-CREATE INDEX IF NOT EXISTS idx_jst_plans_user_active ON ews_jst_push_plans(user_id, status, is_image);
 
 -- JST 导出记录
 CREATE TABLE IF NOT EXISTS ews_jst_export_records (
@@ -363,8 +350,6 @@ CREATE TABLE IF NOT EXISTS ews_shopee_push_plans (
   webhook_type TEXT NOT NULL,           -- title(metadata) / main_1 / sub_{pos} / sku_{pos}
   webhook_url TEXT NOT NULL,
   payload TEXT NOT NULL,
-  user_id TEXT NOT NULL DEFAULT '',
-  is_image INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'pending',
   error TEXT DEFAULT '',
   batch_order INTEGER NOT NULL DEFAULT 0,
@@ -377,7 +362,6 @@ CREATE TABLE IF NOT EXISTS ews_shopee_push_plans (
 CREATE INDEX IF NOT EXISTS idx_shopee_plans_status ON ews_shopee_push_plans(task_id, status);
 CREATE INDEX IF NOT EXISTS idx_shopee_plans_processing ON ews_shopee_push_plans(status, processing_at);
 CREATE INDEX IF NOT EXISTS idx_shopee_plans_processing_at ON ews_shopee_push_plans(processing_at);
-CREATE INDEX IF NOT EXISTS idx_shopee_plans_user_active ON ews_shopee_push_plans(user_id, status, is_image);
 
 -- Shopee 导出记录
 CREATE TABLE IF NOT EXISTS ews_shopee_export_records (
