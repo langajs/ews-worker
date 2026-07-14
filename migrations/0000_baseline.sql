@@ -23,13 +23,11 @@ INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_plan_timeo
 
 -- JST 默认配置
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_title_webhook', '', 'jst');
-INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_title_webhook', '', 'jst');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_main_webhook', '', 'jst');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sub_image_webhook', '', 'jst');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_detail_webhook', '', 'jst');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_image_webhook', '', 'jst');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_title_enabled', 'true', 'jst');
-INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_title_enabled', 'true', 'jst');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_image_enabled', 'true', 'jst');
 
 -- Shopee 默认配置

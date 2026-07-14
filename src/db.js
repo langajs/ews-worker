@@ -77,10 +77,10 @@ async function getTaskCount(env, platform, userId, role) {
 async function deleteTaskIndex(env, id) { await env.DB.prepare("DELETE FROM ews_tasks WHERE id = ?").bind(id).run(); }
 
 // ==================== JST 模块 ====================
-async function jstCreateTask(env, t) { await env.DB.prepare("INSERT INTO ews_jst_tasks (id, name, topic_items, description, main_description, detail_description, reference_image, auxiliary_images, generate_count, stock, weight, variant_count, main_image_count, detail_image_count, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))").bind(t.id, t.name ?? '', t.topic_items ?? '', t.description, t.main_description ?? '', t.detail_description ?? '', t.reference_image, t.auxiliary_images ?? '', t.generate_count, t.stock, t.weight, t.variant_count, t.main_image_count ?? 5, t.detail_image_count ?? 5).run(); }
+async function jstCreateTask(env, t) { await env.DB.prepare("INSERT INTO ews_jst_tasks (id, name, topic_items, source_brief, description, main_description, detail_description, reference_image, auxiliary_images, generate_count, stock, weight, variant_count, main_image_count, detail_image_count, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))").bind(t.id, t.name ?? '', t.topic_items ?? '', t.source_brief ?? t.description ?? '', t.description ?? '', t.main_description ?? '', t.detail_description ?? '', t.reference_image, t.auxiliary_images ?? '', t.generate_count, t.stock, t.weight, t.variant_count, t.main_image_count ?? 5, t.detail_image_count ?? 5).run(); }
 async function jstUpdateTask(env, tid, d) {
-  await env.DB.prepare("UPDATE ews_jst_tasks SET name=?, topic_items=?, description=?, recommended_copy=?, product_link=?, supplier_name=?, main_description=?, detail_description=?, reference_image=?, auxiliary_images=?, generate_count=?, stock=?, weight=?, variant_count=?, main_image_count=?, detail_image_count=?, product_type=?, variation_image_mode=?, mode=?, status='pending', updated_at=datetime('now') WHERE id=?")
-    .bind(d.name ?? '', d.topic_items ?? '', d.description ?? '', d.recommended_copy ?? '', d.product_link ?? '', d.supplier_name ?? '', d.main_description ?? '', d.detail_description ?? '', d.reference_image ?? '', d.auxiliary_images ?? '', d.generate_count ?? 1, d.stock ?? 999, d.weight ?? 1.0, d.variant_count ?? 1, d.main_image_count ?? 5, d.detail_image_count ?? 5, d.product_type ?? 'one', d.variation_image_mode ?? 'option1', d.mode ?? 'full', tid).run();
+  await env.DB.prepare("UPDATE ews_jst_tasks SET name=?, topic_items=?, source_brief=?, description=?, recommended_copy=?, product_link=?, supplier_name=?, main_description=?, detail_description=?, reference_image=?, auxiliary_images=?, generate_count=?, stock=?, weight=?, variant_count=?, main_image_count=?, detail_image_count=?, product_type=?, variation_image_mode=?, mode=?, status='pending', updated_at=datetime('now') WHERE id=?")
+    .bind(d.name ?? '', d.topic_items ?? '', d.source_brief ?? d.description ?? '', d.description ?? '', d.recommended_copy ?? '', d.product_link ?? '', d.supplier_name ?? '', d.main_description ?? '', d.detail_description ?? '', d.reference_image ?? '', d.auxiliary_images ?? '', d.generate_count ?? 1, d.stock ?? 999, d.weight ?? 1.0, d.variant_count ?? 1, d.main_image_count ?? 5, d.detail_image_count ?? 5, d.product_type ?? 'one', d.variation_image_mode ?? 'option1', d.mode ?? 'full', tid).run();
 }
 async function jstGetTask(env, tid) {
   const results = await env.DB.batch([
@@ -109,6 +109,8 @@ async function jstGetSubTasks(env, tid) { return await query(env, "SELECT * FROM
 async function jstUpdateSubTask(env, sid, d) {
   var sc = []; var p = [];
   if (d.title !== undefined) { sc.push('title = ?'); p.push(d.title); }
+  if (d.recommended_copy !== undefined) { sc.push('recommended_copy = ?'); p.push(d.recommended_copy); }
+  if (d.description !== undefined) { sc.push('description = ?'); p.push(d.description); }
   if (d.status !== undefined) { sc.push('status = ?'); p.push(d.status); }
   if (!sc.length) return;
   sc.push("updated_at = datetime('now')"); p.push(sid);
@@ -116,6 +118,29 @@ async function jstUpdateSubTask(env, sid, d) {
 }
 async function jstDeleteSubTasks(env, tid) { await env.DB.prepare("DELETE FROM ews_jst_sub_tasks WHERE parent_task_id = ?").bind(tid).run(); }
 async function jstCreateSkuTitle(env, s) { await env.DB.prepare("INSERT OR IGNORE INTO ews_jst_sku_titles (id, sub_task_id, variant_id, title, created_at) VALUES (?, ?, ?, ?, datetime('now'))").bind(s.id, s.sub_task_id, s.variant_id, s.title).run(); }
+async function jstSaveMetadataBatch(env, taskId, products, skuTitles) {
+  const statements = [env.DB.prepare(`WITH updates AS (
+    SELECT json_extract(value, '$.sub_task_id') AS id,
+      json_extract(value, '$.product_title') AS title,
+      json_extract(value, '$.recommended_copy') AS recommended_copy,
+      json_extract(value, '$.product_description') AS description
+    FROM json_each(?)
+  )
+  UPDATE ews_jst_sub_tasks SET
+    title=(SELECT title FROM updates WHERE updates.id=ews_jst_sub_tasks.id),
+    recommended_copy=(SELECT recommended_copy FROM updates WHERE updates.id=ews_jst_sub_tasks.id),
+    description=(SELECT description FROM updates WHERE updates.id=ews_jst_sub_tasks.id),
+    updated_at=datetime('now')
+  WHERE parent_task_id=? AND id IN (SELECT id FROM updates)`).bind(JSON.stringify(products), taskId)];
+  if (skuTitles.length > 0) {
+    statements.push(env.DB.prepare(`INSERT INTO ews_jst_sku_titles (id, sub_task_id, variant_id, title, created_at)
+      SELECT json_extract(value, '$.id'), json_extract(value, '$.sub_task_id'),
+        json_extract(value, '$.variant_id'), json_extract(value, '$.title'), datetime('now')
+      FROM json_each(?) WHERE true
+      ON CONFLICT(sub_task_id, variant_id) DO UPDATE SET title=excluded.title, created_at=datetime('now')`).bind(JSON.stringify(skuTitles)));
+  }
+  await env.DB.batch(statements);
+}
 async function jstSaveImage(env, img) { var pk = img.sub_task_id + '_' + img.image_type + '_' + img.position + '_' + (img.variant_id || ''); await env.DB.prepare("INSERT OR REPLACE INTO ews_jst_task_images (id, parent_task_id, sub_task_id, variant_id, set_index, image_type, position, image_url, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completed', datetime('now'))").bind(pk, img.parent_task_id, img.sub_task_id, img.variant_id, img.set_index, img.image_type, img.position, img.image_url).run(); }
 async function jstClearImages(env, tid) { await env.DB.prepare("DELETE FROM ews_jst_task_images WHERE parent_task_id = ?").bind(tid).run(); }
 async function jstCreateExpectedImages(env, tid, sid, si, vc, mode, mic, dic, includeMain = true, includeSub = true, includeDetail = true, includeSku = true) {
@@ -269,7 +294,7 @@ export {
   jstCreateTask, jstUpdateTask, jstGetTask, jstUpdateTaskStatus,
   jstCreateVariant, jstClearVariants, jstReplaceVariants,
   jstCreateSubTask, jstGetSubTasks, jstUpdateSubTask, jstDeleteSubTasks,
-  jstCreateSkuTitle, jstSaveImage, jstClearImages,
+  jstCreateSkuTitle, jstSaveMetadataBatch, jstSaveImage, jstClearImages,
   jstCreateExpectedImages, jstCheckSubTaskImages, jstCheckParentCompletion, jstDeleteTaskRecord,
   jstCreatePushPlans, jstGetPushPlans, jstGetPendingPlans, jstUpdatePlanStatus, jstGetPlanStats,
   jstRefundCredits,

@@ -10,7 +10,7 @@ import {
   jstCreateTask, jstUpdateTask, jstGetTask, jstUpdateTaskStatus,
   jstReplaceVariants,
   jstCreateSubTask, jstGetSubTasks, jstUpdateSubTask, jstDeleteSubTasks,
-  jstCreateSkuTitle, jstSaveImage, jstClearImages,
+  jstCreateSkuTitle, jstSaveMetadataBatch, jstSaveImage, jstClearImages,
   jstCreateExpectedImages, jstCheckSubTaskImages, jstCheckParentCompletion, jstDeleteTaskRecord,
   jstCreatePushPlans, jstGetPushPlans, jstGetPendingPlans, jstGetPlanStats,
   jstRefundCredits,
@@ -63,7 +63,6 @@ function isEnabled(value) {
 
 const USER_WORKFLOW_SWITCH_KEYS = new Set([
   'n8n_title_enabled',
-  'n8n_sku_title_enabled',
   'n8n_sku_image_enabled',
 ]);
 
@@ -804,11 +803,13 @@ async function handleUpdateTask(request, env, path) {
   }
 
   if (idx.platform === 'jst') {
-    const { name, topic_items, description, recommended_copy, product_link, supplier_name, main_description, detail_description, auxiliary_images, reference_image, generate_count, stock, weight, product_type, variation_image_mode, variants, mode, main_image_count, detail_image_count } = body || {};
+    const { name, topic_items, source_brief, description, recommended_copy, product_link, supplier_name, main_description, detail_description, auxiliary_images, reference_image, generate_count, stock, weight, product_type, variation_image_mode, variants, mode, main_image_count, detail_image_count } = body || {};
     if (!name) return error('任务名称不能为空', 400);
     if (!reference_image) return error('核心参考图不能为空', 400);
     const topicItems = String(topic_items || '').trim();
-    if (!topicItems || topicItems.length > 1000) return error('参考标题或关键词必须为1~1000字符', 400);
+    if (topicItems.length > 1000) return error('参考标题不能超过1000字符', 400);
+    const sourceBrief = String(source_brief ?? description ?? '').trim();
+    if (sourceBrief.length < 10 || sourceBrief.length > 2000) return error('商品事实必须为10~2000字符', 400);
     const productDescription = String(description || '').trim();
     if (productDescription.length > 3000) return error('商品描述不能超过3000字符', 400);
     const recommendedCopy = String(recommended_copy || '').trim();
@@ -887,7 +888,7 @@ async function handleUpdateTask(request, env, path) {
     }
 
     await jstUpdateTask(env, taskId, {
-      name: String(name).slice(0, 30), topic_items: topicItems, description: productDescription,
+      name: String(name).slice(0, 30), topic_items: topicItems, source_brief: sourceBrief, description: productDescription,
       recommended_copy: recommendedCopy, product_link: productLink, supplier_name: supplierName,
       main_description: main_description || '', detail_description: detail_description || '',
       auxiliary_images: auxiliary_images || '', reference_image,
@@ -959,6 +960,33 @@ async function handlePushTask(env, ctx, path, request) {
   return error('不支持的平台', 400);
 }
 
+function buildJstMetadataBatches(subTasks, variants, productType) {
+  const metadataVariants = productType === 'single' ? [] : variants.map(variant => ({
+    id: variant.id,
+    option1: variant.tier1_value || '',
+    option2: variant.tier2_value || '',
+    tier1_name: variant.tier1_name || '',
+    tier2_name: variant.tier2_name || '',
+    sku_description: variant.description || '',
+  }));
+  const batches = [];
+  let products = [];
+  let skuTitleCount = 0;
+  for (const subTask of subTasks) {
+    const exceedsProductLimit = products.length >= 10;
+    const exceedsSkuLimit = metadataVariants.length > 0 && skuTitleCount + metadataVariants.length > 100;
+    if (products.length > 0 && (exceedsProductLimit || exceedsSkuLimit)) {
+      batches.push({ products, variants: metadataVariants });
+      products = [];
+      skuTitleCount = 0;
+    }
+    products.push(subTask);
+    skuTitleCount += metadataVariants.length;
+  }
+  if (products.length > 0) batches.push({ products, variants: metadataVariants });
+  return batches;
+}
+
 async function jstHandlePush(env, taskId, ctx, request) {
   // [从原 index.js handlePushTask 移入，逻辑保持一致]
   const pushBody = await parseBody(request).catch(() => ({}));
@@ -974,8 +1002,7 @@ async function jstHandlePush(env, taskId, ctx, request) {
   const workflowFlags = workflowExecutionFlags(config);
   const callbackSecret = config.callback_secret || '';
   const baseUrl = `${new URL(request.url).origin}/api/callback`;
-  const titleWebhookUrl = workflowFlags.title ? config.n8n_title_webhook || '' : '';
-  const skuTitleWebhookUrl = workflowFlags.skuTitle ? config.n8n_sku_title_webhook || '' : '';
+  const metadataWebhookUrl = workflowFlags.title ? config.n8n_title_webhook || '' : '';
   const skuImageWebhookUrl = workflowFlags.skuImage ? config.n8n_sku_image_webhook || '' : '';
   const mainWebhookUrl = config.n8n_main_webhook || '';
   const subImageWebhookUrl = config.n8n_sub_image_webhook || '';
@@ -985,17 +1012,14 @@ async function jstHandlePush(env, taskId, ctx, request) {
   const generateCount = detail.generate_count || 1;
   const productType = normalizeJstProductType(detail.product_type, detail.variants || []);
   const variationImageMode = normalizeJstVariationImageMode(detail.variation_image_mode, productType);
-  const variantCount = detail.variants?.length || 0;
   const variationGroups = productType === 'single' ? [] : getJstVariationGroups(detail.variants || []);
   const skuImageGroups = variationImageMode === 'none' ? [] : variationGroups;
-  const needsSkuTitles = productType !== 'single' && variantCount > 0;
 
   const missingEnabledWebhooks = [];
-  if (workflowFlags.title && !titleWebhookUrl) missingEnabledWebhooks.push('商品标题');
-  if (workflowFlags.skuTitle && needsSkuTitles && !skuTitleWebhookUrl) missingEnabledWebhooks.push('SKU标题');
+  if (workflowFlags.title && !metadataWebhookUrl) missingEnabledWebhooks.push('商品元数据');
   if (workflowFlags.skuImage && skuImageGroups.length > 0 && !skuImageWebhookUrl) missingEnabledWebhooks.push('SKU图片');
   if (missingEnabledWebhooks.length) return error('请先配置已开启的 JST 工作流 Webhook: ' + missingEnabledWebhooks.join('、'), 400);
-  if (!titleWebhookUrl && !skuTitleWebhookUrl && !mainWebhookUrl && !subImageWebhookUrl && !detailWebhookUrl && !skuImageWebhookUrl)
+  if (!metadataWebhookUrl && !mainWebhookUrl && !subImageWebhookUrl && !detailWebhookUrl && !skuImageWebhookUrl)
     return error('请先在系统配置页配置 JST 工作流 Webhook 地址后再推送', 400);
 
   await resetGeneratedTaskArtifacts(env, taskId, 'jst');
@@ -1011,15 +1035,18 @@ async function jstHandlePush(env, taskId, ctx, request) {
   const subTasks = subTaskIds.map((id, i) => ({ sub_task_id: id, set_index: i, style_code: id.slice(0, 8) }));
   const allJobs = [];
 
-  // title
-  if (titleWebhookUrl) allJobs.push({ webhook_type: 'title', sub_task_id: subTasks[0]?.sub_task_id || "", url: titleWebhookUrl,
-    data: { task_id: taskId, reference_title: detail.topic_items || '', description: detail.description || '',
-      sub_task_count: generateCount, sub_tasks: subTasks, callback_secret: callbackSecret, callback_url: baseUrl } });
-  // sku_title
-  if (skuTitleWebhookUrl && needsSkuTitles) allJobs.push({ webhook_type: 'sku_title', sub_task_id: subTasks[0]?.sub_task_id || "", url: skuTitleWebhookUrl,
-    data: { task_id: taskId, reference_title: detail.topic_items || '', description: detail.description || '',
-      sub_task_count: generateCount, sub_tasks: subTasks, product_type: productType,
-      variants: (detail.variants||[]).map(v=>({id:v.id,name:v.tier1_value,option2:v.tier2_value||'',tier1_name:v.tier1_name||'',tier2_name:v.tier2_name||'',sku_description:v.description||''})), callback_secret: callbackSecret, callback_url: baseUrl } });
+  if (metadataWebhookUrl) {
+    const metadataBatches = buildJstMetadataBatches(subTasks, detail.variants || [], productType);
+    for (let batchIndex = 0; batchIndex < metadataBatches.length; batchIndex++) {
+      const batch = metadataBatches[batchIndex];
+      const planId = uuid();
+      allJobs.push({ plan_id: planId, webhook_type: 'metadata', sub_task_id: batch.products[0]?.sub_task_id || '', url: metadataWebhookUrl,
+        data: { task_id: taskId, plan_id: planId, batch_index: batchIndex, batch_total: metadataBatches.length,
+          source_brief: detail.source_brief || detail.description || '', reference_title: detail.topic_items || '',
+          product_type: productType, products: batch.products, variants: batch.variants,
+          callback_secret: callbackSecret, callback_url: baseUrl } });
+    }
+  }
   // main_1
   if (mainWebhookUrl) for (const st of subTasks) allJobs.push({ webhook_type: 'main_1', sub_task_id: st.sub_task_id, url: mainWebhookUrl,
     data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: detail.reference_image,
@@ -1054,8 +1081,9 @@ async function jstHandlePush(env, taskId, ctx, request) {
   const planRecords = [];
   for (let bi = 0; bi < allJobs.length; bi++) {
     const j = allJobs[bi];
-    planRecords.push({ id: uuid(), task_id: taskId, sub_task_id: j.sub_task_id, webhook_type: j.webhook_type, webhook_url: j.url || '', user_id: ownerId,
-      payload: JSON.stringify({ ...j.data, workflow_type: j.webhook_type }), batch_order: bi });
+    const planId = j.plan_id || uuid();
+    planRecords.push({ id: planId, task_id: taskId, sub_task_id: j.sub_task_id, webhook_type: j.webhook_type, webhook_url: j.url || '', user_id: ownerId,
+      payload: JSON.stringify({ ...j.data, plan_id: planId, workflow_type: j.webhook_type }), batch_order: bi });
   }
   if (planRecords.length > 0) await jstCreatePushPlans(env, planRecords);
 
@@ -1167,8 +1195,9 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
   const planRecords = [];
   for (let bi = 0; bi < allJobs.length; bi++) {
     const j = allJobs[bi];
-    planRecords.push({ id: uuid(), task_id: taskId, sub_task_id: j.sub_task_id, webhook_type: j.webhook_type, user_id: ownerId,
-      webhook_url: j.url || '', payload: JSON.stringify({ ...j.data, workflow_type: j.webhook_type }), batch_order: bi });
+    const planId = uuid();
+    planRecords.push({ id: planId, task_id: taskId, sub_task_id: j.sub_task_id, webhook_type: j.webhook_type, user_id: ownerId,
+      webhook_url: j.url || '', payload: JSON.stringify({ ...j.data, plan_id: planId, workflow_type: j.webhook_type }), batch_order: bi });
   }
   if (planRecords.length > 0) await shopeeCreatePushPlans(env, planRecords);
 
@@ -1186,36 +1215,46 @@ function workflowPlanWhereClause(flags, alias = '') {
   const column = alias ? `${alias}.webhook_type` : 'webhook_type';
   if (flags.primaryImagesOnly) return ` AND (${column}='main' OR ${column}='main_1' OR ${column} LIKE 'sub_%')`;
   const conditions = [];
-  if (!flags.title) conditions.push(`${column}<>'title'`);
-  if (!flags.skuTitle) conditions.push(`${column}<>'sku_title'`);
+  if (!flags.title) conditions.push(`${column}<>'title'`, `${column}<>'metadata'`, `${column}<>'sku_title'`);
+  else if (!flags.skuTitle) conditions.push(`${column}<>'sku_title'`);
   if (!flags.skuImage) conditions.push(`${column} NOT GLOB 'sku_[0-9]*'`);
   return conditions.length ? ` AND ${conditions.join(' AND ')}` : '';
 }
 
 const FAST_PLAN_RELEASE_BATCH = 10;
+const JST_METADATA_CONCURRENCY = 2;
 const MAX_QUEUE_USERS_PER_RUN = 100;
 const MAX_QUEUE_DISPATCHES_PER_RUN = 100;
 const QUEUE_USER_TURN_SIZE = 10;
 const PUSH_PLAN_MAX_RETRIES = 3;
 const PUSH_PLAN_RETRY_DELAYS_SECONDS = [30, 120, 300];
 
-async function getPendingPlansForRelease(env, planTable, taskId, imageLimit, flags, dispatchBudget) {
+async function getPendingPlansForRelease(env, planTable, taskId, imageLimit, metadataLimit, flags, dispatchBudget) {
   const safeTable = normalizePushPlanTable(planTable);
   const workflowWhere = workflowPlanWhereClause(flags);
   const budget = Math.max(0, parseInt(dispatchBudget) || 0);
   if (budget < 1) return { results: [] };
   const fastLimit = Math.min(FAST_PLAN_RELEASE_BATCH, budget);
   const fast = await query(env, `SELECT * FROM ${safeTable}
-    WHERE task_id=? AND status='pending' AND (next_retry_at='' OR next_retry_at<=datetime('now'))${workflowWhere} AND is_image=0
+    WHERE task_id=? AND status='pending' AND (next_retry_at='' OR next_retry_at<=datetime('now'))${workflowWhere} AND is_image=0 AND webhook_type<>'metadata'
     ORDER BY batch_order ASC, created_at ASC LIMIT ?`, [taskId, fastLimit]);
   const fastPlans = fast?.results || [];
-  const remaining = Math.max(0, budget - fastPlans.length);
+  let remaining = Math.max(0, budget - fastPlans.length);
+  const allowedMetadata = safeTable === 'ews_jst_push_plans' ? Math.min(Math.max(0, metadataLimit), remaining) : 0;
+  let metadataPlans = [];
+  if (allowedMetadata > 0) {
+    const metadata = await query(env, `SELECT * FROM ${safeTable}
+      WHERE task_id=? AND status='pending' AND (next_retry_at='' OR next_retry_at<=datetime('now'))${workflowWhere} AND webhook_type='metadata'
+      ORDER BY batch_order ASC, created_at ASC LIMIT ?`, [taskId, allowedMetadata]);
+    metadataPlans = metadata?.results || [];
+    remaining = Math.max(0, remaining - metadataPlans.length);
+  }
   const allowedImages = Math.min(Math.max(0, imageLimit), remaining);
-  if (allowedImages < 1) return { results: fastPlans };
+  if (allowedImages < 1) return { results: fastPlans.concat(metadataPlans) };
   const images = await query(env, `SELECT * FROM ${safeTable}
     WHERE task_id=? AND status='pending' AND (next_retry_at='' OR next_retry_at<=datetime('now'))${workflowWhere} AND is_image=1
     ORDER BY batch_order ASC, created_at ASC LIMIT ?`, [taskId, allowedImages]);
-  return { results: fastPlans.concat(images?.results || []) };
+  return { results: fastPlans.concat(metadataPlans, images?.results || []) };
 }
 
 async function shopeeReleaseTaskQueue(env, taskId, ctx, dispatchBudget) {
@@ -1296,6 +1335,28 @@ async function completePushPlanFromCallback(env, planTable, taskId, webhookType,
   return d1Changes(recovered) > 0;
 }
 
+async function completePushPlanByIdFromCallback(env, planTable, taskId, planId) {
+  const safeTable = normalizePushPlanTable(planTable);
+  const plan = await getOne(env, `SELECT id, status FROM ${safeTable} WHERE id=? AND task_id=?`, [planId, taskId]);
+  if (!plan) return false;
+  if (plan.status === 'done') return true;
+  if (plan.status === 'processing') {
+    const completed = await env.DB.prepare(`UPDATE ${safeTable}
+      SET status='done', error='', processing_at='', next_retry_at='', updated_at=datetime('now')
+      WHERE id=? AND task_id=? AND status='processing'`).bind(planId, taskId).run();
+    return d1Changes(completed) > 0;
+  }
+  const acceptsLateCallback = plan.status === 'pending' || plan.status === 'failed';
+  if (!acceptsLateCallback) return false;
+  const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
+  if (taskOwner?.user_id && !(await consumeUserCredit(env, taskOwner.user_id))) return false;
+  const recovered = await env.DB.prepare(`UPDATE ${safeTable}
+    SET status='done', error='Late callback accepted', processing_at='', next_retry_at='', updated_at=datetime('now')
+    WHERE id=? AND task_id=? AND status=?`).bind(planId, taskId, plan.status).run();
+  if (d1Changes(recovered) < 1 && taskOwner?.user_id) await updateUserCredits(env, taskOwner.user_id, 1, 'add');
+  return d1Changes(recovered) > 0;
+}
+
 async function getUserImageActiveCount(env, userId) {
   const active = await getOne(env, `SELECT
     ((SELECT COUNT(*) FROM ews_jst_push_plans WHERE user_id=? AND status='processing' AND is_image=1)
@@ -1303,8 +1364,22 @@ async function getUserImageActiveCount(env, userId) {
   return active?.cnt || 0;
 }
 
+async function getUserMetadataActiveCount(env, userId) {
+  const active = await getOne(env, `SELECT COUNT(*) AS cnt FROM ews_jst_push_plans
+    WHERE user_id=? AND status='processing' AND webhook_type='metadata'`, [userId]);
+  return active?.cnt || 0;
+}
+
 async function claimPushPlan(env, planTable, plan, taskId, userId, imageConcurrencyLimit) {
   const safeTable = normalizePushPlanTable(planTable);
+  if (safeTable === 'ews_jst_push_plans' && plan.webhook_type === 'metadata') {
+    const claim = await env.DB.prepare(`UPDATE ${safeTable}
+      SET status='processing', error='', processing_at=datetime('now'), next_retry_at='', updated_at=datetime('now')
+      WHERE id=? AND task_id=? AND status='pending' AND (next_retry_at='' OR next_retry_at<=datetime('now'))
+      AND (SELECT COUNT(*) FROM ews_jst_push_plans WHERE user_id=? AND status='processing' AND webhook_type='metadata') < ?`)
+      .bind(plan.id, taskId, userId, JST_METADATA_CONCURRENCY).run();
+    return d1Changes(claim) > 0;
+  }
   if (!plan.is_image) {
     const claim = await env.DB.prepare(`UPDATE ${safeTable}
       SET status='processing', error='', processing_at=datetime('now'), next_retry_at='', updated_at=datetime('now')
@@ -1347,8 +1422,10 @@ async function releaseTaskPlans(env, planTable, platform, taskId, ctx, dispatchB
   const imageConcurrencyLimit = normalizeUserImageConcurrencyLimit(workflowUser?.image_concurrency_limit);
   const imageActive = await getUserImageActiveCount(env, ownerId);
   const imageAvailable = Math.max(0, imageConcurrencyLimit - imageActive);
+  const metadataActive = platform === 'jst' ? await getUserMetadataActiveCount(env, ownerId) : 0;
+  const metadataAvailable = Math.max(0, JST_METADATA_CONCURRENCY - metadataActive);
   const budget = Math.max(1, Math.min(parseInt(dispatchBudget) || (imageConcurrencyLimit + FAST_PLAN_RELEASE_BATCH), imageConcurrencyLimit + FAST_PLAN_RELEASE_BATCH));
-  const pendingPlans = await getPendingPlansForRelease(env, planTable, taskId, imageAvailable, workflowFlags, budget);
+  const pendingPlans = await getPendingPlansForRelease(env, planTable, taskId, imageAvailable, metadataAvailable, workflowFlags, budget);
   const plans = pendingPlans?.results || [];
   let dispatched = 0;
   for (const plan of plans) {
@@ -1710,7 +1787,8 @@ function callbackWebhookType(payload) {
   return webhookType;
 }
 
-async function findProcessingCallbackPlan(env, planTable, taskId, webhookType, subTaskId) {
+async function findProcessingCallbackPlan(env, planTable, taskId, webhookType, subTaskId, planId = '') {
+  if (planId) return getOne(env, `SELECT id, retry_count FROM ${planTable} WHERE id=? AND task_id=? AND webhook_type=? AND status='processing'`, [planId, taskId, webhookType]);
   const subTaskWhere = webhookType === 'title' || webhookType === 'sku_title' ? '' : ' AND sub_task_id=?';
   const params = [taskId, webhookType];
   if (subTaskWhere) params.push(subTaskId || '');
@@ -1723,7 +1801,7 @@ async function failCallbackPushPlan(env, row, reason) {
   const webhookType = callbackWebhookType(payload);
   if (!webhookType) return;
   const planTable = row.platform === 'shopee' ? 'ews_shopee_push_plans' : 'ews_jst_push_plans';
-  const plan = await findProcessingCallbackPlan(env, planTable, row.task_id, webhookType, payload.sub_task_id);
+  const plan = await findProcessingCallbackPlan(env, planTable, row.task_id, webhookType, payload.sub_task_id, payload.plan_id);
   if (!plan) return;
   if (await markPushPlanFailed(env, planTable, plan.id, reason)) await refundTaskCredit(env, row.task_id);
 }
@@ -1732,7 +1810,7 @@ async function handleWorkflowErrorCallback(env, idx, body) {
   const webhookType = callbackWebhookType(body);
   if (!webhookType) throw callbackPermanentError('错误回调缺少 workflow_type');
   const planTable = idx.platform === 'shopee' ? 'ews_shopee_push_plans' : 'ews_jst_push_plans';
-  const plan = await findProcessingCallbackPlan(env, planTable, body.task_id, webhookType, body.sub_task_id);
+  const plan = await findProcessingCallbackPlan(env, planTable, body.task_id, webhookType, body.sub_task_id, body.plan_id);
   if (!plan) return;
   const reason = String(body.error || '工作流执行失败').trim();
   const retryable = body.retryable !== false;
@@ -1915,9 +1993,58 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
   const checkSubTaskImages = isShopee ? shopeeCheckSubTaskImages : jstCheckSubTaskImages;
   const checkParentCompletion = isShopee ? shopeeCheckParentCompletion : jstCheckParentCompletion;
 
+  if (Array.isArray(products) && !isShopee) {
+    if (callbackWebhookType(body) !== 'metadata') throw callbackPermanentError('聚水潭products回调必须使用metadata工作流');
+    const planId = String(body.plan_id || '').trim();
+    if (!planId) throw callbackPermanentError('商品元数据回调缺少plan_id');
+    const metadataPlan = await getOne(env, `SELECT id, payload FROM ews_jst_push_plans
+      WHERE id=? AND task_id=? AND webhook_type='metadata'`, [planId, task_id]);
+    if (!metadataPlan) throw callbackPermanentError('商品元数据plan_id无效或不属于当前任务');
+    let planPayload;
+    try { planPayload = JSON.parse(metadataPlan.payload || '{}'); }
+    catch (_) { throw callbackPermanentError('商品元数据计划内容无效'); }
+    const expectedProducts = Array.isArray(planPayload.products) ? planPayload.products : [];
+    const expectedVariants = Array.isArray(planPayload.variants) ? planPayload.variants : [];
+    if (products.length !== expectedProducts.length) throw callbackPermanentError(`商品元数据数量不匹配: ${products.length} vs ${expectedProducts.length}`);
+    const productsById = new Map(products.map(item => [String(item?.sub_task_id || ''), item]));
+    if (productsById.has('') || productsById.size !== products.length) throw callbackPermanentError('商品元数据的sub_task_id不能为空或重复');
+    const expectedVariantIds = new Set(expectedVariants.map(variant => String(variant?.id || '')));
+    if (expectedVariantIds.has('') || expectedVariantIds.size !== expectedVariants.length) throw callbackPermanentError('商品元数据计划的变体ID无效');
+    const normalizedProducts = [];
+    const normalizedSkuTitles = [];
+    for (let productIndex = 0; productIndex < expectedProducts.length; productIndex++) {
+      const subTaskId = String(expectedProducts[productIndex]?.sub_task_id || '');
+      const item = productsById.get(subTaskId);
+      if (!item) throw callbackPermanentError(`商品元数据缺少sub_task_id: ${subTaskId}`);
+      const productTitle = normalizeGeneratedTitles([item.product_title], 1, 1, 200, `商品标题#${productIndex + 1}`)[0];
+      const recommendedCopy = normalizeGeneratedTitles([item.recommended_copy], 1, 1, 1000, `推荐文案#${productIndex + 1}`)[0];
+      const productDescription = normalizeGeneratedTitles([item.product_description], 1, 1, 3000, `商品描述#${productIndex + 1}`)[0];
+      const skuTitles = item.sku_titles === undefined && expectedVariants.length === 0 ? [] : item.sku_titles;
+      if (!Array.isArray(skuTitles)) throw callbackPermanentError(`第${productIndex + 1}套sku_titles必须是数组`);
+      if (skuTitles.length !== expectedVariants.length) throw callbackPermanentError(`第${productIndex + 1}套SKU标题数量不匹配: ${skuTitles.length} vs ${expectedVariants.length}`);
+      const skuTitlesByVariant = new Map(skuTitles.map(sku => [String(sku?.variant_id || ''), sku]));
+      if (skuTitlesByVariant.has('') || skuTitlesByVariant.size !== skuTitles.length) throw callbackPermanentError(`第${productIndex + 1}套SKU标题的variant_id不能为空或重复`);
+      for (let variantIndex = 0; variantIndex < expectedVariants.length; variantIndex++) {
+        const variantId = String(expectedVariants[variantIndex].id);
+        const skuTitle = skuTitlesByVariant.get(variantId);
+        if (!skuTitle || !expectedVariantIds.has(variantId)) throw callbackPermanentError(`第${productIndex + 1}套缺少变体${variantId}的SKU标题`);
+        normalizedSkuTitles.push({
+          id: `${subTaskId}_${variantId}`,
+          sub_task_id: subTaskId,
+          variant_id: variantId,
+          title: normalizeGeneratedTitles([skuTitle.title], 1, 1, 30, `SKU标题#${productIndex + 1}-${variantIndex + 1}`)[0],
+        });
+      }
+      normalizedProducts.push({ sub_task_id: subTaskId, product_title: productTitle, recommended_copy: recommendedCopy, product_description: productDescription });
+    }
+    await jstSaveMetadataBatch(env, task_id, normalizedProducts, normalizedSkuTitles);
+    if (!(await completePushPlanByIdFromCallback(env, 'ews_jst_push_plans', task_id, planId))) throw new Error('商品元数据计划暂时无法完成，请稍后重试');
+    for (const item of normalizedProducts) {
+      const imageStatus = await jstCheckSubTaskImages(env, item.sub_task_id);
+      if (imageStatus.total === imageStatus.completed) await jstUpdateSubTask(env, item.sub_task_id, { status: 'completed' });
+    }
   // Shopee 商品元数据回调
-  if (Array.isArray(products)) {
-    if (!isShopee) throw callbackPermanentError('products 仅支持 Shopee 任务');
+  } else if (Array.isArray(products)) {
     const subTasks = await shopeeGetSubTasks(env, task_id);
     const allSubs = (subTasks?.results || []).sort((a,b) => a.set_index - b.set_index);
     if (products.length !== allSubs.length) throw callbackPermanentError(`商品元数据数量不匹配: ${products.length} vs ${allSubs.length}`);
@@ -1977,7 +2104,7 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
     const title = normalizeGeneratedTitles([product_title], 1, 1, 200, '商品标题')[0];
     for (const st of (subTasks?.results || [])) await updateSubTask(env, st.id, { title });
   }
-  if (products || titles || product_title) {
+  if ((products && isShopee) || titles || product_title) {
     const planTable = idx.platform === 'jst' ? 'ews_jst_push_plans' : 'ews_shopee_push_plans';
     await completePushPlanFromCallback(env, planTable, task_id, 'title');
   }
@@ -2255,8 +2382,8 @@ async function jstHandleExport(env, taskId) {
   }
   const exportResults = await env.DB.batch(exportStatements);
   const plannedTypes = new Set((exportResults[0]?.results || []).map(plan => plan.webhook_type));
-  const titlePlanned = plannedTypes.has('title');
-  const skuTitlePlanned = plannedTypes.has('sku_title');
+  const metadataPlanned = plannedTypes.has('metadata');
+  const skuTitlePlanned = metadataPlanned || plannedTypes.has('sku_title');
   const skuImagePlanned = [...plannedTypes].some(type => /^sku_\d+$/.test(type));
 
   const skuTitleMap = {};
@@ -2297,7 +2424,9 @@ async function jstHandleExport(env, taskId) {
     const subTask = subTaskMap.get(subTaskId);
     const setLabel = '第' + (setIdx + 1) + '套';
     if (!subTaskId) { addExportError(setLabel + ' 缺少子任务'); continue; }
-    if (titlePlanned && !(subTask?.title || '').trim()) addExportError(setLabel + ' 缺少AI商品标题');
+    if (!(subTask?.title || detail.topic_items || '').trim()) addExportError(setLabel + ' 缺少商品标题；请启用商品元数据工作流或填写参考标题');
+    if (metadataPlanned && !(subTask?.recommended_copy || '').trim()) addExportError(setLabel + ' 缺少AI推荐文案');
+    if (metadataPlanned && !(subTask?.description || '').trim()) addExportError(setLabel + ' 缺少AI商品描述');
     if (plannedTypes.has('main_1') && !getImg(setIdx, subTaskId, 'main', 1)) addExportError(setLabel + ' 缺少AI主图main_1');
     for (let p = 2; p <= mainImgTotal; p++) {
       if (plannedTypes.has('sub_' + p) && !getImg(setIdx, subTaskId, 'sub', p)) addExportError(setLabel + ' 缺少AI附图sub_' + p);
@@ -2343,7 +2472,8 @@ async function jstHandleExport(env, taskId) {
         '商品主图': JSON.stringify(mainUrls.filter(u => u)),
         '商品详情图': JSON.stringify(detailUrls.filter(u => u)),
         '图片地址': skuUrl, '商品名称': productTitle,
-        '推荐文案': detail.recommended_copy || '', '商品描述': detail.description || '', '宝贝链接': detail.product_link || '',
+        '推荐文案': subTask?.recommended_copy || detail.recommended_copy || '',
+        '商品描述': subTask?.description || detail.description || detail.source_brief || '', '宝贝链接': detail.product_link || '',
         '库存': variant.stock ?? detail.stock ?? 999, '重量(kg)': detail.weight ?? 1.0, '基本售价': exportPrice,
         '市场|吊牌价': variant.market_price ?? '',
         '最低分销控价': variant.min_distribution_price ?? '', '最高分销控价': variant.max_distribution_price ?? '',

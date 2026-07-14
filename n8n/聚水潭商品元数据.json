@@ -1,0 +1,191 @@
+{
+  "name": "聚水潭商品元数据",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "jst/v3-metadata",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [-384, -32],
+      "id": "1189d0e9-a64c-4e78-a8da-85a49af2a001",
+      "name": "Webhook",
+      "webhookId": "ea268e70-8d37-49ab-b275-9dfbf04b3001"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "bb9be5a9-b565-413d-89aa-50d61f817001",
+              "leftValue": "={{ $json.body.callback_secret }}",
+              "rightValue": "v3",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [-160, -32],
+      "id": "514515b6-4b78-42ad-b125-17eb9baa7002",
+      "name": "密钥校对"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { success: true, status: 'accepted' } }}",
+        "options": { "responseCode": 202 }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [64, -192],
+      "id": "876ef398-2a0b-4fb9-babf-458f0eea7003",
+      "name": "接受请求"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { success: false, error: 'callback_secret 校验失败', retryable: false } }}",
+        "options": { "responseCode": 401 }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [64, 128],
+      "id": "0e3c91f0-cbf5-49c7-8098-83e6f46f7004",
+      "name": "拒绝请求"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || {};\nconst taskId = String(body.task_id || '').trim();\nconst planId = String(body.plan_id || '').trim();\nconst sourceBrief = String(body.source_brief || '').trim();\nconst referenceTitle = String(body.reference_title || '').trim();\nconst productType = ['single', 'one', 'two'].includes(body.product_type) ? body.product_type : 'one';\nconst products = Array.isArray(body.products) ? body.products.map(item => ({\n  sub_task_id: String(item?.sub_task_id || '').trim(),\n  set_index: Number(item?.set_index) || 0,\n})) : [];\nconst variants = productType === 'single' ? [] : (Array.isArray(body.variants) ? body.variants.map(item => ({\n  id: String(item?.id || '').trim(),\n  option1: String(item?.option1 || '').trim(),\n  option2: String(item?.option2 || '').trim(),\n  tier1_name: String(item?.tier1_name || '').trim(),\n  tier2_name: String(item?.tier2_name || '').trim(),\n  sku_description: String(item?.sku_description || '').trim(),\n})) : []);\nconst callbackSecret = String(body.callback_secret || '');\nconst callbackUrl = String(body.callback_url || '').trim();\n\nif (!taskId || !planId || !callbackUrl || body.workflow_type !== 'metadata') throw new Error('缺少task_id、plan_id、callback_url或workflow_type');\nif (sourceBrief.length < 10 || sourceBrief.length > 2000) throw new Error('source_brief必须为10~2000字符');\nif (!products.length || products.length > 10 || products.some(item => !item.sub_task_id)) throw new Error('products必须包含1~10条有效记录');\nif (new Set(products.map(item => item.sub_task_id)).size !== products.length) throw new Error('products中的sub_task_id重复');\nif (variants.length > 100 || variants.some(item => !item.id || !item.option1)) throw new Error('variants包含无效记录');\nif (new Set(variants.map(item => item.id)).size !== variants.length) throw new Error('variants中的id重复');\nif (products.length * variants.length > 100) throw new Error('单批SKU标题数量不能超过100');\n\nconst outputShape = {\n  products: products.map(product => ({\n    sub_task_id: product.sub_task_id,\n    product_title: '商品标题',\n    recommended_copy: '推荐文案',\n    product_description: '商品描述',\n    sku_titles: variants.map(variant => ({ variant_id: variant.id, title: 'SKU标题' })),\n  })),\n};\nconst finalPrompt = `你是国内电商商品信息编辑。根据确定的商品事实，一次生成聚水潭模板需要的商品标题、推荐文案、商品描述和SKU标题。\n\n商品事实：\n${sourceBrief}\n\n可选参考标题：\n${referenceTitle || '无'}\n\n本批商品：\n${JSON.stringify(products, null, 2)}\n\n规格组合：\n${JSON.stringify(variants, null, 2)}\n\n严格输出结构：\n${JSON.stringify(outputShape, null, 2)}\n\n要求：\n1. 只输出一个严格JSON对象，不要Markdown、代码围栏、注释或解释。\n2. products必须严格保留输入的sub_task_id和数量，不得增删、改写或重复。\n3. 每套商品生成有差异但事实一致的product_title，长度1~200字符，符合国内电商搜索习惯，不堆砌无关词。\n4. recommended_copy长度1~1000字符，product_description长度1~3000字符，只使用商品事实中明确的信息。\n5. 禁止虚构品牌、材质、认证、产地、赠品、保修、疗效、销量、价格或夸大承诺。\n6. 每套sku_titles必须严格保留全部variant_id及数量；title长度1~30字符，清楚包含对应完整规格值，可追加简短事实卖点。\n7. 同一一级规格在二维组合中含义必须一致，不得合并、拆分或改写规格组合。\n8. variants为空时，每套sku_titles必须返回空数组。`;\n\nreturn { taskId, planId, products, variants, finalPrompt, callbackSecret, callbackUrl };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [288, -32],
+      "id": "f52f4d5c-758a-40df-b08b-77e049977005",
+      "name": "提取参数",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.deepseek.com/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: 'deepseek-v4-flash', messages: [{ role: 'system', content: '你只输出符合要求的严格JSON，不输出Markdown或解释。' }, { role: 'user', content: $json.finalPrompt }], stream: false } }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [512, -32],
+      "id": "5b8822eb-07fa-420a-a7e0-136012897006",
+      "name": "deepseek-v4-flash",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "httpHeaderAuth": { "id": "11xE3AjgQ1iUHDdR", "name": "deepseek" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst original = $node['提取参数'].json;\nlet content = response?.choices?.[0]?.message?.content;\nif (typeof content !== 'string') throw new Error('模型未返回商品元数据');\ncontent = content.replace(/```json\\s*/gi, '').replace(/```/g, '').trim();\nlet parsed;\ntry { parsed = JSON.parse(content); } catch (_) { throw new Error('商品元数据不是合法JSON对象'); }\nif (!parsed || Array.isArray(parsed) || !Array.isArray(parsed.products)) throw new Error('商品元数据必须包含products数组');\nif (parsed.products.length !== original.products.length) throw new Error(`products数量不匹配: ${parsed.products.length}/${original.products.length}`);\nconst productMap = new Map(parsed.products.map(item => [String(item?.sub_task_id || ''), item]));\nif (productMap.has('') || productMap.size !== parsed.products.length) throw new Error('products中的sub_task_id缺失或重复');\nconst variantIds = new Set(original.variants.map(item => item.id));\nconst normalize = (value, min, max, label) => {\n  const text = String(value || '').replace(/\\s+/g, ' ').trim();\n  if (text.length < min || text.length > max) throw new Error(`${label}长度必须为${min}~${max}字符`);\n  return text;\n};\nconst products = original.products.map((source, productIndex) => {\n  const item = productMap.get(source.sub_task_id);\n  if (!item) throw new Error(`缺少sub_task_id: ${source.sub_task_id}`);\n  if (!Array.isArray(item.sku_titles) || item.sku_titles.length !== original.variants.length) throw new Error(`第${productIndex + 1}套sku_titles数量不匹配`);\n  const skuMap = new Map(item.sku_titles.map(sku => [String(sku?.variant_id || ''), sku]));\n  if (skuMap.has('') || skuMap.size !== item.sku_titles.length) throw new Error(`第${productIndex + 1}套variant_id缺失或重复`);\n  const skuTitles = original.variants.map((variant, variantIndex) => {\n    const sku = skuMap.get(variant.id);\n    if (!sku || !variantIds.has(variant.id)) throw new Error(`第${productIndex + 1}套缺少变体${variant.id}`);\n    return { variant_id: variant.id, title: normalize(sku.title, 1, 30, `SKU标题#${productIndex + 1}-${variantIndex + 1}`) };\n  });\n  return {\n    sub_task_id: source.sub_task_id,\n    product_title: normalize(item.product_title, 1, 200, `商品标题#${productIndex + 1}`),\n    recommended_copy: normalize(item.recommended_copy, 1, 1000, `推荐文案#${productIndex + 1}`),\n    product_description: normalize(item.product_description, 1, 3000, `商品描述#${productIndex + 1}`),\n    sku_titles: skuTitles,\n  };\n});\nreturn { callback_secret: original.callbackSecret, task_id: original.taskId, plan_id: original.planId, workflow_type: 'metadata', products, callbackUrl: original.callbackUrl };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [736, -32],
+      "id": "c4033b3a-4045-4f8a-be91-59cf1cdc7007",
+      "name": "校验商品元数据",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.callbackUrl }}",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "Content-Type", "value": "application/json" }] },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { callback_secret: $json.callback_secret, task_id: $json.task_id, plan_id: $json.plan_id, workflow_type: $json.workflow_type, products: $json.products } }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [960, -96],
+      "id": "6270512a-815d-4a3a-98b3-5259224a7008",
+      "name": "成功回调",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $node['Webhook'].json.body || {};\nconst input = $input.first().json || {};\nconst message = String(input.error?.message || input.message || input.error || '商品元数据工作流执行失败').slice(0, 500);\nreturn { callback_secret: String(body.callback_secret || ''), task_id: String(body.task_id || ''), plan_id: String(body.plan_id || ''), workflow_type: 'metadata', error: message, retryable: true, callbackUrl: String(body.callback_url || '') };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [736, 192],
+      "id": "7f9030d0-dbb2-4db9-acd2-d16dcc4e7009",
+      "name": "失败封装"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.callbackUrl }}",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [{ "name": "Content-Type", "value": "application/json" }] },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { callback_secret: $json.callback_secret, task_id: $json.task_id, plan_id: $json.plan_id, workflow_type: $json.workflow_type, error: $json.error, retryable: $json.retryable } }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [960, 192],
+      "id": "63fd0941-9592-4f25-b88a-74e7b9e37010",
+      "name": "失败回调",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "密钥校对", "type": "main", "index": 0 }]] },
+    "密钥校对": { "main": [[{ "node": "接受请求", "type": "main", "index": 0 }], [{ "node": "拒绝请求", "type": "main", "index": 0 }]] },
+    "接受请求": { "main": [[{ "node": "提取参数", "type": "main", "index": 0 }]] },
+    "提取参数": { "main": [[{ "node": "deepseek-v4-flash", "type": "main", "index": 0 }], [{ "node": "失败封装", "type": "main", "index": 0 }]] },
+    "deepseek-v4-flash": { "main": [[{ "node": "校验商品元数据", "type": "main", "index": 0 }], [{ "node": "失败封装", "type": "main", "index": 0 }]] },
+    "校验商品元数据": { "main": [[{ "node": "成功回调", "type": "main", "index": 0 }], [{ "node": "失败封装", "type": "main", "index": 0 }]] },
+    "失败封装": { "main": [[{ "node": "失败回调", "type": "main", "index": 0 }]] }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "f514cdf5-2a13-4241-8d78-e6b861ad7011",
+  "meta": null,
+  "nodeGroups": [],
+  "id": "jstMetadataV3",
+  "tags": []
+}
