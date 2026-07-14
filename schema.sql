@@ -18,13 +18,8 @@ INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('jwt_secret_name
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('r2_public_url', 'https://oss.langaj.work', '');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('admin_password', '$2a$10$EWS_DEFAULT_HASH', '');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('callback_secret', '', '');
-INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_global_max_active', '20', '');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_primary_images_only', 'false', '');
-INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_release_per_minute', '6', '');
-INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_release_per_task_per_minute', '2', '');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_plan_timeout_minutes', '20', '');
-INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('image_queue_max_active', '6', '');
-INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('image_queue_batch_size', '6', '');
 
 -- JST 默认配置
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_title_webhook', '', 'jst');
@@ -36,7 +31,6 @@ INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_image_w
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_title_enabled', 'true', 'jst');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_title_enabled', 'true', 'jst');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_image_enabled', 'true', 'jst');
-INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_batch_size', '20', 'jst');
 
 -- Shopee 默认配置
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_title_webhook', '', 'shopee');
@@ -45,7 +39,6 @@ INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sub_image_w
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_image_webhook', '', 'shopee');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_title_enabled', 'true', 'shopee');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_image_enabled', 'true', 'shopee');
-INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_batch_size', '20', 'shopee');
 
 -- 共享用户表
 CREATE TABLE IF NOT EXISTS ews_users (
@@ -55,6 +48,7 @@ CREATE TABLE IF NOT EXISTS ews_users (
   role TEXT NOT NULL DEFAULT 'user',      -- admin / user
   display_name TEXT DEFAULT '',
   platform_access TEXT NOT NULL DEFAULT 'allow', -- allow / jst / shopee
+  image_concurrency_limit INTEGER NOT NULL DEFAULT 20,
   webhook_config TEXT DEFAULT '{}',       -- JSON: {"jst":{...}, "shopee":{...}}
   is_active INTEGER NOT NULL DEFAULT 1,
   credits INTEGER NOT NULL DEFAULT 200,
