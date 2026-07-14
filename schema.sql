@@ -39,13 +39,10 @@ INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_batch_size
 
 -- Shopee 默认配置
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_title_webhook', '', 'shopee');
-INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_title_webhook', '', 'shopee');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_main_webhook', '', 'shopee');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sub_image_webhook', '', 'shopee');
-INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_detail_webhook', '', 'shopee');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_image_webhook', '', 'shopee');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_title_enabled', 'true', 'shopee');
-INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_title_enabled', 'true', 'shopee');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_image_enabled', 'true', 'shopee');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_batch_size', '20', 'shopee');
 
@@ -249,9 +246,7 @@ CREATE TABLE IF NOT EXISTS ews_shopee_products (
   task_id TEXT NOT NULL,
   category_id TEXT NOT NULL DEFAULT '',
   name TEXT NOT NULL,
-  description TEXT NOT NULL DEFAULT '',
   main_description TEXT NOT NULL DEFAULT '',
-  detail_description TEXT NOT NULL DEFAULT '',
   reference_title TEXT NOT NULL DEFAULT '',
   reference_image TEXT NOT NULL DEFAULT '',
   auxiliary_images TEXT NOT NULL DEFAULT '[]',
@@ -273,10 +268,9 @@ CREATE TABLE IF NOT EXISTS ews_shopee_products (
   origin_country TEXT NOT NULL DEFAULT '',
   variation_name1 TEXT NOT NULL DEFAULT '',  -- 第一层规格名
   variation_name2 TEXT NOT NULL DEFAULT '',  -- 第二层规格名
-  variation_image_mode TEXT NOT NULL DEFAULT 'option1', -- option1 / none / combination_legacy
+  variation_image_mode TEXT NOT NULL DEFAULT 'option1', -- option1 / none
   source_brief TEXT NOT NULL DEFAULT '',
-  schema_version INTEGER NOT NULL DEFAULT 1,
-  product_type TEXT NOT NULL DEFAULT 'variant', -- single / one / two / legacy variant
+  product_type TEXT NOT NULL DEFAULT 'one', -- single / one / two
   variation_name1_export TEXT NOT NULL DEFAULT '',
   variation_name2_export TEXT NOT NULL DEFAULT '',
   max_purchase_qty INTEGER,
@@ -328,18 +322,6 @@ CREATE TABLE IF NOT EXISTS ews_shopee_sub_tasks (
   FOREIGN KEY (parent_task_id) REFERENCES ews_tasks(id) ON DELETE CASCADE
 );
 
--- Shopee SKU 标题
-CREATE TABLE IF NOT EXISTS ews_shopee_sku_titles (
-  id TEXT PRIMARY KEY,
-  sub_task_id TEXT NOT NULL,
-  variation_id TEXT NOT NULL,
-  title TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  FOREIGN KEY (sub_task_id) REFERENCES ews_shopee_sub_tasks(id) ON DELETE CASCADE,
-  FOREIGN KEY (variation_id) REFERENCES ews_shopee_variations(id) ON DELETE CASCADE
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_shopee_sku_titles_unique ON ews_shopee_sku_titles(sub_task_id, variation_id);
-
 -- Shopee 图片记录（对标 JST task_images）
 CREATE TABLE IF NOT EXISTS ews_shopee_task_images (
   id TEXT PRIMARY KEY,
@@ -360,7 +342,7 @@ CREATE TABLE IF NOT EXISTS ews_shopee_push_plans (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL,
   sub_task_id TEXT NOT NULL DEFAULT '',
-  webhook_type TEXT NOT NULL,           -- title(metadata) / sku_title(legacy) / main_1 / sub_{pos} / detail_{pos}(legacy) / sku_{pos}
+  webhook_type TEXT NOT NULL,           -- title(metadata) / main_1 / sub_{pos} / sku_{pos}
   webhook_url TEXT NOT NULL,
   payload TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',
