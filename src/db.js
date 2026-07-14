@@ -85,12 +85,38 @@ const SHOPEE_VARIATION_COLUMNS = [
   ['option1_export', "TEXT NOT NULL DEFAULT ''"],
   ['option2_export', "TEXT NOT NULL DEFAULT ''"],
 ];
+const JST_TASK_COLUMNS = [
+  ['recommended_copy', "TEXT NOT NULL DEFAULT ''"],
+  ['product_link', "TEXT NOT NULL DEFAULT ''"],
+  ['supplier_name', "TEXT NOT NULL DEFAULT ''"],
+  ['product_type', "TEXT NOT NULL DEFAULT 'one'"],
+  ['variation_image_mode', "TEXT NOT NULL DEFAULT 'option1'"],
+];
+const JST_VARIATION_COLUMNS = [
+  ...PRICE_FLOAT_COLUMNS,
+  ['sku_image', "TEXT NOT NULL DEFAULT ''"],
+  ['market_price', 'REAL'],
+  ['min_distribution_price', 'REAL'],
+  ['max_distribution_price', 'REAL'],
+  ['stock', 'INTEGER NOT NULL DEFAULT 999'],
+  ['sku_code', "TEXT NOT NULL DEFAULT ''"],
+];
+let jstTaskColumnsReady = false;
+async function ensureJstTaskColumns(env) {
+  if (jstTaskColumnsReady) return;
+  for (const [name, type] of JST_TASK_COLUMNS) {
+    try { await env.DB.prepare(`ALTER TABLE ews_jst_tasks ADD COLUMN ${name} ${type}`).run(); } catch (_) {}
+  }
+  jstTaskColumnsReady = true;
+}
 let jstVariantColumnsReady = false;
 async function ensureJstVariantColumns(env) {
   if (jstVariantColumnsReady) return;
-  for (const [name, type] of PRICE_FLOAT_COLUMNS) {
+  for (const [name, type] of JST_VARIATION_COLUMNS) {
     try { await env.DB.prepare(`ALTER TABLE ews_jst_variants ADD COLUMN ${name} ${type}`).run(); } catch (_) {}
   }
+  try { await env.DB.prepare("UPDATE ews_jst_variants SET sku_image=white_bg_image WHERE sku_image='' AND white_bg_image<>''").run(); } catch (_) {}
+  try { await env.DB.prepare('ALTER TABLE ews_jst_variants DROP COLUMN white_bg_image').run(); } catch (_) {}
   jstVariantColumnsReady = true;
 }
 let shopeeVariationColumnsReady = false;
@@ -104,8 +130,13 @@ async function ensureShopeeVariationColumns(env) {
 
 // ==================== JST 模块 ====================
 async function jstCreateTask(env, t) { await env.DB.prepare("INSERT INTO ews_jst_tasks (id, name, topic_items, description, main_description, detail_description, reference_image, auxiliary_images, generate_count, stock, weight, variant_count, main_image_count, detail_image_count, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))").bind(t.id, t.name ?? '', t.topic_items ?? '', t.description, t.main_description ?? '', t.detail_description ?? '', t.reference_image, t.auxiliary_images ?? '', t.generate_count, t.stock, t.weight, t.variant_count, t.main_image_count ?? 5, t.detail_image_count ?? 5).run(); }
-async function jstUpdateTask(env, tid, d) { await env.DB.prepare("UPDATE ews_jst_tasks SET name=?, topic_items=?, description=?, main_description=?, detail_description=?, reference_image=?, auxiliary_images=?, generate_count=?, stock=?, weight=?, variant_count=?, main_image_count=?, detail_image_count=?, mode=?, status='pending', updated_at=datetime('now') WHERE id=?").bind(d.name ?? '', d.topic_items ?? '', d.description ?? '', d.main_description ?? '', d.detail_description ?? '', d.reference_image ?? '', d.auxiliary_images ?? '', d.generate_count ?? 1, d.stock ?? 999, d.weight ?? 1.0, d.variant_count ?? 1, d.main_image_count ?? 5, d.detail_image_count ?? 5, d.mode ?? 'full', tid).run(); }
+async function jstUpdateTask(env, tid, d) {
+  await ensureJstTaskColumns(env);
+  await env.DB.prepare("UPDATE ews_jst_tasks SET name=?, topic_items=?, description=?, recommended_copy=?, product_link=?, supplier_name=?, main_description=?, detail_description=?, reference_image=?, auxiliary_images=?, generate_count=?, stock=?, weight=?, variant_count=?, main_image_count=?, detail_image_count=?, product_type=?, variation_image_mode=?, mode=?, status='pending', updated_at=datetime('now') WHERE id=?")
+    .bind(d.name ?? '', d.topic_items ?? '', d.description ?? '', d.recommended_copy ?? '', d.product_link ?? '', d.supplier_name ?? '', d.main_description ?? '', d.detail_description ?? '', d.reference_image ?? '', d.auxiliary_images ?? '', d.generate_count ?? 1, d.stock ?? 999, d.weight ?? 1.0, d.variant_count ?? 1, d.main_image_count ?? 5, d.detail_image_count ?? 5, d.product_type ?? 'one', d.variation_image_mode ?? 'option1', d.mode ?? 'full', tid).run();
+}
 async function jstGetTask(env, tid) {
+  await ensureJstTaskColumns(env);
   await ensureJstVariantColumns(env);
   const t = await getOne(env, "SELECT * FROM ews_jst_tasks WHERE id = ?", [tid]); if (!t) return null;
   t.variants = (await query(env, "SELECT * FROM ews_jst_variants WHERE task_id = ? ORDER BY sort_order", [tid])).results;
@@ -114,12 +145,12 @@ async function jstGetTask(env, tid) {
   return t;
 }
 async function jstUpdateTaskStatus(env, tid, s) { await env.DB.prepare("UPDATE ews_jst_tasks SET status=?, updated_at=datetime('now') WHERE id=?").bind(s, tid).run(); }
-async function jstCreateVariant(env, v) { await ensureJstVariantColumns(env); await env.DB.prepare("INSERT INTO ews_jst_variants (id, task_id, tier1_name, tier1_value, tier2_name, tier2_value, white_bg_image, price, price_float_enabled, price_min, price_max, price_precision, description, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))").bind(v.id, v.task_id, v.tier1_name || '', v.tier1_value, v.tier2_name || '', v.tier2_value || '', v.white_bg_image, v.price ?? null, v.price_float_enabled ? 1 : 0, v.price_min ?? null, v.price_max ?? null, v.price_precision ?? 0, v.description ?? '', v.sort_order).run(); }
+async function jstCreateVariant(env, v) { await ensureJstVariantColumns(env); await env.DB.prepare("INSERT INTO ews_jst_variants (id, task_id, tier1_name, tier1_value, tier2_name, tier2_value, sku_image, price, market_price, min_distribution_price, max_distribution_price, stock, sku_code, price_float_enabled, price_min, price_max, price_precision, description, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))").bind(v.id, v.task_id, v.tier1_name || '', v.tier1_value, v.tier2_name || '', v.tier2_value || '', v.sku_image || '', v.price ?? null, v.market_price ?? null, v.min_distribution_price ?? null, v.max_distribution_price ?? null, v.stock ?? 999, v.sku_code || '', v.price_float_enabled ? 1 : 0, v.price_min ?? null, v.price_max ?? null, v.price_precision ?? 0, v.description ?? '', v.sort_order).run(); }
 async function jstClearVariants(env, tid) { await env.DB.prepare("DELETE FROM ews_jst_variants WHERE task_id = ?").bind(tid).run(); }
 async function jstReplaceVariants(env, tid, variants) {
   await ensureJstVariantColumns(env);
   const statements = [env.DB.prepare("DELETE FROM ews_jst_variants WHERE task_id = ?").bind(tid)];
-  for (const v of variants) statements.push(env.DB.prepare("INSERT INTO ews_jst_variants (id, task_id, tier1_name, tier1_value, tier2_name, tier2_value, white_bg_image, price, price_float_enabled, price_min, price_max, price_precision, description, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))").bind(v.id, v.task_id, v.tier1_name || '', v.tier1_value, v.tier2_name || '', v.tier2_value || '', v.white_bg_image, v.price ?? null, v.price_float_enabled ? 1 : 0, v.price_min ?? null, v.price_max ?? null, v.price_precision ?? 0, v.description ?? '', v.sort_order));
+  for (const v of variants) statements.push(env.DB.prepare("INSERT INTO ews_jst_variants (id, task_id, tier1_name, tier1_value, tier2_name, tier2_value, sku_image, price, market_price, min_distribution_price, max_distribution_price, stock, sku_code, price_float_enabled, price_min, price_max, price_precision, description, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))").bind(v.id, v.task_id, v.tier1_name || '', v.tier1_value, v.tier2_name || '', v.tier2_value || '', v.sku_image || '', v.price ?? null, v.market_price ?? null, v.min_distribution_price ?? null, v.max_distribution_price ?? null, v.stock ?? 999, v.sku_code || '', v.price_float_enabled ? 1 : 0, v.price_min ?? null, v.price_max ?? null, v.price_precision ?? 0, v.description ?? '', v.sort_order));
   await env.DB.batch(statements);
 }
 async function jstCreateSubTask(env, s) { await env.DB.prepare("INSERT INTO ews_jst_sub_tasks (id, parent_task_id, set_index, status, created_at, updated_at) VALUES (?, ?, ?, 'pending', datetime('now'), '')").bind(s.id, s.parent_task_id, s.set_index).run(); }

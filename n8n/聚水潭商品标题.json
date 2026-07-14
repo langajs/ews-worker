@@ -1,0 +1,302 @@
+[
+  {
+    "updatedAt": "2026-07-01T09:00:52.424Z",
+    "createdAt": "2026-06-26T02:35:59.697Z",
+    "id": "IC05JuNsVsVtDIUE",
+    "name": "聚水潭商品标题",
+    "description": null,
+    "active": true,
+    "isArchived": false,
+    "nodes": [
+      {
+        "parameters": {
+          "jsCode": "const response = $input.first().json;\nconst content = String(response?.choices?.[0]?.message?.content || '')\n  .replace(/```json\\s*/gi, '')\n  .replace(/```/g, '')\n  .trim();\nconst original = $node['提取参数'].json;\n\nlet generated = [];\ntry {\n  const parsed = JSON.parse(content);\n  if (Array.isArray(parsed)) generated = parsed;\n} catch (_) {}\n\nconst titles = Array.from({ length: original.subTaskCount }, (_, index) => {\n  const value = String(generated[index] || '').trim() || original.referenceTitle;\n  return Array.from(value).slice(0, 100).join('');\n});\n\nreturn {\n  callback_secret: original.callbackSecret,\n  task_id: original.taskId,\n  titles,\n  callbackUrl: original.callbackUrl,\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          512,
+          -32
+        ],
+        "id": "b71c4ef9-9a12-4635-bce9-cbc36f539199",
+        "name": "提取标题列表"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "={{ $json.callbackUrl }}",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ {\n  callback_secret: $json.callback_secret,\n  task_id: $json.task_id,\n  titles: $json.titles\n} }}",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          736,
+          -32
+        ],
+        "id": "ce5cd7d4-4624-4232-bd08-d70f275bdcf8",
+        "name": "callback"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "https://api.deepseek.com/chat/completions",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={\n  \"model\": \"deepseek-v4-flash\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"你是一位专业的电商标题撰写师。根据参考标题和数量要求，生成符合国内电商平台（天猫、淘宝、拼多多）风格的商品标题。必须严格按照格式要求输出，只返回 JSON 数组。\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"请根据要求生成 {{ $json.subTaskCount }} 个不同的商品标题：\\n\\n参考标题：\\n{{ $json.referenceTitle }}\\n\\n商品描述：{{ $json.description }}\\n\\n要求：\\n1. 每个标题不超过60个字符(每个汉字算2个字符)\\n2. 标题要包含核心关键词，突出卖点\\n3. 同一批次的标题要有差异化\\n4. 符合国内电商搜索习惯\\n5. 仅返回一个 JSON 数组，数组元素为字符串，每个字符串是一个标题。格式示例：[\\\"标题1\\\", \\\"标题2\\\", ...]。不要包含序号、说明或其他任何额外文本。\"\n    }\n  ],\n  \"stream\": false\n}",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          288,
+          -32
+        ],
+        "id": "eedc45c0-f528-4ae6-a2d2-0e61c49e3ed2",
+        "name": "deepseek-v4-flash",
+        "credentials": {
+          "deepSeekApi": {
+            "id": "4ZXM8BC43I2LUKnz",
+            "name": "DeepSeek account"
+          },
+          "httpHeaderAuth": {
+            "id": "11xE3AjgQ1iUHDdR",
+            "name": "deepseek"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const body = $input.first().json.body || {};\n\nconst taskId = String(body.task_id || '').trim();\nconst referenceTitle = String(body.reference_title || '').trim();\nconst description = String(body.description || '').trim();\nconst subTaskCount = parseInt(body.sub_task_count) || 1;\nconst callbackSecret = String(body.callback_secret || '');\nconst callbackUrl = String(body.callback_url || '').trim();\n\nif (!taskId || !referenceTitle || !callbackUrl || subTaskCount < 1) {\n  throw new Error('商品标题任务参数不完整');\n}\n\nreturn { taskId, referenceTitle, description, subTaskCount, callbackSecret, callbackUrl };"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          64,
+          -32
+        ],
+        "id": "3ad61a51-0554-4b79-b375-63992db54eb0",
+        "name": "提取参数"
+      },
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "title",
+          "options": {},
+          "responseMode": "responseNode"
+        },
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2.1,
+        "position": [
+          -384,
+          -32
+        ],
+        "id": "c72f8ef2-5043-422e-9100-bdb1c6cb2361",
+        "name": "test-title",
+        "webhookId": "aeb79375-656d-4f04-bf42-c924b8d49093"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 3
+            },
+            "conditions": [
+              {
+                "id": "7d8441ca-8e3d-459a-b083-4d27d3f612f1",
+                "leftValue": "={{ $json.body.callback_secret }}",
+                "rightValue": "v3",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals",
+                  "name": "filter.operator.equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          -160,
+          -32
+        ],
+        "id": "1685de9d-1896-4c9b-9b5e-540b6688c70c",
+        "name": "密钥校对"
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ { success: true, status: 'accepted' } }}",
+          "options": {
+            "responseCode": 202
+          }
+        },
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.4,
+        "position": [
+          64,
+          -192
+        ],
+        "id": "a5100000-0000-4000-8000-000000000001",
+        "name": "接受请求"
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ { success: false, error: 'callback_secret 校验失败', retryable: false } }}",
+          "options": {
+            "responseCode": 401
+          }
+        },
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.4,
+        "position": [
+          64,
+          128
+        ],
+        "id": "b5100000-0000-4000-8000-000000000001",
+        "name": "拒绝请求"
+      }
+    ],
+    "connections": {
+      "提取标题列表": {
+        "main": [
+          [
+            {
+              "node": "callback",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "deepseek-v4-flash": {
+        "main": [
+          [
+            {
+              "node": "提取标题列表",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "提取参数": {
+        "main": [
+          [
+            {
+              "node": "deepseek-v4-flash",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "test-title": {
+        "main": [
+          [
+            {
+              "node": "密钥校对",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "密钥校对": {
+        "main": [
+          [
+            {
+              "node": "接受请求",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "拒绝请求",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "接受请求": {
+        "main": [
+          [
+            {
+              "node": "提取参数",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "binaryMode": "separate",
+      "availableInMCP": false
+    },
+    "staticData": null,
+    "meta": null,
+    "nodeGroups": [],
+    "pinData": {},
+    "versionId": "9ccd34a5-97c2-4d1d-97ba-8b9144d31a8b",
+    "activeVersionId": "9ccd34a5-97c2-4d1d-97ba-8b9144d31a8b",
+    "versionCounter": 120,
+    "triggerCount": 1,
+    "sourceWorkflowId": null,
+    "tags": [
+      {
+        "updatedAt": "2026-07-01T08:59:46.679Z",
+        "createdAt": "2026-07-01T08:59:46.679Z",
+        "id": "UM8CfYPKINtnZnA2",
+        "name": "标题"
+      }
+    ],
+    "shared": [
+      {
+        "updatedAt": "2026-06-26T02:35:59.701Z",
+        "createdAt": "2026-06-26T02:35:59.701Z",
+        "role": "workflow:owner",
+        "workflowId": "IC05JuNsVsVtDIUE",
+        "projectId": "7pgjkWZDJjE23ef8",
+        "project": {
+          "updatedAt": "2026-07-02T18:18:12.806Z",
+          "createdAt": "2026-06-10T16:33:34.027Z",
+          "id": "7pgjkWZDJjE23ef8",
+          "name": "John Wick <aigc@langaj.cc>",
+          "type": "personal",
+          "icon": null,
+          "description": null,
+          "customTelemetryTags": [],
+          "creatorId": "35283dd6-17ca-4173-9539-a165a314ae27"
+        }
+      }
+    ],
+    "versionMetadata": {
+      "name": "Version 9ccd34a5",
+      "description": ""
+    }
+  }
+]

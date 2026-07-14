@@ -128,6 +128,9 @@ CREATE TABLE IF NOT EXISTS ews_jst_tasks (
   name TEXT NOT NULL DEFAULT '',
   topic_items TEXT NOT NULL DEFAULT '',
   description TEXT DEFAULT '',
+  recommended_copy TEXT NOT NULL DEFAULT '',
+  product_link TEXT NOT NULL DEFAULT '',
+  supplier_name TEXT NOT NULL DEFAULT '',
   main_description TEXT NOT NULL DEFAULT '',
   detail_description TEXT NOT NULL DEFAULT '',
   reference_image TEXT NOT NULL,
@@ -138,6 +141,8 @@ CREATE TABLE IF NOT EXISTS ews_jst_tasks (
   variant_count INTEGER NOT NULL DEFAULT 1,
   main_image_count INTEGER NOT NULL DEFAULT 5,
   detail_image_count INTEGER NOT NULL DEFAULT 5,
+  product_type TEXT NOT NULL DEFAULT 'one', -- single / one / two
+  variation_image_mode TEXT NOT NULL DEFAULT 'option1', -- option1 / none
   mode TEXT NOT NULL DEFAULT 'full',       -- full / dedup
   status TEXT NOT NULL DEFAULT 'pending',
   queue_mode TEXT NOT NULL DEFAULT 'auto',
@@ -165,8 +170,13 @@ CREATE TABLE IF NOT EXISTS ews_jst_variants (
   tier1_value TEXT NOT NULL,               -- 第一层规格值（如"红色"，旧数据迁移自此）
   tier2_name TEXT NOT NULL DEFAULT '',      -- 第二层规格名（如"尺码"）
   tier2_value TEXT NOT NULL DEFAULT '',     -- 第二层规格值（如"M"）
-  white_bg_image TEXT NOT NULL,
+  sku_image TEXT NOT NULL DEFAULT '',
   price REAL,
+  market_price REAL,
+  min_distribution_price REAL,
+  max_distribution_price REAL,
+  stock INTEGER NOT NULL DEFAULT 999,
+  sku_code TEXT NOT NULL DEFAULT '',
   price_float_enabled INTEGER NOT NULL DEFAULT 0,
   price_min REAL,
   price_max REAL,

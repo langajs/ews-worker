@@ -497,10 +497,14 @@ async function handleDeleteUser(request, env, path) {
 function getTaskId(path) { return path.split('/')[3]; }
 
 const MAX_GENERATE_COUNT = 100;
-const MAX_JST_VARIANTS = 10;
+const MAX_JST_VARIATIONS = 100;
 const MAX_SHOPEE_VARIATIONS = 50;
 const SHOPEE_DESCRIPTION_MIN_LENGTH = 100;
 const SHOPEE_DESCRIPTION_MAX_LENGTH = 3000;
+const JST_TEMPLATE_COLUMNS = Object.freeze([
+  '款式编码','商品编码','颜色','规格','商品主图','商品详情图','图片地址','商品名称','推荐文案','商品描述','宝贝链接',
+  '库存','重量(kg)','基本售价','市场|吊牌价','最低分销控价','最高分销控价','供应商名','3:4主图','长图','透明素材图','白底图',
+]);
 
 function normalizeShopeeVariationImageMode(value, fallback = 'option1') {
   return ['option1','none'].includes(value) ? value : fallback;
@@ -536,6 +540,35 @@ function getShopeeVariationGroups(variations, imageMode) {
       groups.push(group);
     }
     if (!group.image && variation.image_per_variation) group.image = variation.image_per_variation;
+    group.variations.push(variation);
+  }
+  return groups;
+}
+
+function normalizeJstProductType(value, variations) {
+  if (['single','one','two'].includes(value)) return value;
+  if ((variations || []).some(variation => String(variation?.tier2_value || '').trim())) return 'two';
+  return 'one';
+}
+
+function normalizeJstVariationImageMode(value, productType) {
+  if (productType === 'single') return 'none';
+  return value === 'none' ? 'none' : 'option1';
+}
+
+function getJstVariationGroups(variations) {
+  const groups = [];
+  const byKey = new Map();
+  for (const variation of (variations || [])) {
+    const key = shopeeVariationGroupKey(variation.tier1_value);
+    let group = byKey.get(key);
+    if (!group) {
+      group = { key, name: variation.tier1_value || '', image: variation.sku_image || '', description: variation.description || '', variations: [] };
+      byKey.set(key, group);
+      groups.push(group);
+    }
+    if (!group.image && variation.sku_image) group.image = variation.sku_image;
+    if (!group.description && variation.description) group.description = variation.description;
     group.variations.push(variation);
   }
   return groups;
@@ -749,42 +782,103 @@ async function handleUpdateTask(request, env, path) {
   }
 
   if (idx.platform === 'jst') {
-    const { name, topic_items, description, main_description, detail_description, auxiliary_images, reference_image, generate_count, stock, weight, variants, mode, main_image_count, detail_image_count } = body || {};
+    const { name, topic_items, description, recommended_copy, product_link, supplier_name, main_description, detail_description, auxiliary_images, reference_image, generate_count, stock, weight, product_type, variation_image_mode, variants, mode, main_image_count, detail_image_count } = body || {};
     if (!name) return error('任务名称不能为空', 400);
     if (!reference_image) return error('核心参考图不能为空', 400);
+    const topicItems = String(topic_items || '').trim();
+    if (!topicItems || topicItems.length > 1000) return error('参考标题或关键词必须为1~1000字符', 400);
+    const productDescription = String(description || '').trim();
+    if (productDescription.length > 3000) return error('商品描述不能超过3000字符', 400);
+    const recommendedCopy = String(recommended_copy || '').trim();
+    if (recommendedCopy.length > 1000) return error('推荐文案不能超过1000字符', 400);
+    const productLink = String(product_link || '').trim();
+    if (productLink && !/^https?:\/\//i.test(productLink)) return error('宝贝链接必须为HTTP或HTTPS地址', 400);
+    const supplierName = String(supplier_name || '').trim();
+    if (supplierName.length > 100) return error('供应商名不能超过100字符', 400);
     const jstGenerateCount = parseInt(generate_count);
     if (!Number.isInteger(jstGenerateCount) || jstGenerateCount < 1 || jstGenerateCount > MAX_GENERATE_COUNT) return error(`生成套数必须为1~${MAX_GENERATE_COUNT}`, 400);
-    if (!Array.isArray(variants) || variants.length < 1 || variants.length > MAX_JST_VARIANTS) return error(`聚水潭变体数量必须为1~${MAX_JST_VARIANTS}`, 400);
+    if (!Array.isArray(variants) || variants.length < 1 || variants.length > MAX_JST_VARIATIONS) return error(`聚水潭SKU组合数量必须为1~${MAX_JST_VARIATIONS}`, 400);
+    if (!['single','one','two'].includes(product_type)) return error('商品规格结构必须为single、one或two', 400);
+    const productType = product_type;
+    if (productType === 'single' && variants.length !== 1) return error('无规格商品只能有一条SKU记录', 400);
+    const defaultStock = stock === undefined || stock === null || stock === '' ? 999 : Number(stock);
+    if (!Number.isInteger(defaultStock) || defaultStock < 0 || defaultStock > 99999999) return error('默认库存必须为0~99999999', 400);
+    const taskWeight = Number(weight);
+    if (!Number.isFinite(taskWeight) || taskWeight < 0) return error('重量必须为大于等于0的数字', 400);
     const normalizedVariants = [];
+    const combinationKeys = new Set();
+    const skuCodes = new Set();
     for (let i = 0; i < variants.length; i++) {
       const v = variants[i];
       const pricing = normalizeVariantPricing(v, false);
       if (pricing.error) return error('变体#' + (i + 1) + pricing.error, 400);
+      if (!pricing.price_float_enabled && v.price !== undefined && v.price !== null && v.price !== '' && pricing.price === null) return error(`变体#${i + 1}基本售价必须为数字`, 400);
+      if ([pricing.price,pricing.price_min,pricing.price_max].some(value => value !== null && value < 0)) return error(`变体#${i + 1}基本售价不能小于0`, 400);
+      const tier1Name = productType === 'single' ? '' : String(v.tier1_name || '颜色').trim();
+      const tier1Value = productType === 'single' ? '' : String(v.tier1_value || v.name || '').trim();
+      const tier2Name = productType === 'two' ? String(v.tier2_name || '规格').trim() : '';
+      const tier2Value = productType === 'two' ? String(v.tier2_value || '').trim() : '';
+      if (productType !== 'single' && (!tier1Name || tier1Name.length > 100)) return error(`变体#${i + 1}一级规格名必须为1~100字符`, 400);
+      if (productType !== 'single' && (!tier1Value || tier1Value.length > 100)) return error(`变体#${i + 1}一级规格值必须为1~100字符`, 400);
+      if (productType === 'two' && (!tier2Name || tier2Name.length > 100)) return error(`变体#${i + 1}二级规格名必须为1~100字符`, 400);
+      if (productType === 'two' && (!tier2Value || tier2Value.length > 100)) return error(`变体#${i + 1}二级规格值必须为1~100字符`, 400);
+      const combinationKey = `${shopeeVariationGroupKey(tier1Value)}|${shopeeVariationGroupKey(tier2Value)}`;
+      if (combinationKeys.has(combinationKey)) return error(`变体#${i + 1}规格组合重复`, 400);
+      combinationKeys.add(combinationKey);
+      const variantStock = v.stock === undefined || v.stock === null || v.stock === '' ? defaultStock : Number(v.stock);
+      if (!Number.isInteger(variantStock) || variantStock < 0 || variantStock > 99999999) return error(`变体#${i + 1}库存必须为0~99999999`, 400);
+      const marketPrice = parseNumberOrNull(v.market_price);
+      const minDistributionPrice = parseNumberOrNull(v.min_distribution_price);
+      const maxDistributionPrice = parseNumberOrNull(v.max_distribution_price);
+      for (const [raw,label,parsed] of [[v.market_price,'市场价',marketPrice],[v.min_distribution_price,'最低分销控价',minDistributionPrice],[v.max_distribution_price,'最高分销控价',maxDistributionPrice]]) {
+        if (raw !== undefined && raw !== null && raw !== '' && parsed === null) return error(`变体#${i + 1}${label}必须为数字`, 400);
+      }
+      if ([marketPrice,minDistributionPrice,maxDistributionPrice].some(value => value !== null && value < 0)) return error(`变体#${i + 1}模板价格不能小于0`, 400);
+      if (minDistributionPrice !== null && maxDistributionPrice !== null && maxDistributionPrice < minDistributionPrice) return error(`变体#${i + 1}最高分销控价不能低于最低分销控价`, 400);
+      const skuCode = String(v.sku_code || v.sku || '').trim();
+      if (skuCode.length > 80) return error(`变体#${i + 1}商家SKU不能超过80字符`, 400);
+      if (skuCode && skuCodes.has(skuCode.toLocaleLowerCase())) return error(`变体#${i + 1}商家SKU重复`, 400);
+      if (skuCode) skuCodes.add(skuCode.toLocaleLowerCase());
       normalizedVariants.push({
-        id: uuid(), task_id: taskId,
-        tier1_name: v.tier1_name || '', tier1_value: v.tier1_value || v.name || '',
-        tier2_name: v.tier2_name || '', tier2_value: v.tier2_value || '',
-        white_bg_image: v.sku_image || v.white_bg_image || '',
+        id: v.id || uuid(), task_id: taskId,
+        tier1_name: tier1Name, tier1_value: tier1Value,
+        tier2_name: tier2Name, tier2_value: tier2Value,
+        sku_image: productType === 'single' ? '' : String(v.sku_image || ''),
         price: pricing.price, price_float_enabled: pricing.price_float_enabled,
         price_min: pricing.price_min, price_max: pricing.price_max, price_precision: pricing.price_precision,
-        description: v.sku_description || '', sort_order: i,
+        market_price: marketPrice, min_distribution_price: minDistributionPrice, max_distribution_price: maxDistributionPrice,
+        stock: variantStock, sku_code: skuCode,
+        description: String(v.sku_description || '').trim(), sort_order: i,
       });
+    }
+    if (productType !== 'single' && new Set(normalizedVariants.map(variant => variant.tier1_name)).size !== 1) return error('全部SKU必须使用相同的一级规格名', 400);
+    if (productType === 'two' && new Set(normalizedVariants.map(variant => variant.tier2_name)).size !== 1) return error('全部SKU必须使用相同的二级规格名', 400);
+    const jstImageMode = normalizeJstVariationImageMode(variation_image_mode, productType);
+    if (jstImageMode === 'option1') {
+      for (const group of getJstVariationGroups(normalizedVariants)) {
+        const imageUrls = [...new Set(group.variations.map(variation => variation.sku_image).filter(Boolean))];
+        if (imageUrls.length > 1) return error(`一级规格值“${group.name}”只能使用一张SKU参考图`, 400);
+        if (imageUrls.length === 1) for (const variation of group.variations) variation.sku_image = imageUrls[0];
+      }
+    } else {
+      for (const variation of normalizedVariants) variation.sku_image = '';
     }
 
     await jstUpdateTask(env, taskId, {
-      name: String(name).slice(0, 12), topic_items: topic_items || '', description: description || '',
+      name: String(name).slice(0, 30), topic_items: topicItems, description: productDescription,
+      recommended_copy: recommendedCopy, product_link: productLink, supplier_name: supplierName,
       main_description: main_description || '', detail_description: detail_description || '',
       auxiliary_images: auxiliary_images || '', reference_image,
-      generate_count: jstGenerateCount, stock: stock !== undefined ? parseInt(stock) : 999,
-      weight: weight !== undefined ? parseFloat(weight) : 1.0,
-      variant_count: variants?.length || 1,
-      main_image_count: Math.min(Math.max(parseInt(main_image_count) || 5, 5), 9),
-      detail_image_count: Math.min(Math.max(parseInt(detail_image_count) || 5, 5), 9),
+      generate_count: jstGenerateCount, stock: defaultStock, weight: taskWeight,
+      variant_count: normalizedVariants.length,
+      main_image_count: Math.min(Math.max(parseInt(main_image_count) || 5, 1), 9),
+      detail_image_count: Math.min(Math.max(parseInt(detail_image_count) || 5, 1), 9),
+      product_type: productType, variation_image_mode: jstImageMode,
       mode: mode === 'dedup' ? 'dedup' : 'full',
     });
     // 更新索引
     await env.DB.prepare("UPDATE ews_tasks SET name = ?, status = 'pending', updated_at = datetime('now') WHERE id = ?")
-      .bind(String(name).slice(0, 12), taskId).run();
+      .bind(String(name).slice(0, 30), taskId).run();
 
     // 变体（二维规格）
     await jstReplaceVariants(env, taskId, normalizedVariants);
@@ -863,15 +957,20 @@ async function jstHandlePush(env, taskId, ctx, request) {
   const mainWebhookUrl = config.n8n_main_webhook || '';
   const subImageWebhookUrl = config.n8n_sub_image_webhook || '';
   const detailWebhookUrl = workflowFlags.detail ? config.n8n_detail_webhook || '' : '';
-  const mainImageCount = Math.min(Math.max(detail.main_image_count || 5, 5), 9);
-  const detailImageCount = Math.min(Math.max(detail.detail_image_count || 5, 5), 9);
+  const mainImageCount = Math.min(Math.max(detail.main_image_count || 5, 1), 9);
+  const detailImageCount = Math.min(Math.max(detail.detail_image_count || 5, 1), 9);
   const generateCount = detail.generate_count || 1;
+  const productType = normalizeJstProductType(detail.product_type, detail.variants || []);
+  const variationImageMode = normalizeJstVariationImageMode(detail.variation_image_mode, productType);
   const variantCount = detail.variants?.length || 0;
+  const variationGroups = productType === 'single' ? [] : getJstVariationGroups(detail.variants || []);
+  const skuImageGroups = variationImageMode === 'none' ? [] : variationGroups;
+  const needsSkuTitles = productType !== 'single' && variantCount > 0;
 
   const missingEnabledWebhooks = [];
   if (workflowFlags.title && !titleWebhookUrl) missingEnabledWebhooks.push('商品标题');
-  if (workflowFlags.skuTitle && variantCount > 0 && !skuTitleWebhookUrl) missingEnabledWebhooks.push('SKU标题');
-  if (workflowFlags.skuImage && variantCount > 0 && !skuImageWebhookUrl) missingEnabledWebhooks.push('SKU图片');
+  if (workflowFlags.skuTitle && needsSkuTitles && !skuTitleWebhookUrl) missingEnabledWebhooks.push('SKU标题');
+  if (workflowFlags.skuImage && skuImageGroups.length > 0 && !skuImageWebhookUrl) missingEnabledWebhooks.push('SKU图片');
   if (missingEnabledWebhooks.length) return error('请先配置已开启的 JST 工作流 Webhook: ' + missingEnabledWebhooks.join('、'), 400);
   if (!titleWebhookUrl && !skuTitleWebhookUrl && !mainWebhookUrl && !subImageWebhookUrl && !detailWebhookUrl && !skuImageWebhookUrl)
     return error('请先在系统配置页配置 JST 工作流 Webhook 地址后再推送', 400);
@@ -882,7 +981,7 @@ async function jstHandlePush(env, taskId, ctx, request) {
   for (let i = 0; i < generateCount; i++) {
     const subId = uuid(); subTaskIds.push(subId);
     await jstCreateSubTask(env, { id: subId, parent_task_id: taskId, set_index: i });
-    await jstCreateExpectedImages(env, taskId, subId, i, variantCount, detail.mode || 'full', mainImageCount, detailImageCount,
+    await jstCreateExpectedImages(env, taskId, subId, i, skuImageGroups.length, detail.mode || 'full', mainImageCount, detailImageCount,
       !!mainWebhookUrl, !!subImageWebhookUrl, !!detailWebhookUrl, !!skuImageWebhookUrl);
   }
   await env.DB.prepare("UPDATE ews_jst_tasks SET status='processing', queue_mode='auto', updated_at=datetime('now') WHERE id=?").bind(taskId).run();
@@ -894,9 +993,10 @@ async function jstHandlePush(env, taskId, ctx, request) {
     data: { task_id: taskId, name: detail.name, reference_title: detail.topic_items || '', description: detail.description || '',
       sub_task_count: generateCount, sub_tasks: subTasks, callback_secret: callbackSecret, callback_url: baseUrl } });
   // sku_title
-  if (skuTitleWebhookUrl && variantCount > 0) allJobs.push({ webhook_type: 'sku_title', sub_task_id: subTasks[0]?.sub_task_id || "", url: skuTitleWebhookUrl,
+  if (skuTitleWebhookUrl && needsSkuTitles) allJobs.push({ webhook_type: 'sku_title', sub_task_id: subTasks[0]?.sub_task_id || "", url: skuTitleWebhookUrl,
     data: { task_id: taskId, name: detail.name, reference_title: detail.topic_items || '', description: detail.description || '',
-      sub_task_count: generateCount, sub_tasks: subTasks, variants: (detail.variants||[]).map(v=>({id:v.id,name:v.tier1_value})), callback_secret: callbackSecret, callback_url: baseUrl } });
+      sub_task_count: generateCount, sub_tasks: subTasks, product_type: productType,
+      variants: (detail.variants||[]).map(v=>({id:v.id,name:v.tier1_value,option2:v.tier2_value||'',tier1_name:v.tier1_name||'',tier2_name:v.tier2_name||'',sku_description:v.description||''})), callback_secret: callbackSecret, callback_url: baseUrl } });
   // main_1
   if (mainWebhookUrl) for (const st of subTasks) allJobs.push({ webhook_type: 'main_1', sub_task_id: st.sub_task_id, url: mainWebhookUrl,
     data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: detail.reference_image,
@@ -916,13 +1016,14 @@ async function jstHandlePush(env, taskId, ctx, request) {
         detail_description: detail.detail_description || '', auxiliary_images: detail.auxiliary_images || '', image_type: 'detail', image_position: pos, callback_secret: callbackSecret, callback_url: baseUrl } });
   }
   // sku
-  if (skuImageWebhookUrl) for (const st of subTasks) {
+  if (skuImageWebhookUrl && skuImageGroups.length > 0) for (const st of subTasks) {
     if ((detail.mode||'full') === 'dedup' && st.set_index > 0) continue;
-    for (let v = 0; v < (detail.variants||[]).length; v++) {
+    for (let v = 0; v < skuImageGroups.length; v++) {
+      const group = skuImageGroups[v];
       allJobs.push({ webhook_type: 'sku_' + (v+1), sub_task_id: st.sub_task_id, url: skuImageWebhookUrl,
         data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: detail.reference_image,
-          variant_name: detail.variants[v].tier1_value, sku_image: detail.variants[v].white_bg_image || '',
-          sku_description: detail.variants[v].description || '', image_type: 'sku', image_position: v+1, callback_secret: callbackSecret, callback_url: baseUrl } });
+          variant_name: group.name, sku_image: group.image || '',
+          sku_description: group.description || '', image_type: 'sku', image_position: v+1, callback_secret: callbackSecret, callback_url: baseUrl } });
     }
   }
 
@@ -2123,12 +2224,20 @@ async function jstHandleExport(env, taskId) {
   const images = detail.images || [];
   const generateCount = detail.generate_count || 1;
   const mode = detail.mode || 'full';
-  const mainImgTotal = Math.min(Math.max(detail.main_image_count || 5, 5), 9);
-  const detailImgTotal = Math.min(Math.max(detail.detail_image_count || 5, 5), 9);
+  const mainImgTotal = Math.min(Math.max(detail.main_image_count || 5, 1), 9);
+  const detailImgTotal = Math.min(Math.max(detail.detail_image_count || 5, 1), 9);
+  const productType = normalizeJstProductType(detail.product_type, variants);
+  const variationImageMode = normalizeJstVariationImageMode(detail.variation_image_mode, productType);
+  const variationGroups = productType === 'single' ? [] : getJstVariationGroups(variants);
+  const groupPosition = new Map(variationGroups.map((group, index) => [group.key, index + 1]));
   const subTasks = await jstGetSubTasks(env, taskId);
   const subTaskIds = (subTasks?.results || []).map(st => st.id);
+  const plans = await query(env, 'SELECT webhook_type FROM ews_jst_push_plans WHERE task_id=?', [taskId]);
+  const plannedTypes = new Set((plans?.results || []).map(plan => plan.webhook_type));
+  const titlePlanned = plannedTypes.has('title');
+  const skuTitlePlanned = plannedTypes.has('sku_title');
+  const skuImagePlanned = [...plannedTypes].some(type => /^sku_\d+$/.test(type));
 
-  // SKU 标题
   const skuTitleMap = {};
   if (subTaskIds.length > 0) {
     const ph = subTaskIds.map(() => '?').join(',');
@@ -2148,10 +2257,13 @@ async function jstHandleExport(env, taskId) {
     }
     return '';
   }
-  function getSkuUrl(setIdx, subTaskId, vIdx) {
-    const direct = recordedImg(subTaskId, 'sku', vIdx + 1);
+  function getSkuUrl(setIdx, subTaskId, variant) {
+    if (variationImageMode === 'none' || productType === 'single') return '';
+    const position = groupPosition.get(shopeeVariationGroupKey(variant.tier1_value));
+    if (!position) return '';
+    const direct = recordedImg(subTaskId, 'sku', position);
     if (direct) return direct;
-    if (mode === 'dedup' && setIdx > 0) return recordedImg(subTaskIds[0] || '', 'sku', vIdx + 1);
+    if (mode === 'dedup' && setIdx > 0) return recordedImg(subTaskIds[0] || '', 'sku', position);
     return '';
   }
 
@@ -2167,19 +2279,22 @@ async function jstHandleExport(env, taskId) {
     const subTask = (detail.sub_tasks || []).find(st => st.id === subTaskId);
     const setLabel = '第' + (setIdx + 1) + '套';
     if (!subTaskId) { addExportError(setLabel + ' 缺少子任务'); continue; }
-    if (!(subTask?.title || '').trim()) addExportError(setLabel + ' 缺少AI商品标题');
-    if (!getImg(setIdx, subTaskId, 'main', 1)) addExportError(setLabel + ' 缺少AI主图main_1');
+    if (titlePlanned && !(subTask?.title || '').trim()) addExportError(setLabel + ' 缺少AI商品标题');
+    if (plannedTypes.has('main_1') && !getImg(setIdx, subTaskId, 'main', 1)) addExportError(setLabel + ' 缺少AI主图main_1');
     for (let p = 2; p <= mainImgTotal; p++) {
-      if (!getImg(setIdx, subTaskId, 'sub', p)) addExportError(setLabel + ' 缺少AI附图sub_' + p);
+      if (plannedTypes.has('sub_' + p) && !getImg(setIdx, subTaskId, 'sub', p)) addExportError(setLabel + ' 缺少AI附图sub_' + p);
     }
     for (let p = 1; p <= detailImgTotal; p++) {
-      if (!getImg(setIdx, subTaskId, 'detail', p)) addExportError(setLabel + ' 缺少AI详情图detail_' + p);
+      if (plannedTypes.has('detail_' + p) && !getImg(setIdx, subTaskId, 'detail', p)) addExportError(setLabel + ' 缺少AI详情图detail_' + p);
     }
+    const checkedSkuImages = new Set();
     for (let vIdx = 0; vIdx < variants.length; vIdx++) {
       const variant = variants[vIdx];
       const skuTitle = skuTitleMap[subTaskId + '_' + variant.id] || '';
-      if (!skuTitle.trim()) addExportError(setLabel + ' 变体#' + (vIdx + 1) + ' 缺少AI SKU标题');
-      if (!getSkuUrl(setIdx, subTaskId, vIdx)) addExportError(setLabel + ' 变体#' + (vIdx + 1) + ' 缺少AI SKU变体图');
+      if (skuTitlePlanned && !skuTitle.trim()) addExportError(setLabel + ' SKU#' + (vIdx + 1) + ' 缺少AI SKU标题');
+      const skuGroupKey = shopeeVariationGroupKey(variant.tier1_value);
+      if (skuImagePlanned && !checkedSkuImages.has(skuGroupKey) && !getSkuUrl(setIdx, subTaskId, variant)) addExportError(setLabel + ' 一级规格“' + (variant.tier1_value || '') + '”缺少AI SKU图片');
+      checkedSkuImages.add(skuGroupKey);
     }
   }
   if (exportErrors.length) {
@@ -2191,29 +2306,36 @@ async function jstHandleExport(env, taskId) {
     const subTaskId = subTaskIds[setIdx] || '';
     const styleCode = subTaskId ? subTaskId.slice(0, 8) : `${taskId.slice(0, 8)}-S${setIdx + 1}`;
     const subTask = (detail.sub_tasks || []).find(st => st.id === subTaskId);
-    const productTitle = subTask?.title || '';
+    const productTitle = subTask?.title || detail.name || '';
     for (let vIdx = 0; vIdx < variants.length; vIdx++) {
       const variant = variants[vIdx];
-      const skuCode = `${styleCode}-V${vIdx + 1}`;
+      const skuSuffix = String(variant.sku_code || '').trim() || `V${vIdx + 1}`;
+      const skuCode = `${styleCode}-${skuSuffix}`;
       const mainUrls = [getImg(setIdx, subTaskId, 'main', 1)];
       for (let p = 2; p <= mainImgTotal; p++) mainUrls.push(getImg(setIdx, subTaskId, 'sub', p));
       const detailUrls = [];
       for (let p = 1; p <= detailImgTotal; p++) detailUrls.push(getImg(setIdx, subTaskId, 'detail', p));
-      const skuUrl = getSkuUrl(setIdx, subTaskId, vIdx);
+      const skuUrl = getSkuUrl(setIdx, subTaskId, variant);
       const skuTitle = skuTitleMap[subTaskId + '_' + variant.id] || '';
       const exportPrice = exportPriceForVariant(variant, taskId, setIdx, vIdx);
-      rows.push({
-        '款式编码': styleCode, '商品编码': skuCode, '颜色': skuTitle, '规格': '',
+      const row = {
+        '款式编码': styleCode, '商品编码': skuCode,
+        '颜色': productType === 'single' ? '' : (skuTitle || variant.tier1_value || ''),
+        '规格': productType === 'two' ? (variant.tier2_value || '') : '',
         '商品主图': JSON.stringify(mainUrls.filter(u => u)),
         '商品详情图': JSON.stringify(detailUrls.filter(u => u)),
-        '图片地址': skuUrl, '商品名称': productTitle, '推荐文案': '', '商品描述': '', '宝贝链接': '',
-        '库存': detail.stock ?? 999, '重量(kg)': detail.weight ?? 1.0, '基本售价': exportPrice,
-        '市场|吊牌价': exportPrice, '最低分销控价': '', '最高分销控价': '', '供应商名': '',
+        '图片地址': skuUrl, '商品名称': productTitle,
+        '推荐文案': detail.recommended_copy || '', '商品描述': detail.description || '', '宝贝链接': detail.product_link || '',
+        '库存': variant.stock ?? detail.stock ?? 999, '重量(kg)': detail.weight ?? 1.0, '基本售价': exportPrice,
+        '市场|吊牌价': variant.market_price ?? '',
+        '最低分销控价': variant.min_distribution_price ?? '', '最高分销控价': variant.max_distribution_price ?? '',
+        '供应商名': detail.supplier_name || '',
         '3:4主图': '', '长图': '', '透明素材图': '', '白底图': '',
-      });
+      };
+      rows.push(JST_TEMPLATE_COLUMNS.map(column => row[column]));
     }
   }
-  return json({ success: true, rows, task_title: detail.name, mode, export_format: 'jst' });
+  return json({ success: true, rows, columns: JST_TEMPLATE_COLUMNS, task_title: detail.name, mode, export_format: 'jst', template_sheet: '商品导入模板', template_start_row: 3 });
 }
 
 // ========== Shopee 模板校验 ==========
