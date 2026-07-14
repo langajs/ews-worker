@@ -549,7 +549,7 @@ function normalizeShopeeShippingChannels(value) {
   if (typeof channels === 'string') {
     try { channels = JSON.parse(channels); } catch (_) { channels = []; }
   }
-  const allowed = new Set(['5000','5001','5004','5012','5115','50039','50052']);
+  const allowed = new Set(['5000','5001','5004','5012','50039','50052','50053']);
   return [...new Set((Array.isArray(channels) ? channels : []).map(String).filter(channel => allowed.has(channel)))];
 }
 
@@ -702,7 +702,7 @@ async function handleUpdateTask(request, env, path) {
   if (!idx) return error('任务不存在', 404);
 
   if (idx.platform === 'shopee') {
-    const { name, source_brief, product_type, main_description, reference_title, reference_image, auxiliary_images, generate_count, mode, category_id, cover_image, images, weight_kg, length_cm, width_cm, height_cm, gtin, variation_name1, variation_name2, variation_image_mode, max_purchase_qty, max_purchase_start_date, max_purchase_period_days, max_purchase_end_date, size_chart_template_id, size_chart_image, pre_order_dts, shipping_channels, variations } = body || {};
+    const { name, source_brief, product_type, main_description, reference_title, reference_image, auxiliary_images, generate_count, mode, category_id, cover_image, images, weight_kg, length_cm, width_cm, height_cm, gtin, variation_name1, variation_name2, variation_image_mode, size_chart_template_id, size_chart_image, pre_order_dts, shipping_channels, variations } = body || {};
     const taskName = String(name || '').trim();
     if (!taskName) return error('任务名称不能为空', 400);
     if (taskName.length > 30) return error('任务名称不能超过30字符', 400);
@@ -773,18 +773,10 @@ async function handleUpdateTask(request, env, path) {
     if (dimensions.some(value => value !== null && (value <= 0 || value > 10000000))) return error('长、宽、高必须大于0且不超过10000000', 400);
     const channels = normalizeShopeeShippingChannels(shipping_channels);
     if (!channels.length) return error('至少选择一个物流渠道', 400);
-    const channelPriceLimits = { '5000': 10000000, '5001': 100000000, '5004': 100000000, '5115': 5000000 };
+    const channelPriceLimits = { '5000': 10000000, '5001': 100000000, '5004': 100000000, '50053': 3000000 };
     for (const channel of channels) {
       if (channelPriceLimits[channel] && highestPrice > channelPriceLimits[channel]) return error(`物流渠道${channel}允许的最高价格为${channelPriceLimits[channel]}`, 400);
     }
-    const maxPurchaseQty = max_purchase_qty === undefined || max_purchase_qty === null || max_purchase_qty === '' ? null : parseInt(max_purchase_qty);
-    if (maxPurchaseQty !== null && (!Number.isInteger(maxPurchaseQty) || maxPurchaseQty < 1 || maxPurchaseQty > 999999)) return error('限购数量必须为1~999999', 400);
-    const purchaseStart = String(max_purchase_start_date || '').trim();
-    const purchaseEnd = String(max_purchase_end_date || '').trim();
-    const purchasePeriod = max_purchase_period_days === undefined || max_purchase_period_days === null || max_purchase_period_days === '' ? null : parseInt(max_purchase_period_days);
-    const hasPurchasePeriod = purchaseStart || purchaseEnd || purchasePeriod !== null;
-    if (hasPurchasePeriod && (maxPurchaseQty === null || !/^\d{4}-\d{2}-\d{2}$/.test(purchaseStart) || !/^\d{4}-\d{2}-\d{2}$/.test(purchaseEnd) || !Number.isInteger(purchasePeriod) || purchasePeriod < 1 || purchasePeriod > 365)) return error('周期限购必须同时填写数量、开始日期、1~365天周期和结束日期', 400);
-    if (hasPurchasePeriod && purchaseEnd < purchaseStart) return error('周期限购结束日期不能早于开始日期', 400);
     const sizeChartTemplate = String(size_chart_template_id || '').trim();
     const sizeChartImage = String(size_chart_image || '').trim();
     if (sizeChartTemplate && sizeChartImage) return error('尺码表模板和尺码表图片只能填写一个', 400);
@@ -804,7 +796,6 @@ async function handleUpdateTask(request, env, path) {
       weight_kg: weightKg, length_cm: dimensions[0], width_cm: dimensions[1], height_cm: dimensions[2], gtin: gtin || '',
       variation_name1: productType === 'single' ? '' : variationName1, variation_name2: productType === 'two' ? variationName2 : '',
       variation_name1_export: '', variation_name2_export: '', variation_image_mode: normalizedImageMode,
-      max_purchase_qty: maxPurchaseQty, max_purchase_start_date: purchaseStart, max_purchase_period_days: purchasePeriod, max_purchase_end_date: purchaseEnd,
       size_chart_template_id: sizeChartTemplate, size_chart_image: sizeChartImage, pre_order_dts: preOrderDts,
       shipping_channels: JSON.stringify(channels),
     });
@@ -1022,11 +1013,11 @@ async function jstHandlePush(env, taskId, ctx, request) {
 
   // title
   if (titleWebhookUrl) allJobs.push({ webhook_type: 'title', sub_task_id: subTasks[0]?.sub_task_id || "", url: titleWebhookUrl,
-    data: { task_id: taskId, name: detail.name, reference_title: detail.topic_items || '', description: detail.description || '',
+    data: { task_id: taskId, reference_title: detail.topic_items || '', description: detail.description || '',
       sub_task_count: generateCount, sub_tasks: subTasks, callback_secret: callbackSecret, callback_url: baseUrl } });
   // sku_title
   if (skuTitleWebhookUrl && needsSkuTitles) allJobs.push({ webhook_type: 'sku_title', sub_task_id: subTasks[0]?.sub_task_id || "", url: skuTitleWebhookUrl,
-    data: { task_id: taskId, name: detail.name, reference_title: detail.topic_items || '', description: detail.description || '',
+    data: { task_id: taskId, reference_title: detail.topic_items || '', description: detail.description || '',
       sub_task_count: generateCount, sub_tasks: subTasks, product_type: productType,
       variants: (detail.variants||[]).map(v=>({id:v.id,name:v.tier1_value,option2:v.tier2_value||'',tier1_name:v.tier1_name||'',tier2_name:v.tier2_name||'',sku_description:v.description||''})), callback_secret: callbackSecret, callback_url: baseUrl } });
   // main_1
@@ -2333,7 +2324,7 @@ async function jstHandleExport(env, taskId) {
     const subTaskId = subTaskIds[setIdx] || '';
     const styleCode = subTaskId ? subTaskId.slice(0, 8) : `${taskId.slice(0, 8)}-S${setIdx + 1}`;
     const subTask = subTaskMap.get(subTaskId);
-    const productTitle = subTask?.title || detail.name || '';
+    const productTitle = subTask?.title || detail.topic_items || '';
     for (let vIdx = 0; vIdx < variants.length; vIdx++) {
       const variant = variants[vIdx];
       const skuSuffix = String(variant.sku_code || '').trim() || `V${vIdx + 1}`;
@@ -2441,7 +2432,7 @@ function validateShopeeRow(product, variations) {
   if (dimensionCount !== 0 && dimensionCount !== 3) errors.push('长、宽、高必须同时填写或全部留空');
   var shippingChannels = normalizeShopeeShippingChannels(product.shipping_channels);
   if (!shippingChannels.length) errors.push('至少需要开启一个物流渠道');
-  var shippingPriceLimits = { '5000': 10000000, '5001': 100000000, '5004': 100000000, '5115': 5000000 };
+  var shippingPriceLimits = { '5000': 10000000, '5001': 100000000, '5004': 100000000, '50053': 3000000 };
   for (var ci = 0; ci < shippingChannels.length; ci++) {
     var channelLimit = shippingPriceLimits[shippingChannels[ci]];
     if (channelLimit && highest > channelLimit) errors.push('物流渠道' + shippingChannels[ci] + '允许的最高价格为' + channelLimit);
@@ -2500,8 +2491,7 @@ async function shopeeHandleExport(env, taskId) {
   const expectedSetCount = Math.max(parseInt(product.generate_count) || 1, 1);
   const subTasks = (product.sub_tasks && product.sub_tasks.length) ? product.sub_tasks : [];
   const imageMap = new Map((product.images_rec || []).map(image => [image.sub_task_id + '|' + image.image_type + '|' + image.position, image.image_url || '']));
-  var shippingChannels = [];
-  try { shippingChannels = JSON.parse(product.shipping_channels || '[]'); } catch(e) {}
+  var shippingChannels = normalizeShopeeShippingChannels(product.shipping_channels);
 
   function generatedImage(type, pos, setIdx, subTaskId) {
     return imageMap.get(subTaskId + '|' + type + '|' + pos) || '';
@@ -2591,7 +2581,7 @@ async function shopeeHandleExport(env, taskId) {
     return json({ success: false, error: 'Shopee资源未生成完成，已阻止导出', errors: exportErrors, warnings: validation.warnings }, 400);
   }
 
-  // 列顺序必须匹配 Shopee 模板 (A~AP)
+  // 列顺序必须匹配 Shopee 2026-07-14 basic template (A~AL)
   function makeRow(subTask, setIdx, variationsIdx) {
     var v = variations[variationsIdx];
     var images = productImages(setIdx, subTask.id || '');
@@ -2605,35 +2595,31 @@ async function shopeeHandleExport(env, taskId) {
       product.category_id || '',                          // A Category
       subTask.title || '',                                // B Product Name
       productDescriptionFor(subTask),                     // C Product Description
-      product.max_purchase_qty ?? '',                     // D Maximum Purchase Quantity
-      product.max_purchase_start_date || '',              // E MaxPQ Start Date
-      product.max_purchase_period_days ?? '',             // F MaxPQ Time Period
-      product.max_purchase_end_date || '',                // G MaxPQ End Date
-      parentSku,                                          // H Parent SKU
-      isSingleProduct ? '' : parentSku,                   // I Variation Integration No.
-      isSingleProduct ? '' : product.variation_name1_export || '', // J Variation Name1
-      option1,                                            // K Option for Variation 1
-      getSkuUrl(setIdx, subTask.id || '', variationsIdx, v), // L Image per Variation
-      productType === 'two' ? product.variation_name2_export || '' : '', // M Variation Name2
-      option2,                                            // N Option for Variation 2
-      exportPrice,                                       // O Price
-      v.stock ?? '',                                      // P Stock
-      skuCode,                                            // Q SKU
-      product.size_chart_template_id || '',               // R Size Chart Template
-      product.size_chart_image || '',                     // S Size Chart Image
-      product.gtin || '',                                 // T GTIN
-      coverImage,                                         // U Cover image
-      images[0] || '', images[1] || '', images[2] || '',  // V-X Item Image 1~3
-      images[3] || '', images[4] || '', images[5] || '',  // Y-AA Item Image 4~6
-      images[6] || '', images[7] || '',                   // AB-AC Item Image 7~8
-      weightInGrams(),                                    // AD Weight(g)
-      product.length_cm ?? '',                            // AE Length
-      product.width_cm ?? '',                             // AF Width
-      product.height_cm ?? '',                            // AG Height
-      shipping('5000'), shipping('5001'), shipping('5004'), // AH-AJ Shipping
-      shipping('5012'), shipping('5115'), shipping('50039'), shipping('50052'), // AK-AN Shipping
-      product.pre_order_dts ?? '',                        // AO Pre-order DTS
-      '',                                                 // AP Fail Reason
+      parentSku,                                          // D Parent SKU
+      isSingleProduct ? '' : parentSku,                   // E Variation Integration No.
+      isSingleProduct ? '' : product.variation_name1_export || '', // F Variation Name1
+      option1,                                            // G Option for Variation 1
+      getSkuUrl(setIdx, subTask.id || '', variationsIdx, v), // H Image per Variation
+      productType === 'two' ? product.variation_name2_export || '' : '', // I Variation Name2
+      option2,                                            // J Option for Variation 2
+      exportPrice,                                        // K Price
+      v.stock ?? '',                                      // L Stock
+      skuCode,                                            // M SKU
+      product.size_chart_template_id || '',               // N Size Chart Template
+      product.size_chart_image || '',                     // O Size Chart Image
+      product.gtin || '',                                 // P GTIN
+      coverImage,                                         // Q Cover image
+      images[0] || '', images[1] || '', images[2] || '',  // R-T Item Image 1~3
+      images[3] || '', images[4] || '', images[5] || '',  // U-W Item Image 4~6
+      images[6] || '', images[7] || '',                   // X-Y Item Image 7~8
+      weightInGrams(),                                    // Z Weight(g)
+      product.length_cm ?? '',                            // AA Length
+      product.width_cm ?? '',                             // AB Width
+      product.height_cm ?? '',                            // AC Height
+      shipping('5000'), shipping('5001'), shipping('5004'), // AD-AF Shipping
+      shipping('5012'), shipping('50039'), shipping('50052'), shipping('50053'), // AG-AJ Shipping
+      product.pre_order_dts ?? '',                        // AK Pre-order DTS
+      '',                                                 // AL Fail Reason
     ];
   }
 
@@ -2643,8 +2629,10 @@ async function shopeeHandleExport(env, taskId) {
     for (let vi = 0; vi < variations.length; vi++) rows.push(makeRow(subTask, setIdx, vi));
   }
 
-  var shopeeColumns = ['Category','Product Name','Product Description','Max Purchase Qty','MaxPQ Start Date','MaxPQ Time Period','MaxPQ End Date','Parent SKU','Variation Integration No.','Variation Name1','Option for Variation 1','Image per Variation','Variation Name2','Option for Variation 2','Price','Stock','SKU','Size Chart Template','Size Chart Image','GTIN','Cover image','Item Image 1','Item Image 2','Item Image 3','Item Image 4','Item Image 5','Item Image 6','Item Image 7','Item Image 8','Weight','Length','Width','Height','Shipping(5000)','Shipping(5001)','Shipping(5004)','Shipping(5012)','Shipping(5115)','Shipping(50039)','Shipping(50052)','Pre-order DTS','Fail Reason'];
+  var shopeeColumns = ['Category','Product Name','Product Description','Parent SKU','Variation Integration No.','Variation Name1','Option for Variation 1','Image per Variation','Variation Name2','Option for Variation 2','Price','Stock','SKU','Size Chart Template','Size Chart Image','GTIN','Cover image','Item Image 1','Item Image 2','Item Image 3','Item Image 4','Item Image 5','Item Image 6','Item Image 7','Item Image 8','Weight','Length','Width','Height','Hỏa Tốc','Nhanh','Hàng Cồng Kềnh','Trong Ngày','Tủ nhận hàng - Viettel Smartbox','Tủ nhận hàng - SPX','Điểm nhận hàng','Pre-order DTS','Fail Reason'];
+  if (rows.some(row => row.length !== shopeeColumns.length)) return error('Shopee模板列映射异常', 500);
   return json({ success: true, rows, columns: shopeeColumns, task_title: product.name, export_format: 'shopee',
+    template_file: 'Shopee_mass_upload_2026-07-14_basic_template.xlsx', template_sheet: 'Template', template_start_row: 7, template_column_count: shopeeColumns.length,
     validation: { warnings: validation.warnings } });
 }
 
