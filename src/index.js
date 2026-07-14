@@ -1008,7 +1008,7 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
 
   // 商品元数据
   if (titleWebhookUrl) allJobs.push({ webhook_type: 'title', sub_task_id: subTasks[0]?.sub_task_id || '', url: titleWebhookUrl,
-    data: { task_id: taskId, name: detail.name, source_brief: detail.source_brief || detail.description || '', reference_title: detail.reference_title || '',
+    data: { task_id: taskId, name: detail.name, source_brief: detail.source_brief || '', reference_title: detail.reference_title || '',
       reference_image: refImg, auxiliary_images: auxImgs, sub_task_count: generateCount, sub_tasks: subTasks,
       product_type: productType, variation_name1: detail.variation_name1 || '', variation_name2: detail.variation_name2 || '',
       variants: variantCombos.map(variant => ({ id: variant.id, option1: variant.option1 || '', option2: variant.option2 || '' })),
