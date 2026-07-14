@@ -1625,20 +1625,6 @@ async function failImageQueuePlan(env, row, reason) {
   return plan?.status || 'missing_plan';
 }
 
-async function reconcileFailedImageQueuePlans(env, taskId, planTable) {
-  await ensureImageQueueTable(env);
-  const safeTable = normalizePushPlanTable(planTable);
-  const rows = await query(env, `SELECT q.* FROM ews_image_queue q
-    INNER JOIN ${safeTable} p
-      ON p.task_id=q.task_id AND p.sub_task_id=q.sub_task_id
-      AND p.webhook_type=(q.image_type || '_' || q.image_position)
-    WHERE q.task_id=? AND q.status='failed' AND p.status='processing'
-    ORDER BY q.updated_at ASC LIMIT 50`, [taskId]);
-  for (const row of (rows?.results || [])) {
-    await failImageQueuePlan(env, row, row.error || '图片队列处理失败');
-  }
-}
-
 async function clearFailedImageQueueForPlan(env, plan) {
   const match = /^(main|sub|detail|sku)_(\d+)$/.exec(plan.webhook_type || '');
   if (!match) return;
@@ -2189,15 +2175,20 @@ async function handleGetPlans(env, path) {
   const taskId = getTaskId(path);
   const idx = await getTaskIndex(env, taskId);
   if (!idx) return error('任务不存在', 404);
-  const config = await getConfig(env);
-  const publicUrl = (config.r2_public_url || '').replace(/\/+$/, '');
   const plansTable = idx.platform === 'jst' ? 'ews_jst_push_plans' : 'ews_shopee_push_plans';
-  await reconcileFailedImageQueuePlans(env, taskId, plansTable);
-  const plans = await query(env, `SELECT * FROM ${plansTable} WHERE task_id=? ORDER BY batch_order ASC, webhook_type ASC`, [taskId]);
-  const stats = await query(env, `SELECT status, COUNT(*) as cnt FROM ${plansTable} WHERE task_id=? GROUP BY status`, [taskId]);
+  const [config, results] = await Promise.all([
+    getConfig(env),
+    env.DB.batch([
+      env.DB.prepare(`SELECT * FROM ${plansTable} WHERE task_id=? ORDER BY batch_order ASC, webhook_type ASC`).bind(taskId),
+      env.DB.prepare(`SELECT status, COUNT(*) as cnt FROM ${plansTable} WHERE task_id=? GROUP BY status`).bind(taskId),
+    ]),
+  ]);
+  const publicUrl = (config.r2_public_url || '').replace(/\/+$/, '');
+  const plans = results[0]?.results || [];
+  const stats = results[1]?.results || [];
   const s = { pending: 0, processing: 0, done: 0, failed: 0, total: 0 };
-  for (const r of (stats?.results || [])) { s[r.status] = r.cnt; s.total += r.cnt; }
-  return json({ success: true, plans: (plans?.results || []).map(p => {
+  for (const r of stats) { s[r.status] = r.cnt; s.total += r.cnt; }
+  return json({ success: true, plans: plans.map(p => {
     let preview_url = '';
     try { const pl = JSON.parse(p.payload); if (pl.image_type && pl.image_position && pl.sub_task_id && publicUrl) preview_url = `${publicUrl}/ews/${pl.task_id}/${pl.sub_task_id}/${pl.image_type}_${pl.image_position}.jpg`; } catch(_) {}
     return { ...p, preview_url };

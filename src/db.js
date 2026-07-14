@@ -145,12 +145,17 @@ async function jstUpdateTask(env, tid, d) {
     .bind(d.name ?? '', d.topic_items ?? '', d.description ?? '', d.recommended_copy ?? '', d.product_link ?? '', d.supplier_name ?? '', d.main_description ?? '', d.detail_description ?? '', d.reference_image ?? '', d.auxiliary_images ?? '', d.generate_count ?? 1, d.stock ?? 999, d.weight ?? 1.0, d.variant_count ?? 1, d.main_image_count ?? 5, d.detail_image_count ?? 5, d.product_type ?? 'one', d.variation_image_mode ?? 'option1', d.mode ?? 'full', tid).run();
 }
 async function jstGetTask(env, tid) {
-  await ensureJstTaskColumns(env);
-  await ensureJstVariantColumns(env);
-  const t = await getOne(env, "SELECT * FROM ews_jst_tasks WHERE id = ?", [tid]); if (!t) return null;
-  t.variants = (await query(env, "SELECT * FROM ews_jst_variants WHERE task_id = ? ORDER BY sort_order", [tid])).results;
-  t.images = (await query(env, "SELECT * FROM ews_jst_task_images WHERE parent_task_id = ? ORDER BY set_index,image_type,position", [tid])).results;
-  t.sub_tasks = (await query(env, "SELECT * FROM ews_jst_sub_tasks WHERE parent_task_id = ? ORDER BY set_index", [tid])).results;
+  const results = await env.DB.batch([
+    env.DB.prepare("SELECT * FROM ews_jst_tasks WHERE id = ?").bind(tid),
+    env.DB.prepare("SELECT * FROM ews_jst_variants WHERE task_id = ? ORDER BY sort_order").bind(tid),
+    env.DB.prepare("SELECT * FROM ews_jst_task_images WHERE parent_task_id = ? ORDER BY set_index,image_type,position").bind(tid),
+    env.DB.prepare("SELECT * FROM ews_jst_sub_tasks WHERE parent_task_id = ? ORDER BY set_index").bind(tid),
+  ]);
+  const t = results[0]?.results?.[0];
+  if (!t) return null;
+  t.variants = results[1]?.results || [];
+  t.images = results[2]?.results || [];
+  t.sub_tasks = results[3]?.results || [];
   return t;
 }
 async function jstUpdateTaskStatus(env, tid, s) { await env.DB.prepare("UPDATE ews_jst_tasks SET status=?, updated_at=datetime('now') WHERE id=?").bind(s, tid).run(); }
@@ -267,7 +272,20 @@ async function shopeeCreateProduct(env, p) {
       p.max_purchase_start_date || '', p.max_purchase_period_days ?? null, p.max_purchase_end_date || ''
     ).run();
 }
-async function shopeeGetProduct(env, pid) { await ensureShopeeProductColumns(env); await ensureShopeeVariationColumns(env); var p = await getOne(env, "SELECT * FROM ews_shopee_products WHERE id = ?", [pid]); if (!p) return null; p.variations = (await query(env, "SELECT * FROM ews_shopee_variations WHERE product_id = ? ORDER BY rowid", [pid])).results; p.sub_tasks = (await query(env, "SELECT * FROM ews_shopee_sub_tasks WHERE parent_task_id = ? ORDER BY set_index", [pid])).results; p.images_rec = (await query(env, "SELECT * FROM ews_shopee_task_images WHERE parent_task_id = ? ORDER BY set_index,image_type,position", [pid])).results; return p; }
+async function shopeeGetProduct(env, pid) {
+  const results = await env.DB.batch([
+    env.DB.prepare("SELECT * FROM ews_shopee_products WHERE id = ?").bind(pid),
+    env.DB.prepare("SELECT * FROM ews_shopee_variations WHERE product_id = ? ORDER BY rowid").bind(pid),
+    env.DB.prepare("SELECT * FROM ews_shopee_sub_tasks WHERE parent_task_id = ? ORDER BY set_index").bind(pid),
+    env.DB.prepare("SELECT * FROM ews_shopee_task_images WHERE parent_task_id = ? ORDER BY set_index,image_type,position").bind(pid),
+  ]);
+  const product = results[0]?.results?.[0];
+  if (!product) return null;
+  product.variations = results[1]?.results || [];
+  product.sub_tasks = results[2]?.results || [];
+  product.images_rec = results[3]?.results || [];
+  return product;
+}
 async function shopeeDeleteProduct(env, pid) { await env.DB.prepare("DELETE FROM ews_shopee_products WHERE id = ?").bind(pid).run(); }
 async function shopeeCreateVariations(env, vs) { await ensureShopeeVariationColumns(env); var s = env.DB.prepare("INSERT INTO ews_shopee_variations (id, product_id, integration_no, option1, option1_export, image_per_variation, option2, option2_export, image_2, price, price_float_enabled, price_min, price_max, price_precision, stock, sku, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))"); for (const v of vs) await s.bind(v.id, v.product_id, v.integration_no, v.option1, v.option1_export || '', v.image_per_variation || '', v.option2 || '', v.option2_export || '', v.image_2 || '', v.price, v.price_float_enabled ? 1 : 0, v.price_min ?? null, v.price_max ?? null, v.price_precision ?? 0, v.stock ?? 999, v.sku || '').run(); }
 async function shopeeClearVariations(env, pid) { await env.DB.prepare("DELETE FROM ews_shopee_variations WHERE product_id = ?").bind(pid).run(); }
