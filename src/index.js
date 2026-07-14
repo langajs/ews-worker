@@ -1396,7 +1396,7 @@ const DEFAULT_PUSH_RELEASE_PER_MINUTE = 6;
 const MAX_PUSH_RELEASE_PER_MINUTE = 120;
 const DEFAULT_PUSH_RELEASE_PER_TASK_PER_MINUTE = 2;
 const MAX_PUSH_RELEASE_PER_TASK_PER_MINUTE = 60;
-const DEFAULT_PUSH_PLAN_TIMEOUT_MINUTES = 30;
+const DEFAULT_PUSH_PLAN_TIMEOUT_MINUTES = 20;
 const MAX_PUSH_PLAN_TIMEOUT_MINUTES = 1440;
 let callbackQueueReady = false;
 let imageQueueReady = false;
@@ -1853,14 +1853,25 @@ async function processImageQueuePayload(env, ctx, row) {
   } else {
     const planInfo = await env.DB.prepare(`SELECT id, webhook_url, payload, retry_count FROM ${planTable} WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`)
       .bind(task_id, sub_task_id, whType).first();
-    if (planInfo && planInfo.webhook_url && (planInfo.retry_count||0) < 3) {
+    const workflowError = String(row.error_message || '').trim();
+    if (planInfo && workflowError) {
+      const failed = await env.DB.prepare(`UPDATE ${planTable} SET status='failed', retry_count=3, error=?, updated_at=datetime('now') WHERE id=? AND status='processing'`)
+        .bind(workflowError, planInfo.id).run();
+      if (d1Changes(failed) > 0) {
+        await refundCredits(env, task_id);
+        await reconcileTaskStatusForPushPlans(env, planTable, task_id, workflowError);
+      }
+    } else if (planInfo && planInfo.webhook_url && (planInfo.retry_count||0) < 3) {
       const newCount = (planInfo.retry_count||0) + 1;
-      await env.DB.prepare(`UPDATE ${planTable} SET status='processing', retry_count=?, error=?, processing_at=datetime('now'), updated_at=datetime('now') WHERE id=?`).bind(newCount, `${row.error_message || '下载失败'}，重试第${newCount}次`, planInfo.id).run();
+      await env.DB.prepare(`UPDATE ${planTable} SET status='processing', retry_count=?, error=?, processing_at=datetime('now'), updated_at=datetime('now') WHERE id=?`).bind(newCount, `图片下载或写入失败，重试第${newCount}次`, planInfo.id).run();
       ctx.waitUntil(dispatchPushPlan(env, planTable, task_id, planInfo));
     } else {
-      const reason = planInfo?.retry_count >= 3 ? '已重试3次失败' : (row.error_message || '下载失败');
-      await env.DB.prepare(`UPDATE ${planTable} SET status='failed', retry_count=3, error=?, updated_at=datetime('now') WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`).bind(reason, task_id, sub_task_id, whType).run();
-      if (planInfo?.retry_count >= 3) await refundCredits(env, task_id);
+      const reason = planInfo?.retry_count >= 3 ? '图片下载或写入已重试3次失败' : '图片下载或写入失败';
+      const failed = await env.DB.prepare(`UPDATE ${planTable} SET status='failed', retry_count=3, error=?, updated_at=datetime('now') WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`).bind(reason, task_id, sub_task_id, whType).run();
+      if (d1Changes(failed) > 0) {
+        await refundCredits(env, task_id);
+        await reconcileTaskStatusForPushPlans(env, planTable, task_id, reason);
+      }
     }
   }
 

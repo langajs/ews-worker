@@ -4,7 +4,7 @@
     "nodes": [
       {
         "parameters": {
-          "jsCode": "const body = $input.first().json.body || {};\n\nconst taskId = body.task_id;\nconst subTaskId = body.sub_task_id;\nconst setIndex = parseInt(body.set_index) || 0;\nconst referenceImage = body.reference_image || '';\nconst variantName = String(body.variant_name || '').trim();\nconst skuDescription = String(body.sku_description || '').trim();\nconst skuImage = body.sku_image || '';\nconst imageType = body.image_type;\nconst imagePosition = parseInt(body.image_position) || 1;\nconst callbackSecret = body.callback_secret || '';\nconst callbackUrl = body.callback_url || '';\n\nif (!taskId || !subTaskId || !callbackUrl || imageType !== 'sku') {\n  throw new Error('SKU图任务参数不完整');\n}\n\nconst finalPrompt = [\n  '生成一张聚水潭商品 SKU 规格图，画布比例 1:1，主体清晰完整，适合写入商品导入模板的图片地址字段。',\n  '',\n  '必须遵守：',\n  '1. 商品品类、结构、包装、商标和材质必须与参考图一致。',\n  '2. 当前一级规格：' + (variantName || '未命名') + '。',\n  '3. 规格说明：' + (skuDescription || '无额外说明') + '。',\n  '4. 如果提供 sku_image，以它作为当前规格颜色、图案和款式的最高优先级参考；核心参考图只用于保持商品身份一致。',\n  '5. 使用干净、明亮、真实的商业摄影背景，主体居中，不裁切商品。',\n  '6. 不生成文字、价格、促销标签、水印、边框、拼图或无关配件。',\n  '7. 不得创造参考图中不存在的功能或结构。',\n].join('\\n');\n\nconst imagesArray = [skuImage, referenceImage].filter(Boolean);\nif (imagesArray.length === 0) throw new Error('SKU图任务缺少参考图片');\n\nreturn {\n  taskId,\n  subTaskId,\n  setIndex,\n  variantName,\n  skuDescription,\n  skuImage,\n  imageType,\n  imagePosition,\n  finalPrompt,\n  imagesArray,\n  callbackSecret,\n  callbackUrl,\n};"
+          "jsCode": "const body = $input.first().json.body || {};\n\nconst taskId = body.task_id;\nconst subTaskId = body.sub_task_id;\nconst setIndex = parseInt(body.set_index) || 0;\nconst referenceImage = body.reference_image || '';\nconst variantName = String(body.variant_name || '').trim();\nconst variantOption2 = String(body.variant_option2 || '').trim();\nconst skuDescription = String(body.sku_description || '').trim();\nconst skuImage = body.sku_image || '';\nconst imageType = body.image_type;\nconst imagePosition = parseInt(body.image_position) || 1;\nconst callbackSecret = body.callback_secret || '';\nconst callbackUrl = body.callback_url || '';\n\nconst finalPrompt = [\n  '生成一张聚水潭商品 SKU 规格图，画布比例 1:1，主体清晰完整。',\n  '商品品类、结构、包装、商标和材质必须与参考图一致。',\n  '当前一级规格：' + (variantName || '未命名') + '。',\n  '规格说明：' + (skuDescription || '无额外说明') + '。',\n  '如果提供 sku_image，以它作为当前规格颜色、图案和款式的最高优先级参考。',\n  '使用干净、明亮、真实的商业摄影背景，主体居中，不裁切商品。',\n  '不生成文字、价格、促销标签、水印、边框、拼图或无关配件。',\n].join('\\n');\n\nconst imagesArray = [skuImage, referenceImage].filter(Boolean);\nreturn {\n  taskId, subTaskId, setIndex, variantName, variantOption2, skuDescription, skuImage,\n  imageType, imagePosition, finalPrompt, imagesArray, callbackSecret, callbackUrl,\n};"
         },
         "type": "n8n-nodes-base.code",
         "typeVersion": 2,
@@ -42,11 +42,12 @@
             "id": "Ua1TBIbDcAu3z8pU",
             "name": "GrsaiApp"
           }
-        }
+        },
+        "onError": "continueRegularOutput"
       },
       {
         "parameters": {
-          "jsCode": "const response = $input.first().json;\nconst original = $node['提取参数'].json;\n\nif (!response?.id) {\n  throw new Error('图片服务未返回任务ID');\n}\n\nreturn {\n  grsaiTaskId: response.id,\n  status: response.status,\n  taskId: original.taskId,\n  subTaskId: original.subTaskId,\n  setIndex: original.setIndex,\n  imageType: original.imageType,\n  imagePosition: original.imagePosition,\n  callbackSecret: original.callbackSecret,\n  callbackUrl: original.callbackUrl,\n  startedAt: Date.now()\n};"
+          "jsCode": "const response = $input.first().json || {};\nconst original = $node['提取参数'].json;\n\nfunction errorText(value) {\n  if (!value) return '';\n  if (typeof value === 'string') return value;\n  if (value.message) return String(value.message);\n  if (value.description) return String(value.description);\n  try { return JSON.stringify(value); } catch (_) { return String(value); }\n}\n\nconst serviceTaskId = String(response.id || '').trim();\nconst responseError = errorText(response.error)\n  || (Number(response.statusCode) >= 400 ? '图片服务HTTP ' + response.statusCode : '')\n  || (!serviceTaskId ? errorText(response.message) || '图片服务未返回任务ID' : '');\n\nreturn {\n  grsaiTaskId: serviceTaskId,\n  status: serviceTaskId ? String(response.status || 'pending') : 'failed',\n  error: responseError,\n  taskId: original.taskId,\n  subTaskId: original.subTaskId,\n  setIndex: original.setIndex,\n  imageType: original.imageType,\n  imagePosition: original.imagePosition,\n  callbackSecret: original.callbackSecret,\n  callbackUrl: original.callbackUrl,\n  startedAt: Date.now(),\n  timedOut: false,\n};"
         },
         "type": "n8n-nodes-base.code",
         "typeVersion": 2,
@@ -89,7 +90,8 @@
             "id": "Ua1TBIbDcAu3z8pU",
             "name": "GrsaiApp"
           }
-        }
+        },
+        "onError": "continueRegularOutput"
       },
       {
         "parameters": {
@@ -107,7 +109,7 @@
       },
       {
         "parameters": {
-          "jsCode": "const response = $input.first().json;\nconst original = $node['提取参数'].json;\nconst imageUrl = Array.isArray(response.results) ? String(response.results[0]?.url || '') : '';\n\nif (!imageUrl) {\n  throw new Error('图片任务成功但未返回图片URL');\n}\n\nreturn {\n  callback_secret: original.callbackSecret,\n  task_id: original.taskId,\n  sub_task_id: original.subTaskId,\n  set_index: original.setIndex,\n  image_type: original.imageType,\n  image_position: original.imagePosition,\n  image_url: imageUrl,\n  callbackUrl: original.callbackUrl\n};"
+          "jsCode": "const response = $input.first().json || {};\nconst original = $node['提取参数'].json;\nconst imageUrl = Array.isArray(response.results) ? String(response.results[0]?.url || '') : '';\n\nreturn {\n  callback_secret: original.callbackSecret,\n  task_id: original.taskId,\n  sub_task_id: original.subTaskId,\n  set_index: original.setIndex,\n  image_type: original.imageType,\n  image_position: original.imagePosition,\n  image_url: imageUrl,\n  callbackUrl: original.callbackUrl,\n};"
         },
         "type": "n8n-nodes-base.code",
         "typeVersion": 2,
@@ -208,7 +210,7 @@
       },
       {
         "parameters": {
-          "jsCode": "const response = $input.first().json;\nconst original = $node['提取参数'].json;\nconst error = response.timedOut\n  ? '图片生成超过900秒，已终止轮询'\n  : String(response.error || response.status || 'SKU图片生成失败');\n\nreturn {\n  callback_secret: original.callbackSecret,\n  task_id: original.taskId,\n  sub_task_id: original.subTaskId,\n  set_index: original.setIndex,\n  image_type: original.imageType,\n  image_position: original.imagePosition,\n  error,\n  callbackUrl: original.callbackUrl\n};"
+          "jsCode": "const response = $input.first().json || {};\nconst original = $node['提取参数'].json;\n\nfunction errorText(value) {\n  if (!value) return '';\n  if (typeof value === 'string') return value;\n  if (value.message) return String(value.message);\n  if (value.description) return String(value.description);\n  try { return JSON.stringify(value); } catch (_) { return String(value); }\n}\n\nconst error = response.timedOut\n  ? '图片生成超过900秒，已终止轮询'\n  : errorText(response.error) || errorText(response.status) || '图片生成失败';\n\nreturn {\n  callback_secret: original.callbackSecret,\n  task_id: original.taskId,\n  sub_task_id: original.subTaskId,\n  set_index: original.setIndex,\n  image_type: original.imageType,\n  image_position: original.imagePosition,\n  error,\n  callbackUrl: original.callbackUrl,\n};"
         },
         "type": "n8n-nodes-base.code",
         "typeVersion": 2,
@@ -246,12 +248,12 @@
         "id": "6f027b78-be56-4108-95e8-cd97a093d757",
         "name": "失败回调",
         "retryOnFail": true,
-        "maxTries": 3,
+        "maxTries": 5,
         "waitBetweenTries": 5000
       },
       {
         "parameters": {
-          "jsCode": "const response = $input.first().json;\nconst task = $node['提取任务ID'].json;\nconst elapsedSeconds = Math.floor((Date.now() - task.startedAt) / 1000);\n\nreturn {\n  grsaiTaskId: task.grsaiTaskId,\n  status: response.status,\n  progress: response.progress,\n  results: response.results,\n  error: response.error,\n  taskId: task.taskId,\n  subTaskId: task.subTaskId,\n  setIndex: task.setIndex,\n  imageType: task.imageType,\n  imagePosition: task.imagePosition,\n  callbackSecret: task.callbackSecret,\n  callbackUrl: task.callbackUrl,\n  elapsedSeconds,\n  timedOut: elapsedSeconds >= 900\n};"
+          "jsCode": "const response = $input.first().json || {};\nconst task = $node['提取任务ID'].json;\nconst elapsedSeconds = Math.floor((Date.now() - task.startedAt) / 1000);\n\nfunction errorText(value) {\n  if (!value) return '';\n  if (typeof value === 'string') return value;\n  if (value.message) return String(value.message);\n  if (value.description) return String(value.description);\n  try { return JSON.stringify(value); } catch (_) { return String(value); }\n}\n\nconst results = Array.isArray(response.results) ? response.results : [];\nconst imageUrl = String(results[0]?.url || '').trim();\nlet status = String(response.status || '').trim();\nlet error = errorText(response.error)\n  || (Number(response.statusCode) >= 400 ? '图片查询HTTP ' + response.statusCode : '');\nif (!status && error) status = 'failed';\nif (!status) status = 'pending';\nif (status === 'succeeded' && !imageUrl) {\n  status = 'failed';\n  error = '图片服务返回成功但没有图片URL';\n}\n\nreturn {\n  grsaiTaskId: task.grsaiTaskId,\n  status,\n  progress: response.progress,\n  results,\n  error,\n  taskId: task.taskId,\n  subTaskId: task.subTaskId,\n  setIndex: task.setIndex,\n  imageType: task.imageType,\n  imagePosition: task.imagePosition,\n  callbackSecret: task.callbackSecret,\n  callbackUrl: task.callbackUrl,\n  elapsedSeconds,\n  timedOut: elapsedSeconds >= 900,\n};"
         },
         "type": "n8n-nodes-base.code",
         "typeVersion": 2,
@@ -289,13 +291,13 @@
         "id": "d39423d9-b5a0-4118-94cc-04982c64ee11",
         "name": "成功回调",
         "retryOnFail": true,
-        "maxTries": 3,
+        "maxTries": 5,
         "waitBetweenTries": 5000
       },
       {
         "parameters": {
           "httpMethod": "POST",
-          "path": "sku-image",
+          "path": "cn/v3s1",
           "responseMode": "responseNode",
           "options": {}
         },
@@ -406,7 +408,7 @@
         "main": [
           [
             {
-              "node": "Wait",
+              "node": "任务失败",
               "type": "main",
               "index": 0
             }

@@ -1,600 +1,583 @@
-{
-    "name":  "虾皮主图",
-    "nodes":  [
-                  {
-                      "parameters":  {
-                                         "httpMethod":  "POST",
-                                         "path":  "vn/v3m1",
-                                         "responseMode":  "responseNode",
-                                         "options":  {
-
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.webhook",
-                      "typeVersion":  2.1,
-                      "position":  [
-                                       -976,
-                                       128
-                                   ],
-                      "id":  "a2ad7242-d3c7-4eac-aa57-3e7b9a726467",
-                      "name":  "Webhook",
-                      "webhookId":  "4f8b30f0-6e13-487c-a4be-27e3446fc597"
-                  },
-                  {
-                      "parameters":  {
-                                         "jsCode":  "const body = $input.first().json.body;\n\nconst taskId = body.task_id;\nconst subTaskId = body.sub_task_id;\nconst setIndex = body.set_index;\nconst referenceImage = body.reference_image;\nconst imageType = body.image_type;\nconst imagePosition = body.image_position;\nconst callbackSecret = body.callback_secret || \u0027\u0027;\nconst callbackUrl = body.callback_url;\n\nconst mainDescription = body.main_description || \u0027\u0027;\nconst detailDescription = body.detail_description || \u0027\u0027;\nconst userPrompt = imageType === \u0027main\u0027 ? mainDescription : detailDescription;\n\n// ============================================================\n// 系统提示词编辑区(当前版本越南测试版本,暂不开放用户提示词)\n// ============================================================\nconst systemPrompt = \u0027你是一个视觉产品设计，产品视觉效果：空间立体 视觉广角从下网上的广角 3D建模效果,目标市场:越南,所有的卖点词、文字、营销文案等全部使用越南语（要真实,严格保持产品一致性,不要出现变形,风格可以偏海报一点，突出半价优惠,注意不要出现价格,标注前一百名有额外赠品），产品的**包装**、**包装上的文字**、**图片**、**细节**等，不可以做任何修改。\u0027;\n// ============================================================\n\nconst finalPrompt = systemPrompt;// + \u0027 \u0027 + userPrompt;\n\nlet auxiliaryImages = [];\ntry {\n  auxiliaryImages = JSON.parse(body.auxiliary_images || \u0027[]\u0027);\n} catch(e) {\n  auxiliaryImages = [];\n}\n\nconst imagesArray = [referenceImage, ...auxiliaryImages].filter(Boolean);\n\nconst subTasks = body.sub_tasks || [];\nlet currentSubTask = subTasks.find(st =\u003e st.sub_task_id === subTaskId) || {};\nconst styleCode = currentSubTask.style_code || \u0027\u0027;\n\nreturn {\n  taskId,\n  subTaskId,\n  setIndex,\n  referenceImage,\n  imageType,\n  imagePosition,\n  finalPrompt,\n  imagesArray,\n  styleCode,\n  callbackSecret,\n  callbackUrl,\n  attempts: 0\n};"
-                                     },
-                      "type":  "n8n-nodes-base.code",
-                      "typeVersion":  2,
-                      "position":  [
-                                       -528,
-                                       128
-                                   ],
-                      "id":  "c3995015-cf7b-4301-b3cb-d8299654d031",
-                      "name":  "提取参数"
-                  },
-                  {
-                      "parameters":  {
-                                         "method":  "POST",
-                                         "url":  "https://grsai.dakka.com.cn/v1/api/generate",
-                                         "authentication":  "genericCredentialType",
-                                         "genericAuthType":  "httpHeaderAuth",
-                                         "sendBody":  true,
-                                         "specifyBody":  "json",
-                                         "jsonBody":  "={\n  \"model\": \"gpt-image-2\",\n  \"prompt\": \"{{ $json.finalPrompt }}\",\n  \"images\": {{ JSON.stringify($json.imagesArray) }},\n  \"aspectRatio\": \"1024x1024\",\n  \"replyType\": \"async\"\n}",
-                                         "options":  {
-
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.httpRequest",
-                      "typeVersion":  4.4,
-                      "position":  [
-                                       -304,
-                                       128
-                                   ],
-                      "id":  "5c57af4c-4a32-4c62-a736-66e9ffa88857",
-                      "name":  "gpt-image-2",
-                      "retryOnFail":  true,
-                      "maxTries":  3,
-                      "waitBetweenTries":  5000,
-                      "credentials":  {
-                                          "httpHeaderAuth":  {
-                                                                 "id":  "Ua1TBIbDcAu3z8pU",
-                                                                 "name":  "GrsaiApp"
-                                                             }
-                                      }
-                  },
-                  {
-                      "parameters":  {
-                                         "jsCode":  "const grsaiResp = $input.first().json;\nconst prevNode = $node[\u0027提取参数\u0027];\nconst orig = prevNode.json;\n\nreturn {\n  grsaiTaskId: grsaiResp.id,\n  status: grsaiResp.status,\n  taskId: orig.taskId,\n  subTaskId: orig.subTaskId,\n  imageType: orig.imageType,\n  imagePosition: orig.imagePosition,\n  callbackSecret: orig.callbackSecret,\n  callbackUrl: orig.callbackUrl,\n  startedAt: Date.now()\n};"
-                                     },
-                      "type":  "n8n-nodes-base.code",
-                      "typeVersion":  2,
-                      "position":  [
-                                       -80,
-                                       128
-                                   ],
-                      "id":  "dd866a16-96c3-4cb4-9e14-61689c91bd5c",
-                      "name":  "提取任务ID"
-                  },
-                  {
-                      "parameters":  {
-                                         "url":  "=https://grsai.dakka.com.cn/v1/api/result?id={{ $json.grsaiTaskId }}",
-                                         "authentication":  "genericCredentialType",
-                                         "genericAuthType":  "httpHeaderAuth",
-                                         "sendHeaders":  true,
-                                         "headerParameters":  {
-                                                                  "parameters":  [
-                                                                                     {
-                                                                                         "name":  "Content-Type",
-                                                                                         "value":  "application/json"
-                                                                                     }
-                                                                                 ]
-                                                              },
-                                         "options":  {
-
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.httpRequest",
-                      "typeVersion":  4.4,
-                      "position":  [
-                                       368,
-                                       48
-                                   ],
-                      "id":  "a2a4ae5e-4da8-4413-8913-aaa680e65695",
-                      "name":  "查询结果",
-                      "retryOnFail":  true,
-                      "maxTries":  3,
-                      "waitBetweenTries":  5000,
-                      "credentials":  {
-                                          "httpHeaderAuth":  {
-                                                                 "id":  "Ua1TBIbDcAu3z8pU",
-                                                                 "name":  "GrsaiApp"
-                                                             }
-                                      },
-                      "onError":  "continueRegularOutput"
-                  },
-                  {
-                      "parameters":  {
-                                         "amount":  10
-                                     },
-                      "type":  "n8n-nodes-base.wait",
-                      "typeVersion":  1.1,
-                      "position":  [
-                                       144,
-                                       128
-                                   ],
-                      "id":  "02f2f366-326b-4852-a5fa-21c75fcbcde3",
-                      "name":  "Wait",
-                      "webhookId":  "ad981fcb-55f0-48c3-9946-cb047a1c115e"
-                  },
-                  {
-                      "parameters":  {
-                                         "jsCode":  "const lastResult = $input.first().json;\nconst prevNode = $node[\u0027提取参数\u0027];\nconst orig = prevNode.json;\n\nlet imageUrl = \u0027\u0027;\nif (lastResult.results \u0026\u0026 lastResult.results.length \u003e 0) {\n  imageUrl = lastResult.results[0].url || \u0027\u0027;\n}\n\nreturn {\n  secret: orig.callbackSecret || \u0027\u0027,\n  task_id: orig.taskId,\n  sub_task_id: orig.subTaskId,\n  image_type: orig.imageType,\n  image_position: orig.imagePosition,\n  image_url: imageUrl,\n  callbackUrl: orig.callbackUrl\n};"
-                                     },
-                      "type":  "n8n-nodes-base.code",
-                      "typeVersion":  2,
-                      "position":  [
-                                       816,
-                                       -96
-                                   ],
-                      "id":  "88293e5e-cc60-4346-a0b8-610654cbb5a9",
-                      "name":  "组装结果"
-                  },
-                  {
-                      "parameters":  {
-                                         "conditions":  {
-                                                            "options":  {
-                                                                            "caseSensitive":  true,
-                                                                            "leftValue":  "",
-                                                                            "typeValidation":  "strict",
-                                                                            "version":  3
-                                                                        },
-                                                            "conditions":  [
-                                                                               {
-                                                                                   "id":  "7d8441ca-8e3d-459a-b083-4d27d3f612f1",
-                                                                                   "leftValue":  "={{ $json.body.callback_secret }}",
-                                                                                   "rightValue":  "v3",
-                                                                                   "operator":  {
-                                                                                                    "type":  "string",
-                                                                                                    "operation":  "equals",
-                                                                                                    "name":  "filter.operator.equals"
-                                                                                                }
-                                                                               }
-                                                                           ],
-                                                            "combinator":  "and"
-                                                        },
-                                         "options":  {
-
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.if",
-                      "typeVersion":  2.3,
-                      "position":  [
-                                       -752,
-                                       128
-                                   ],
-                      "id":  "7ebb0229-4328-46f9-8b91-d2b5ca19d7f9",
-                      "name":  "密钥校对"
-                  },
-                  {
-                      "parameters":  {
-                                         "conditions":  {
-                                                            "options":  {
-                                                                            "caseSensitive":  true,
-                                                                            "leftValue":  "",
-                                                                            "typeValidation":  "strict",
-                                                                            "version":  3
-                                                                        },
-                                                            "conditions":  [
-                                                                               {
-                                                                                   "id":  "4e2fbe53-db65-4933-81f6-c44d5abddcf2",
-                                                                                   "leftValue":  "={{ $json.status}}",
-                                                                                   "rightValue":  "failed",
-                                                                                   "operator":  {
-                                                                                                    "type":  "string",
-                                                                                                    "operation":  "equals",
-                                                                                                    "name":  "filter.operator.equals"
-                                                                                                }
-                                                                               },
-                                                                               {
-                                                                                   "id":  "e6302747-882b-4b18-98a1-384e019393f1",
-                                                                                   "leftValue":  "={{ $json.status}}",
-                                                                                   "rightValue":  "violation",
-                                                                                   "operator":  {
-                                                                                                    "type":  "string",
-                                                                                                    "operation":  "equals",
-                                                                                                    "name":  "filter.operator.equals"
-                                                                                                }
-                                                                               },
-                                                                               {
-                                                                                   "id":  "a2000000-0000-4000-8000-000000000900",
-                                                                                   "leftValue":  "={{ $json.timedOut }}",
-                                                                                   "rightValue":  true,
-                                                                                   "operator":  {
-                                                                                                    "type":  "boolean",
-                                                                                                    "operation":  "true",
-                                                                                                    "singleValue":  true
-                                                                                                }
-                                                                               }
-                                                                           ],
-                                                            "combinator":  "or"
-                                                        },
-                                         "options":  {
-
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.if",
-                      "typeVersion":  2.3,
-                      "position":  [
-                                       816,
-                                       144
-                                   ],
-                      "id":  "f078b927-7d60-41fa-a347-295dea433b96",
-                      "name":  "任务失败"
-                  },
-                  {
-                      "parameters":  {
-                                         "jsCode":  "const response = $input.first().json;\nconst prevNode = $node[\u0027提取参数\u0027];\nconst orig = prevNode.json;\nconst error = response.timedOut\n  ? \u0027图片生成超过900秒，已终止轮询\u0027\n  : String(response.error || response.status || \u0027图片生成失败\u0027);\n\nreturn {\n  secret: orig.callbackSecret || \u0027\u0027,\n  task_id: orig.taskId,\n  sub_task_id: orig.subTaskId,\n  image_type: orig.imageType,\n  image_position: orig.imagePosition,\n  error,\n  callbackUrl: orig.callbackUrl\n};"
-                                     },
-                      "type":  "n8n-nodes-base.code",
-                      "typeVersion":  2,
-                      "position":  [
-                                       1040,
-                                       96
-                                   ],
-                      "id":  "2a43c128-d55f-4a0b-91ac-4103d354641c",
-                      "name":  "失败通知"
-                  },
-                  {
-                      "parameters":  {
-                                         "method":  "POST",
-                                         "url":  "={{ $json.callbackUrl }}",
-                                         "sendHeaders":  true,
-                                         "headerParameters":  {
-                                                                  "parameters":  [
-                                                                                     {
-                                                                                         "name":  "Content-Type",
-                                                                                         "value":  "application/json"
-                                                                                     }
-                                                                                 ]
-                                                              },
-                                         "sendBody":  true,
-                                         "specifyBody":  "json",
-                                         "jsonBody":  "={\n  \"secret\": \"{{ $json.secret }}\",\n  \"task_id\": \"{{ $json.task_id }}\",\n  \"sub_task_id\": \"{{ $json.sub_task_id }}\",\n  \"image_type\": \"{{ $json.image_type }}\",\n  \"image_position\": {{ $json.image_position }},\n  \"error\": \"{{ $json.error }}\"\n}",
-                                         "options":  {
-
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.httpRequest",
-                      "typeVersion":  4.4,
-                      "position":  [
-                                       1264,
-                                       96
-                                   ],
-                      "id":  "8e31e68d-c4b7-4ab6-bf21-4e8ddf5c02e3",
-                      "name":  "失败回调",
-                      "retryOnFail":  true,
-                      "maxTries":  3,
-                      "waitBetweenTries":  5000
-                  },
-                  {
-                      "parameters":  {
-                                         "method":  "POST",
-                                         "url":  "={{ $json.callbackUrl }}",
-                                         "sendHeaders":  true,
-                                         "headerParameters":  {
-                                                                  "parameters":  [
-                                                                                     {
-                                                                                         "name":  "Content-Type",
-                                                                                         "value":  "application/json"
-                                                                                     }
-                                                                                 ]
-                                                              },
-                                         "sendBody":  true,
-                                         "specifyBody":  "json",
-                                         "jsonBody":  "={\n  \"secret\": \"{{ $json.secret }}\",\n  \"task_id\": \"{{ $json.task_id }}\",\n  \"sub_task_id\": \"{{ $json.sub_task_id }}\",\n  \"image_type\": \"{{ $json.image_type }}\",\n  \"image_position\": {{ $json.image_position }},\n  \"image_url\": \"{{ $json.image_url }}\"\n}",
-                                         "options":  {
-
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.httpRequest",
-                      "typeVersion":  4.4,
-                      "position":  [
-                                       1040,
-                                       -96
-                                   ],
-                      "id":  "850fcaab-ad42-420d-8aca-8fafa1a7a5ca",
-                      "name":  "成功回调",
-                      "retryOnFail":  true,
-                      "maxTries":  3,
-                      "waitBetweenTries":  5000
-                  },
-                  {
-                      "parameters":  {
-                                         "conditions":  {
-                                                            "options":  {
-                                                                            "caseSensitive":  true,
-                                                                            "leftValue":  "",
-                                                                            "typeValidation":  "strict",
-                                                                            "version":  3
-                                                                        },
-                                                            "conditions":  [
-                                                                               {
-                                                                                   "id":  "e80d0b76-7769-4487-9b1b-faf762cc3d74",
-                                                                                   "leftValue":  "={{ $json.status}}",
-                                                                                   "rightValue":  "succeeded",
-                                                                                   "operator":  {
-                                                                                                    "type":  "string",
-                                                                                                    "operation":  "equals",
-                                                                                                    "name":  "filter.operator.equals"
-                                                                                                }
-                                                                               }
-                                                                           ],
-                                                            "combinator":  "or"
-                                                        },
-                                         "options":  {
-
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.if",
-                      "typeVersion":  2.3,
-                      "position":  [
-                                       592,
-                                       48
-                                   ],
-                      "id":  "c16897aa-2514-4ea8-a4b4-f3f7bc0c5238",
-                      "name":  "任务完成"
-                  },
-                  {
-                      "parameters":  {
-                                         "jsCode":  "const response = $input.first().json;\nconst task = $node[\u0027提取任务ID\u0027].json;\nconst elapsedSeconds = Math.floor((Date.now() - task.startedAt) / 1000);\n\nreturn {\n  grsaiTaskId: task.grsaiTaskId,\n  status: response.status,\n  progress: response.progress,\n  results: response.results,\n  error: response.error,\n  taskId: task.taskId,\n  subTaskId: task.subTaskId,\n  imageType: task.imageType,\n  imagePosition: task.imagePosition,\n  callbackSecret: task.callbackSecret,\n  callbackUrl: task.callbackUrl,\n  elapsedSeconds,\n  timedOut: elapsedSeconds \u003e= 900\n};"
-                                     },
-                      "type":  "n8n-nodes-base.code",
-                      "typeVersion":  2,
-                      "position":  [
-                                       1040,
-                                       320
-                                   ],
-                      "id":  "86ad84d4-3da2-42db-be63-ab49157ebbc0",
-                      "name":  "重组查询"
-                  },
-                  {
-                      "parameters":  {
-                                         "respondWith":  "json",
-                                         "responseBody":  "={{ { success: true, status: 'accepted' } }}",
-                                         "options":  {
-                                                         "responseCode":  202
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.respondToWebhook",
-                      "typeVersion":  1.4,
-                      "position":  [
-                                       -528,
-                                       -32
-                                   ],
-                      "id":  "a3000000-0000-4000-8000-000000000003",
-                      "name":  "接受请求"
-                  },
-                  {
-                      "parameters":  {
-                                         "respondWith":  "json",
-                                         "responseBody":  "={{ { success: false, error: 'callback_secret 校验失败', retryable: false } }}",
-                                         "options":  {
-                                                         "responseCode":  401
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.respondToWebhook",
-                      "typeVersion":  1.4,
-                      "position":  [
-                                       -528,
-                                       288
-                                   ],
-                      "id":  "b3000000-0000-4000-8000-000000000003",
-                      "name":  "拒绝请求"
-                  }
-              ],
-    "pinData":  {
-
-                },
-    "connections":  {
-                        "Webhook":  {
-                                        "main":  [
-                                                     [
-                                                         {
-                                                             "node":  "密钥校对",
-                                                             "type":  "main",
-                                                             "index":  0
-                                                         }
-                                                     ]
-                                                 ]
-                                    },
-                        "提取参数":  {
-                                     "main":  [
-                                                  [
-                                                      {
-                                                          "node":  "gpt-image-2",
-                                                          "type":  "main",
-                                                          "index":  0
-                                                      }
-                                                  ]
-                                              ]
-                                 },
-                        "gpt-image-2":  {
-                                            "main":  [
-                                                         [
-                                                             {
-                                                                 "node":  "提取任务ID",
-                                                                 "type":  "main",
-                                                                 "index":  0
-                                                             }
-                                                         ]
-                                                     ]
-                                        },
-                        "提取任务ID":  {
-                                       "main":  [
-                                                    [
-                                                        {
-                                                            "node":  "Wait",
-                                                            "type":  "main",
-                                                            "index":  0
-                                                        }
-                                                    ]
-                                                ]
-                                   },
-                        "查询结果":  {
-                                     "main":  [
-                                                  [
-                                                      {
-                                                          "node":  "重组查询",
-                                                          "type":  "main",
-                                                          "index":  0
-                                                      }
-                                                  ]
-                                              ]
-                                 },
-                        "Wait":  {
-                                     "main":  [
-                                                  [
-                                                      {
-                                                          "node":  "查询结果",
-                                                          "type":  "main",
-                                                          "index":  0
-                                                      }
-                                                  ]
-                                              ]
-                                 },
-                        "组装结果":  {
-                                     "main":  [
-                                                  [
-                                                      {
-                                                          "node":  "成功回调",
-                                                          "type":  "main",
-                                                          "index":  0
-                                                      }
-                                                  ]
-                                              ]
-                                 },
-                        "密钥校对":  {
-                                     "main":  [
-                                                  [
-                                                      {
-                                                          "node":  "接受请求",
-                                                          "type":  "main",
-                                                          "index":  0
-                                                      }
-                                                  ],
-                                                  [
-                                                      {
-                                                          "node":  "拒绝请求",
-                                                          "type":  "main",
-                                                          "index":  0
-                                                      }
-                                                  ]
-                                              ]
-                                 },
-                        "接受请求":  {
-                                     "main":  [
-                                                  [
-                                                      {
-                                                          "node":  "提取参数",
-                                                          "type":  "main",
-                                                          "index":  0
-                                                      }
-                                                  ]
-                                              ]
-                                 },
-                        "任务失败":  {
-                                     "main":  [
-                                                  [
-                                                      {
-                                                          "node":  "失败通知",
-                                                          "type":  "main",
-                                                          "index":  0
-                                                      }
-                                                  ],
-                                                  [
-                                                      {
-                                                          "node":  "Wait",
-                                                          "type":  "main",
-                                                          "index":  0
-                                                      }
-                                                  ]
-                                              ]
-                                 },
-                        "失败通知":  {
-                                     "main":  [
-                                                  [
-                                                      {
-                                                          "node":  "失败回调",
-                                                          "type":  "main",
-                                                          "index":  0
-                                                      }
-                                                  ]
-                                              ]
-                                 },
-                        "任务完成":  {
-                                     "main":  [
-                                                  [
-                                                      {
-                                                          "node":  "组装结果",
-                                                          "type":  "main",
-                                                          "index":  0
-                                                      }
-                                                  ],
-                                                  [
-                                                      {
-                                                          "node":  "任务失败",
-                                                          "type":  "main",
-                                                          "index":  0
-                                                      }
-                                                  ]
-                                              ]
-                                 },
-                        "重组查询":  {
-                                     "main":  [
-                                                  [
-                                                      {
-                                                          "node":  "任务完成",
-                                                          "type":  "main",
-                                                          "index":  0
-                                                      }
-                                                  ]
-                                              ]
-                                 }
-                    },
-    "active":  false,
-    "settings":  {
-                     "executionOrder":  "v1",
-                     "binaryMode":  "separate",
-                     "availableInMCP":  false
-                 },
-    "versionId":  "12eb018e-fca4-4cc7-b2a4-231dfdc8d002",
-    "meta":  {
-                 "instanceId":  "bac5a48cbfe45b4dd41ef15205e80ac0e0958f3b697c370060cb2d4c14846049"
-             },
-    "nodeGroups":  [
-
-                   ],
-    "id":  "mAM6iCqe6dSUy7sw",
-    "tags":  [
-                 {
-                     "updatedAt":  "2026-07-10T01:42:16.053Z",
-                     "createdAt":  "2026-07-10T01:42:16.053Z",
-                     "id":  "3jFkRnXqIMlSDFy0",
-                     "name":  "v3"
-                 },
-                 {
-                     "updatedAt":  "2026-06-29T02:46:33.949Z",
-                     "createdAt":  "2026-06-11T02:36:47.741Z",
-                     "id":  "MBbczQe023i77fDQ",
-                     "name":  "主图"
-                 },
-                 {
-                     "updatedAt":  "2026-07-07T11:05:30.160Z",
-                     "createdAt":  "2026-07-07T11:05:30.160Z",
-                     "id":  "dYx7pZfd01CltSoJ",
-                     "name":  "VNEC"
-                 }
-             ]
-}
+[
+  {
+    "name": "虾皮主图",
+    "nodes": [
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "vn/v3m1",
+          "responseMode": "responseNode",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2.1,
+        "position": [
+          -976,
+          128
+        ],
+        "id": "a2ad7242-d3c7-4eac-aa57-3e7b9a726467",
+        "name": "Webhook",
+        "webhookId": "4f8b30f0-6e13-487c-a4be-27e3446fc597"
+      },
+      {
+        "parameters": {
+          "jsCode": "const body = $input.first().json.body || {};\n\nconst taskId = body.task_id;\nconst subTaskId = body.sub_task_id;\nconst setIndex = body.set_index;\nconst referenceImage = body.reference_image;\nconst imageType = body.image_type;\nconst imagePosition = body.image_position;\nconst callbackSecret = body.callback_secret || '';\nconst callbackUrl = body.callback_url;\n\nconst mainDescription = body.main_description || '';\nconst detailDescription = body.detail_description || '';\nconst userPrompt = imageType === 'main' ? mainDescription : detailDescription;\n\n// ============================================================\n// 系统提示词编辑区(当前版本越南测试版本,暂不开放用户提示词)\n// ============================================================\nconst systemPrompt = '你是一个视觉产品设计，产品视觉效果：空间立体 视觉广角从下网上的广角 3D建模效果,目标市场:越南,所有的卖点词、文字、营销文案等全部使用越南语（要真实,严格保持产品一致性,不要出现变形,风格可以偏海报一点，突出半价优惠,注意不要出现价格,标注前一百名有额外赠品），产品的**包装**、**包装上的文字**、**图片**、**细节**等，不可以做任何修改。';\n// ============================================================\n\nconst finalPrompt = systemPrompt;// + ' ' + userPrompt;\n\nlet auxiliaryImages = [];\ntry {\n  auxiliaryImages = JSON.parse(body.auxiliary_images || '[]');\n} catch(e) {\n  auxiliaryImages = [];\n}\n\nconst imagesArray = [referenceImage, ...auxiliaryImages].filter(Boolean);\n\nconst subTasks = body.sub_tasks || [];\nlet currentSubTask = subTasks.find(st => st.sub_task_id === subTaskId) || {};\nconst styleCode = currentSubTask.style_code || '';\n\nreturn {\n  taskId,\n  subTaskId,\n  setIndex,\n  referenceImage,\n  imageType,\n  imagePosition,\n  finalPrompt,\n  imagesArray,\n  styleCode,\n  callbackSecret,\n  callbackUrl,\n  attempts: 0\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -528,
+          128
+        ],
+        "id": "c3995015-cf7b-4301-b3cb-d8299654d031",
+        "name": "提取参数"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "https://grsai.dakka.com.cn/v1/api/generate",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={\n  \"model\": \"gpt-image-2\",\n  \"prompt\": \"{{ $json.finalPrompt }}\",\n  \"images\": {{ JSON.stringify($json.imagesArray) }},\n  \"aspectRatio\": \"1024x1024\",\n  \"replyType\": \"async\"\n}",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          -304,
+          128
+        ],
+        "id": "5c57af4c-4a32-4c62-a736-66e9ffa88857",
+        "name": "gpt-image-2",
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 5000,
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "Ua1TBIbDcAu3z8pU",
+            "name": "GrsaiApp"
+          }
+        },
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "jsCode": "const response = $input.first().json || {};\nconst original = $node['提取参数'].json;\n\nfunction errorText(value) {\n  if (!value) return '';\n  if (typeof value === 'string') return value;\n  if (value.message) return String(value.message);\n  if (value.description) return String(value.description);\n  try { return JSON.stringify(value); } catch (_) { return String(value); }\n}\n\nconst serviceTaskId = String(response.id || '').trim();\nconst responseError = errorText(response.error)\n  || (Number(response.statusCode) >= 400 ? '图片服务HTTP ' + response.statusCode : '')\n  || (!serviceTaskId ? errorText(response.message) || '图片服务未返回任务ID' : '');\n\nreturn {\n  grsaiTaskId: serviceTaskId,\n  status: serviceTaskId ? String(response.status || 'pending') : 'failed',\n  error: responseError,\n  taskId: original.taskId,\n  subTaskId: original.subTaskId,\n  setIndex: original.setIndex,\n  imageType: original.imageType,\n  imagePosition: original.imagePosition,\n  callbackSecret: original.callbackSecret,\n  callbackUrl: original.callbackUrl,\n  startedAt: Date.now(),\n  timedOut: false,\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          -80,
+          128
+        ],
+        "id": "dd866a16-96c3-4cb4-9e14-61689c91bd5c",
+        "name": "提取任务ID"
+      },
+      {
+        "parameters": {
+          "url": "=https://grsai.dakka.com.cn/v1/api/result?id={{ $json.grsaiTaskId }}",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          368,
+          48
+        ],
+        "id": "a2a4ae5e-4da8-4413-8913-aaa680e65695",
+        "name": "查询结果",
+        "retryOnFail": true,
+        "maxTries": 3,
+        "waitBetweenTries": 5000,
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "Ua1TBIbDcAu3z8pU",
+            "name": "GrsaiApp"
+          }
+        },
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "amount": 10
+        },
+        "type": "n8n-nodes-base.wait",
+        "typeVersion": 1.1,
+        "position": [
+          144,
+          128
+        ],
+        "id": "02f2f366-326b-4852-a5fa-21c75fcbcde3",
+        "name": "Wait",
+        "webhookId": "ad981fcb-55f0-48c3-9946-cb047a1c115e"
+      },
+      {
+        "parameters": {
+          "jsCode": "const response = $input.first().json || {};\nconst original = $node['提取参数'].json;\nconst imageUrl = Array.isArray(response.results) ? String(response.results[0]?.url || '') : '';\n\nreturn {\n  callback_secret: original.callbackSecret,\n  task_id: original.taskId,\n  sub_task_id: original.subTaskId,\n  set_index: original.setIndex,\n  image_type: original.imageType,\n  image_position: original.imagePosition,\n  image_url: imageUrl,\n  callbackUrl: original.callbackUrl,\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          816,
+          -96
+        ],
+        "id": "88293e5e-cc60-4346-a0b8-610654cbb5a9",
+        "name": "组装结果"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 3
+            },
+            "conditions": [
+              {
+                "id": "7d8441ca-8e3d-459a-b083-4d27d3f612f1",
+                "leftValue": "={{ $json.body.callback_secret }}",
+                "rightValue": "v3",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals",
+                  "name": "filter.operator.equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          -752,
+          128
+        ],
+        "id": "7ebb0229-4328-46f9-8b91-d2b5ca19d7f9",
+        "name": "密钥校对"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 3
+            },
+            "conditions": [
+              {
+                "id": "4e2fbe53-db65-4933-81f6-c44d5abddcf2",
+                "leftValue": "={{ $json.status}}",
+                "rightValue": "failed",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals",
+                  "name": "filter.operator.equals"
+                }
+              },
+              {
+                "id": "e6302747-882b-4b18-98a1-384e019393f1",
+                "leftValue": "={{ $json.status}}",
+                "rightValue": "violation",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals",
+                  "name": "filter.operator.equals"
+                }
+              },
+              {
+                "id": "a2000000-0000-4000-8000-000000000900",
+                "leftValue": "={{ $json.timedOut }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "or"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          816,
+          144
+        ],
+        "id": "f078b927-7d60-41fa-a347-295dea433b96",
+        "name": "任务失败"
+      },
+      {
+        "parameters": {
+          "jsCode": "const response = $input.first().json || {};\nconst original = $node['提取参数'].json;\n\nfunction errorText(value) {\n  if (!value) return '';\n  if (typeof value === 'string') return value;\n  if (value.message) return String(value.message);\n  if (value.description) return String(value.description);\n  try { return JSON.stringify(value); } catch (_) { return String(value); }\n}\n\nconst error = response.timedOut\n  ? '图片生成超过900秒，已终止轮询'\n  : errorText(response.error) || errorText(response.status) || '图片生成失败';\n\nreturn {\n  callback_secret: original.callbackSecret,\n  task_id: original.taskId,\n  sub_task_id: original.subTaskId,\n  set_index: original.setIndex,\n  image_type: original.imageType,\n  image_position: original.imagePosition,\n  error,\n  callbackUrl: original.callbackUrl,\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1040,
+          96
+        ],
+        "id": "2a43c128-d55f-4a0b-91ac-4103d354641c",
+        "name": "失败通知"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "={{ $json.callbackUrl }}",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ {\n  callback_secret: $json.callback_secret,\n  task_id: $json.task_id,\n  sub_task_id: $json.sub_task_id,\n  set_index: $json.set_index,\n  image_type: $json.image_type,\n  image_position: $json.image_position,\n  error: $json.error\n} }}",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          1264,
+          96
+        ],
+        "id": "8e31e68d-c4b7-4ab6-bf21-4e8ddf5c02e3",
+        "name": "失败回调",
+        "retryOnFail": true,
+        "maxTries": 5,
+        "waitBetweenTries": 5000
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "={{ $json.callbackUrl }}",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ {\n  callback_secret: $json.callback_secret,\n  task_id: $json.task_id,\n  sub_task_id: $json.sub_task_id,\n  set_index: $json.set_index,\n  image_type: $json.image_type,\n  image_position: $json.image_position,\n  image_url: $json.image_url\n} }}",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          1040,
+          -96
+        ],
+        "id": "850fcaab-ad42-420d-8aca-8fafa1a7a5ca",
+        "name": "成功回调",
+        "retryOnFail": true,
+        "maxTries": 5,
+        "waitBetweenTries": 5000
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 3
+            },
+            "conditions": [
+              {
+                "id": "e80d0b76-7769-4487-9b1b-faf762cc3d74",
+                "leftValue": "={{ $json.status}}",
+                "rightValue": "succeeded",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals",
+                  "name": "filter.operator.equals"
+                }
+              }
+            ],
+            "combinator": "or"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          592,
+          48
+        ],
+        "id": "c16897aa-2514-4ea8-a4b4-f3f7bc0c5238",
+        "name": "任务完成"
+      },
+      {
+        "parameters": {
+          "jsCode": "const response = $input.first().json || {};\nconst task = $node['提取任务ID'].json;\nconst elapsedSeconds = Math.floor((Date.now() - task.startedAt) / 1000);\n\nfunction errorText(value) {\n  if (!value) return '';\n  if (typeof value === 'string') return value;\n  if (value.message) return String(value.message);\n  if (value.description) return String(value.description);\n  try { return JSON.stringify(value); } catch (_) { return String(value); }\n}\n\nconst results = Array.isArray(response.results) ? response.results : [];\nconst imageUrl = String(results[0]?.url || '').trim();\nlet status = String(response.status || '').trim();\nlet error = errorText(response.error)\n  || (Number(response.statusCode) >= 400 ? '图片查询HTTP ' + response.statusCode : '');\nif (!status && error) status = 'failed';\nif (!status) status = 'pending';\nif (status === 'succeeded' && !imageUrl) {\n  status = 'failed';\n  error = '图片服务返回成功但没有图片URL';\n}\n\nreturn {\n  grsaiTaskId: task.grsaiTaskId,\n  status,\n  progress: response.progress,\n  results,\n  error,\n  taskId: task.taskId,\n  subTaskId: task.subTaskId,\n  setIndex: task.setIndex,\n  imageType: task.imageType,\n  imagePosition: task.imagePosition,\n  callbackSecret: task.callbackSecret,\n  callbackUrl: task.callbackUrl,\n  elapsedSeconds,\n  timedOut: elapsedSeconds >= 900,\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1040,
+          320
+        ],
+        "id": "86ad84d4-3da2-42db-be63-ab49157ebbc0",
+        "name": "重组查询"
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ { success: true, status: 'accepted' } }}",
+          "options": {
+            "responseCode": 202
+          }
+        },
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.4,
+        "position": [
+          -528,
+          -32
+        ],
+        "id": "a3000000-0000-4000-8000-000000000003",
+        "name": "接受请求"
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ { success: false, error: 'callback_secret 校验失败', retryable: false } }}",
+          "options": {
+            "responseCode": 401
+          }
+        },
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.4,
+        "position": [
+          -528,
+          288
+        ],
+        "id": "b3000000-0000-4000-8000-000000000003",
+        "name": "拒绝请求"
+      }
+    ],
+    "pinData": {},
+    "connections": {
+      "Webhook": {
+        "main": [
+          [
+            {
+              "node": "密钥校对",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "提取参数": {
+        "main": [
+          [
+            {
+              "node": "gpt-image-2",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "gpt-image-2": {
+        "main": [
+          [
+            {
+              "node": "提取任务ID",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "提取任务ID": {
+        "main": [
+          [
+            {
+              "node": "任务失败",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "查询结果": {
+        "main": [
+          [
+            {
+              "node": "重组查询",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Wait": {
+        "main": [
+          [
+            {
+              "node": "查询结果",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "组装结果": {
+        "main": [
+          [
+            {
+              "node": "成功回调",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "密钥校对": {
+        "main": [
+          [
+            {
+              "node": "接受请求",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "拒绝请求",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "接受请求": {
+        "main": [
+          [
+            {
+              "node": "提取参数",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "任务失败": {
+        "main": [
+          [
+            {
+              "node": "失败通知",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Wait",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "失败通知": {
+        "main": [
+          [
+            {
+              "node": "失败回调",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "任务完成": {
+        "main": [
+          [
+            {
+              "node": "组装结果",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "任务失败",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "重组查询": {
+        "main": [
+          [
+            {
+              "node": "任务完成",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "active": true,
+    "settings": {
+      "executionOrder": "v1",
+      "binaryMode": "separate",
+      "availableInMCP": false
+    },
+    "versionId": "12eb018e-fca4-4cc7-b2a4-231dfdc8d002",
+    "meta": {
+      "instanceId": "bac5a48cbfe45b4dd41ef15205e80ac0e0958f3b697c370060cb2d4c14846049"
+    },
+    "nodeGroups": [],
+    "id": "mAM6iCqe6dSUy7sw",
+    "tags": [
+      {
+        "updatedAt": "2026-07-10T01:42:16.053Z",
+        "createdAt": "2026-07-10T01:42:16.053Z",
+        "id": "3jFkRnXqIMlSDFy0",
+        "name": "v3"
+      },
+      {
+        "updatedAt": "2026-06-29T02:46:33.949Z",
+        "createdAt": "2026-06-11T02:36:47.741Z",
+        "id": "MBbczQe023i77fDQ",
+        "name": "主图"
+      },
+      {
+        "updatedAt": "2026-07-07T11:05:30.160Z",
+        "createdAt": "2026-07-07T11:05:30.160Z",
+        "id": "dYx7pZfd01CltSoJ",
+        "name": "VNEC"
+      }
+    ]
+  }
+]
