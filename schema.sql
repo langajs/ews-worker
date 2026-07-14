@@ -19,7 +19,7 @@ INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('r2_public_url',
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('admin_password', '$2a$10$EWS_DEFAULT_HASH', '');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('callback_secret', '', '');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_primary_images_only', 'false', '');
-INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_plan_timeout_minutes', '20', '');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_plan_timeout_minutes', '15', '');
 
 -- JST 默认配置
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_title_webhook', '', 'jst');
@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS ews_image_queue (
   image_position INTEGER NOT NULL DEFAULT 1,
   image_url TEXT DEFAULT '',
   error_message TEXT DEFAULT '',
+  error_retryable INTEGER NOT NULL DEFAULT 1,
   status TEXT NOT NULL DEFAULT 'pending', -- pending / processing / failed
   attempts INTEGER NOT NULL DEFAULT 0,
   error TEXT DEFAULT '',
@@ -236,6 +237,7 @@ CREATE TABLE IF NOT EXISTS ews_jst_push_plans (
   batch_order INTEGER NOT NULL DEFAULT 0,
   retry_count INTEGER NOT NULL DEFAULT 0,
   processing_at TEXT NOT NULL DEFAULT '',
+  next_retry_at TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   FOREIGN KEY (task_id) REFERENCES ews_jst_tasks(id) ON DELETE CASCADE
@@ -244,6 +246,7 @@ CREATE INDEX IF NOT EXISTS idx_jst_plans_status ON ews_jst_push_plans(task_id, s
 CREATE INDEX IF NOT EXISTS idx_jst_plans_processing ON ews_jst_push_plans(status, processing_at);
 CREATE INDEX IF NOT EXISTS idx_jst_plans_processing_at ON ews_jst_push_plans(processing_at);
 CREATE INDEX IF NOT EXISTS idx_jst_plans_user_active ON ews_jst_push_plans(user_id, status, is_image);
+CREATE INDEX IF NOT EXISTS idx_jst_plans_retry_due ON ews_jst_push_plans(status, next_retry_at);
 
 -- JST 导出记录
 CREATE TABLE IF NOT EXISTS ews_jst_export_records (
@@ -370,6 +373,7 @@ CREATE TABLE IF NOT EXISTS ews_shopee_push_plans (
   batch_order INTEGER NOT NULL DEFAULT 0,
   retry_count INTEGER NOT NULL DEFAULT 0,
   processing_at TEXT NOT NULL DEFAULT '',
+  next_retry_at TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   FOREIGN KEY (task_id) REFERENCES ews_tasks(id) ON DELETE CASCADE
@@ -378,6 +382,7 @@ CREATE INDEX IF NOT EXISTS idx_shopee_plans_status ON ews_shopee_push_plans(task
 CREATE INDEX IF NOT EXISTS idx_shopee_plans_processing ON ews_shopee_push_plans(status, processing_at);
 CREATE INDEX IF NOT EXISTS idx_shopee_plans_processing_at ON ews_shopee_push_plans(processing_at);
 CREATE INDEX IF NOT EXISTS idx_shopee_plans_user_active ON ews_shopee_push_plans(user_id, status, is_image);
+CREATE INDEX IF NOT EXISTS idx_shopee_plans_retry_due ON ews_shopee_push_plans(status, next_retry_at);
 
 -- Shopee 导出记录
 CREATE TABLE IF NOT EXISTS ews_shopee_export_records (
