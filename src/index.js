@@ -10,7 +10,7 @@ import {
   jstCreateTask, jstUpdateTask, jstGetTask, jstUpdateTaskStatus,
   jstReplaceVariants,
   jstCreateSubTask, jstGetSubTasks, jstUpdateSubTask, jstDeleteSubTasks,
-  jstCreateSkuTitle, jstSaveMetadataBatch, jstSaveImage, jstClearImages,
+  jstSaveMetadataBatch, jstSaveImage, jstClearImages,
   jstCreateExpectedImages, jstCheckSubTaskImages, jstCheckParentCompletion, jstDeleteTaskRecord,
   jstCreatePushPlans, jstGetPushPlans, jstGetPendingPlans, jstGetPlanStats,
   jstRefundCredits,
@@ -76,7 +76,6 @@ function workflowExecutionFlags(config) {
   return {
     primaryImagesOnly,
     title: !primaryImagesOnly && isWorkflowEnabled(config, 'n8n_title_enabled'),
-    skuTitle: !primaryImagesOnly && isWorkflowEnabled(config, 'n8n_sku_title_enabled'),
     skuImage: !primaryImagesOnly && isWorkflowEnabled(config, 'n8n_sku_image_enabled'),
     detail: !primaryImagesOnly,
   };
@@ -1259,9 +1258,8 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
 function workflowPlanWhereClause(flags, alias = '') {
   const column = alias ? `${alias}.webhook_type` : 'webhook_type';
   if (flags.primaryImagesOnly) return ` AND (${column}='main' OR ${column}='main_1' OR ${column} LIKE 'sub_%')`;
-  const conditions = [];
-  if (!flags.title) conditions.push(`${column}<>'title'`, `${column}<>'metadata'`, `${column}<>'sku_title'`);
-  else if (!flags.skuTitle) conditions.push(`${column}<>'sku_title'`);
+  const conditions = [`${column}<>'sku_title'`];
+  if (!flags.title) conditions.push(`${column}<>'title'`, `${column}<>'metadata'`);
   if (!flags.skuImage) conditions.push(`${column} NOT GLOB 'sku_[0-9]*'`);
   return conditions.length ? ` AND ${conditions.join(' AND ')}` : '';
 }
@@ -1826,8 +1824,7 @@ async function processCallbackQueue(env, ctx, preferredId) {
 function callbackWebhookType(payload) {
   let webhookType = String(payload.workflow_type || '').trim();
   if (!webhookType) {
-    if (payload.sku_titles !== undefined) webhookType = 'sku_title';
-    else if (payload.products !== undefined || payload.titles !== undefined || payload.product_title) webhookType = 'title';
+    if (payload.products !== undefined) webhookType = 'title';
     else if (payload.image_type && payload.image_position) webhookType = `${payload.image_type}_${parseInt(payload.image_position) || 1}`;
   }
   return webhookType;
@@ -1835,7 +1832,7 @@ function callbackWebhookType(payload) {
 
 async function findProcessingCallbackPlan(env, planTable, taskId, webhookType, subTaskId, planId = '') {
   if (planId) return getOne(env, `SELECT id, retry_count FROM ${planTable} WHERE id=? AND task_id=? AND webhook_type=? AND status='processing'`, [planId, taskId, webhookType]);
-  const subTaskWhere = webhookType === 'title' || webhookType === 'sku_title' ? '' : ' AND sub_task_id=?';
+  const subTaskWhere = webhookType === 'title' ? '' : ' AND sub_task_id=?';
   const params = [taskId, webhookType];
   if (subTaskWhere) params.push(subTaskId || '');
   return getOne(env, `SELECT id, retry_count FROM ${planTable} WHERE task_id=? AND webhook_type=?${subTaskWhere} AND status='processing'`, params);
@@ -2013,7 +2010,7 @@ async function processImageQueuePayload(env, ctx, row) {
 
 async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
   if (!body || typeof body !== 'object') throw callbackPermanentError('无效的请求体');
-  const { task_id, sub_task_id, products, titles, product_title, image_type, image_position, image_url, error: errMsg } = body;
+  const { task_id, sub_task_id, products, image_type, image_position, image_url, error: errMsg } = body;
   if (!task_id) throw callbackPermanentError('缺少 task_id');
   const idx = await getTaskIndex(env, task_id);
   if (!idx) throw callbackPermanentError('任务不存在');
@@ -2025,16 +2022,18 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
   }
 
   const isShopee = idx.platform === 'shopee';
+  const callbackWorkflowType = String(body.workflow_type || '').trim();
+  if (callbackWorkflowType === 'sku_title' || (!isShopee && callbackWorkflowType === 'title')) {
+    throw callbackPermanentError('旧版独立标题工作流已停用，请使用metadata聚合元数据工作流');
+  }
   if (errMsg && image_type === undefined && image_url === undefined) {
     await handleWorkflowErrorCallback(env, idx, body);
     return { success: true, sub_task_id, workflow_error: true };
   }
   if (products !== undefined && !Array.isArray(products)) throw callbackPermanentError('products 必须是数组');
-  if (titles !== undefined && !Array.isArray(titles)) throw callbackPermanentError('titles 必须是数组');
-  if (body.sku_titles !== undefined && !Array.isArray(body.sku_titles)) throw callbackPermanentError('sku_titles 必须是数组');
-  if (isShopee && (titles !== undefined || product_title !== undefined)) throw callbackPermanentError('Shopee商品元数据必须使用products回调');
-  if (isShopee && body.sku_titles !== undefined) throw callbackPermanentError('Shopee规格标签必须通过variation_labels随products回调');
-  const getSubTasks = isShopee ? shopeeGetSubTasks : jstGetSubTasks;
+  if (body.titles !== undefined || body.product_title !== undefined || body.sku_titles !== undefined) {
+    throw callbackPermanentError('旧版独立标题回调已停用，请使用products聚合元数据回调');
+  }
   const updateSubTask = isShopee ? shopeeUpdateSubTask : jstUpdateSubTask;
   const checkSubTaskImages = isShopee ? shopeeCheckSubTaskImages : jstCheckSubTaskImages;
   const checkParentCompletion = isShopee ? shopeeCheckParentCompletion : jstCheckParentCompletion;
@@ -2139,39 +2138,8 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
       await shopeeUpdateVariationExports(env, task_id, name1, productType === 'two' ? name2 : '', normalizedLabels);
     }
     for (const item of normalizedProducts) await shopeeUpdateSubTask(env, item.id, { title: item.title, description: item.description });
-  // JST 标题回调
-  } else if (Array.isArray(titles)) {
-    const subTasks = await getSubTasks(env, task_id);
-    const allSubs = (subTasks?.results || []).sort((a,b) => a.set_index - b.set_index);
-    const normalizedTitles = normalizeGeneratedTitles(titles, allSubs.length, 1, 200, '商品标题');
-    for (let i = 0; i < allSubs.length; i++) await updateSubTask(env, allSubs[i].id, { title: normalizedTitles[i] });
-  } else if (product_title) {
-    const subTasks = await getSubTasks(env, task_id);
-    const title = normalizeGeneratedTitles([product_title], 1, 1, 200, '商品标题')[0];
-    for (const st of (subTasks?.results || [])) await updateSubTask(env, st.id, { title });
   }
-  if ((products && isShopee) || titles || product_title) {
-    const planTable = idx.platform === 'jst' ? 'ews_jst_push_plans' : 'ews_shopee_push_plans';
-    await completePushPlanFromCallback(env, planTable, task_id, 'title');
-  }
-
-  // SKU 标题回调
-  if (body.sku_titles && Array.isArray(body.sku_titles)) {
-    const skuDetail = await jstGetTask(env, task_id);
-    const variants = (skuDetail?.variants || []).sort((a,b) => a.sort_order - b.sort_order);
-    const subTasks = await jstGetSubTasks(env, task_id);
-    const allSubs = (subTasks?.results || []).sort((a,b) => a.set_index - b.set_index);
-    const vCount = variants.length;
-    const expected = allSubs.length * vCount;
-    const skuTitles = normalizeGeneratedTitles(body.sku_titles, expected, 1, 30, 'SKU标题');
-    for (let si = 0; si < allSubs.length; si++) {
-      for (let vi = 0; vi < vCount; vi++) {
-        const title = skuTitles[si * vCount + vi];
-        await jstCreateSkuTitle(env, { id: uuid(), sub_task_id: allSubs[si].id, variant_id: variants[vi].id, title });
-      }
-    }
-    await completePushPlanFromCallback(env, 'ews_jst_push_plans', task_id, 'sku_title');
-  }
+  if (products && isShopee) await completePushPlanFromCallback(env, 'ews_shopee_push_plans', task_id, 'title');
 
   // 图片回调先进入图片队列，避免回调并发直接放大 R2/D1 压力
   let imageQueued = false;
@@ -2429,7 +2397,7 @@ async function jstHandleExport(env, taskId) {
   const exportResults = await env.DB.batch(exportStatements);
   const plannedTypes = new Set((exportResults[0]?.results || []).map(plan => plan.webhook_type));
   const metadataPlanned = plannedTypes.has('metadata');
-  const skuTitlePlanned = metadataPlanned || plannedTypes.has('sku_title');
+  const skuTitlePlanned = metadataPlanned;
   const skuImagePlanned = [...plannedTypes].some(type => /^sku_\d+$/.test(type));
 
   const skuTitleMap = {};

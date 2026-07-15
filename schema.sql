@@ -19,17 +19,15 @@ INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('r2_public_url',
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('admin_password', '$2a$10$EWS_DEFAULT_HASH', '');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('callback_secret', '', '');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_primary_images_only', 'false', '');
-INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_plan_timeout_minutes', '15', '');
+INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_plan_timeout_minutes', '20', '');
 
 -- JST 默认配置
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_title_webhook', '', 'jst');
-INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_title_webhook', '', 'jst');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_main_webhook', '', 'jst');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sub_image_webhook', '', 'jst');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_detail_webhook', '', 'jst');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_image_webhook', '', 'jst');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_title_enabled', 'true', 'jst');
-INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_title_enabled', 'true', 'jst');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_image_enabled', 'true', 'jst');
 
 -- Shopee 默认配置
@@ -227,7 +225,7 @@ CREATE TABLE IF NOT EXISTS ews_jst_push_plans (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL,
   sub_task_id TEXT NOT NULL,
-  webhook_type TEXT NOT NULL,       -- title / sku_title / main_1 / sub_{pos} / detail_{pos} / sku_{pos}
+  webhook_type TEXT NOT NULL,       -- metadata / main_1 / sub_{pos} / detail_{pos} / sku_{pos}
   webhook_url TEXT NOT NULL,
   payload TEXT NOT NULL,
   user_id TEXT NOT NULL DEFAULT '',

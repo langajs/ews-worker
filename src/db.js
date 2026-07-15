@@ -117,7 +117,6 @@ async function jstUpdateSubTask(env, sid, d) {
   await env.DB.prepare(`UPDATE ews_jst_sub_tasks SET ${sc.join(', ')} WHERE id = ?`).bind(...p).run();
 }
 async function jstDeleteSubTasks(env, tid) { await env.DB.prepare("DELETE FROM ews_jst_sub_tasks WHERE parent_task_id = ?").bind(tid).run(); }
-async function jstCreateSkuTitle(env, s) { await env.DB.prepare("INSERT OR IGNORE INTO ews_jst_sku_titles (id, sub_task_id, variant_id, title, created_at) VALUES (?, ?, ?, ?, datetime('now'))").bind(s.id, s.sub_task_id, s.variant_id, s.title).run(); }
 async function jstSaveMetadataBatch(env, taskId, products, skuTitles) {
   const statements = [env.DB.prepare(`WITH updates AS (
     SELECT json_extract(value, '$.sub_task_id') AS id,
@@ -294,7 +293,7 @@ export {
   jstCreateTask, jstUpdateTask, jstGetTask, jstUpdateTaskStatus,
   jstCreateVariant, jstClearVariants, jstReplaceVariants,
   jstCreateSubTask, jstGetSubTasks, jstUpdateSubTask, jstDeleteSubTasks,
-  jstCreateSkuTitle, jstSaveMetadataBatch, jstSaveImage, jstClearImages,
+  jstSaveMetadataBatch, jstSaveImage, jstClearImages,
   jstCreateExpectedImages, jstCheckSubTaskImages, jstCheckParentCompletion, jstDeleteTaskRecord,
   jstCreatePushPlans, jstGetPushPlans, jstGetPendingPlans, jstUpdatePlanStatus, jstGetPlanStats,
   jstRefundCredits,
