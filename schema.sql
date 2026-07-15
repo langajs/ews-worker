@@ -324,6 +324,8 @@ CREATE TABLE IF NOT EXISTS ews_shopee_variations (
   price_precision INTEGER NOT NULL DEFAULT 0,
   stock INTEGER NOT NULL DEFAULT 999,
   sku TEXT NOT NULL DEFAULT '',
+  sku_description TEXT NOT NULL DEFAULT '',
+  weight_kg REAL NOT NULL DEFAULT 0.2,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   FOREIGN KEY (product_id) REFERENCES ews_shopee_products(id) ON DELETE CASCADE
 );
