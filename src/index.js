@@ -394,6 +394,12 @@ async function handleUpdateConfig(request, env) {
   if (!body || typeof body !== 'object') return error('无效的配置数据', 400);
   const platform = body._platform || '';
   delete body._platform;
+  if (body.push_plan_timeout_minutes !== undefined) {
+    const timeoutMinutes = Number(body.push_plan_timeout_minutes);
+    if (!Number.isInteger(timeoutMinutes) || timeoutMinutes < MIN_PUSH_PLAN_TIMEOUT_MINUTES || timeoutMinutes > MAX_PUSH_PLAN_TIMEOUT_MINUTES) {
+      return error(`推送计划超时必须为${MIN_PUSH_PLAN_TIMEOUT_MINUTES}~${MAX_PUSH_PLAN_TIMEOUT_MINUTES}分钟`, 400);
+    }
+  }
   for (const [key, value] of Object.entries(body)) {
     if (RETIRED_CONCURRENCY_CONFIG_KEYS.has(key)) continue;
     if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
@@ -722,6 +728,7 @@ async function handleUpdateTask(request, env, path) {
     const variationImageMode = normalizeShopeeVariationImageMode(variation_image_mode, 'upload');
     const normalizedVariations = [];
     const combinationKeys = new Set();
+    const skuCodes = new Set();
     let lowestPrice = Infinity;
     let highestPrice = 0;
     for (let i = 0; i < variations.length; i++) {
@@ -732,6 +739,11 @@ async function handleUpdateTask(request, env, path) {
       if (!Number.isInteger(stock) || stock < 0 || stock > 10000000) return error(`变体#${i + 1}库存必须为0~10000000`, 400);
       const weightKg = v.weight_kg === undefined || v.weight_kg === null || v.weight_kg === '' ? 0.2 : Number(v.weight_kg);
       if (!Number.isFinite(weightKg) || weightKg <= 0 || weightKg * 1000 > 100000000) return error(`变体#${i + 1}重量必须大于0且导出后不超过100000000g`, 400);
+      const sku = String(v.sku || '').trim();
+      if (sku.length >= 100) return error(`变体#${i + 1}商家SKU必须小于100字符`, 400);
+      const skuKey = sku.toLocaleLowerCase();
+      if (skuKey && skuCodes.has(skuKey)) return error(`变体#${i + 1}商家SKU重复`, 400);
+      if (skuKey) skuCodes.add(skuKey);
       const option1 = productType === 'single' ? '' : String(v.option1 || '').trim();
       const option2 = productType === 'single' ? '' : String(v.option2 || '').trim();
       if (productType !== 'single' && (!option1 || option1.length > 20)) return error(`变体#${i + 1}一级规格值必须为1~20字符`, 400);
@@ -750,7 +762,7 @@ async function handleUpdateTask(request, env, path) {
         option2, option2_export: '', image_2: '',
         price: pricing.price, price_float_enabled: pricing.price_float_enabled,
         price_min: pricing.price_min, price_max: pricing.price_max, price_precision: pricing.price_precision,
-        stock, sku: v.sku || '', weight_kg: weightKg,
+        stock, sku, weight_kg: weightKg,
       });
     }
     if (highestPrice / lowestPrice > 5) return error('最高SKU价格除以最低SKU价格不能超过5', 400);
@@ -987,6 +999,18 @@ function buildJstMetadataBatches(subTasks, variants, productType) {
   return batches;
 }
 
+function deduplicatedPlanCount(enabled, countPerSet, generateCount, mode) {
+  if (!enabled || countPerSet < 1) return 0;
+  return countPerSet * (mode === 'dedup' ? 1 : generateCount);
+}
+
+async function pushCreditPreflightError(env, ownerId, requiredCredits) {
+  if (!ownerId || requiredCredits < 1) return '';
+  const availableCredits = await getUserCredits(env, ownerId);
+  if (availableCredits >= requiredCredits) return '';
+  return `算力不足：本次预计需要${requiredCredits}点，当前可用${availableCredits}点`;
+}
+
 async function jstHandlePush(env, taskId, ctx, request) {
   // [从原 index.js handlePushTask 移入，逻辑保持一致]
   const pushBody = await parseBody(request).catch(() => ({}));
@@ -1022,13 +1046,25 @@ async function jstHandlePush(env, taskId, ctx, request) {
   if (!metadataWebhookUrl && !mainWebhookUrl && !subImageWebhookUrl && !detailWebhookUrl && !skuImageWebhookUrl)
     return error('请先在系统配置页配置 JST 工作流 Webhook 地址后再推送', 400);
 
+  const mode = detail.mode || 'full';
+  const metadataSubTasks = Array.from({ length: generateCount }, (_, index) => ({ sub_task_id: String(index), set_index: index }));
+  const requiredCredits = (metadataWebhookUrl ? buildJstMetadataBatches(metadataSubTasks, detail.variants || [], productType).length : 0)
+    + (mainWebhookUrl ? generateCount : 0)
+    + deduplicatedPlanCount(!!subImageWebhookUrl, Math.max(0, mainImageCount - 1), generateCount, mode)
+    + deduplicatedPlanCount(!!detailWebhookUrl, detailImageCount, generateCount, mode)
+    + deduplicatedPlanCount(!!skuImageWebhookUrl, skuImageGroups.length, generateCount, mode);
+  if (!testMode) {
+    const creditError = await pushCreditPreflightError(env, ownerId, requiredCredits);
+    if (creditError) return error(creditError, 400);
+  }
+
   await resetGeneratedTaskArtifacts(env, taskId, 'jst');
 
   const subTaskIds = [];
   for (let i = 0; i < generateCount; i++) {
     const subId = uuid(); subTaskIds.push(subId);
     await jstCreateSubTask(env, { id: subId, parent_task_id: taskId, set_index: i });
-    await jstCreateExpectedImages(env, taskId, subId, i, skuImageGroups.length, detail.mode || 'full', mainImageCount, detailImageCount,
+    await jstCreateExpectedImages(env, taskId, subId, i, skuImageGroups.length, mode, mainImageCount, detailImageCount,
       !!mainWebhookUrl, !!subImageWebhookUrl, !!detailWebhookUrl, !!skuImageWebhookUrl);
   }
   await env.DB.prepare("UPDATE ews_jst_tasks SET status='processing', queue_mode='auto', updated_at=datetime('now') WHERE id=?").bind(taskId).run();
@@ -1053,21 +1089,21 @@ async function jstHandlePush(env, taskId, ctx, request) {
       main_description: detail.main_description || '', auxiliary_images: detail.auxiliary_images || '', image_type: 'main', image_position: 1, callback_secret: callbackSecret, callback_url: baseUrl } });
   // sub_2~N
   if (subImageWebhookUrl) for (let pos = 2; pos <= mainImageCount; pos++) for (const st of subTasks) {
-    if ((detail.mode||'full') === 'dedup' && st.set_index > 0) continue;
+    if (mode === 'dedup' && st.set_index > 0) continue;
     allJobs.push({ webhook_type: 'sub_' + pos, sub_task_id: st.sub_task_id, url: subImageWebhookUrl,
       data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: detail.reference_image,
         main_description: detail.main_description || '', auxiliary_images: detail.auxiliary_images || '', image_type: 'sub', image_position: pos, callback_secret: callbackSecret, callback_url: baseUrl } });
   }
   // detail_1~M
   if (detailWebhookUrl) for (let pos = 1; pos <= detailImageCount; pos++) for (const st of subTasks) {
-    if ((detail.mode||'full') === 'dedup' && st.set_index > 0) continue;
+    if (mode === 'dedup' && st.set_index > 0) continue;
     allJobs.push({ webhook_type: 'detail_' + pos, sub_task_id: st.sub_task_id, url: detailWebhookUrl,
       data: { task_id: taskId, sub_task_id: st.sub_task_id, set_index: st.set_index, reference_image: detail.reference_image,
         detail_description: detail.detail_description || '', auxiliary_images: detail.auxiliary_images || '', image_type: 'detail', image_position: pos, callback_secret: callbackSecret, callback_url: baseUrl } });
   }
   // sku
   if (skuImageWebhookUrl && skuImageGroups.length > 0) for (const st of subTasks) {
-    if ((detail.mode||'full') === 'dedup' && st.set_index > 0) continue;
+    if (mode === 'dedup' && st.set_index > 0) continue;
     for (let v = 0; v < skuImageGroups.length; v++) {
       const group = skuImageGroups[v];
       allJobs.push({ webhook_type: 'sku_' + (v+1), sub_task_id: st.sub_task_id, url: skuImageWebhookUrl,
@@ -1091,12 +1127,12 @@ async function jstHandlePush(env, taskId, ctx, request) {
     await env.DB.prepare("UPDATE ews_jst_tasks SET status='pending', queue_mode='manual', updated_at=datetime('now') WHERE id=?").bind(taskId).run();
     await updateTaskIndexStatus(env, taskId, 'pending');
     return json({ success: true, task_id: taskId, sub_tasks: subTasks, test_mode: true,
-      total_plans: planRecords.length, jobs_count: planRecords.length,
+      total_plans: planRecords.length, jobs_count: planRecords.length, required_credits: requiredCredits,
       message: '测试模式：已创建 ' + subTasks.length + ' 个子任务、' + planRecords.length + ' 个推送计划' });
   }
   await updateTaskIndexStatus(env, taskId, 'processing');
   ctx.waitUntil(jstReleaseTaskQueue(env, taskId, ctx));
-  return json({ success: true, task_id: taskId, sub_tasks: subTasks, total_plans: planRecords.length, jobs_count: planRecords.length,
+  return json({ success: true, task_id: taskId, sub_tasks: subTasks, total_plans: planRecords.length, jobs_count: planRecords.length, required_credits: requiredCredits,
     message: '已创建 ' + planRecords.length + ' 个推送计划' });
 }
 
@@ -1132,15 +1168,24 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
   if (missingShopeeWebhooks.length)
     return error('请先在系统配置页配置 Shopee 必需工作流 Webhook: ' + missingShopeeWebhooks.join('、'), 400);
 
+  const mainCount = 9;
+  const generateCount = detail.generate_count || 1;
+  const mode = detail.mode || 'full';
+  const requiredCredits = (titleWebhookUrl ? 1 : 0)
+    + (mainWebhookUrl ? generateCount : 0)
+    + deduplicatedPlanCount(!!subImageWebhookUrl, mainCount - 1, generateCount, mode)
+    + deduplicatedPlanCount(!!skuImageWebhookUrl, skuImageGroups.length, generateCount, mode);
+  if (!testMode) {
+    const creditError = await pushCreditPreflightError(env, ownerId, requiredCredits);
+    if (creditError) return error(creditError, 400);
+  }
+
   await resetGeneratedTaskArtifacts(env, taskId, 'shopee');
 
   const callbackSecret = config.callback_secret || '';
   const baseUrl = new URL(request.url).origin + '/api/callback';
-  const mainCount = 9;
   const refImg = detail.reference_image || '';
   const auxImgs = detail.auxiliary_images || '';
-  const generateCount = detail.generate_count || 1;
-  const mode = detail.mode || 'full';
 
   // 创建子任务（每个子任务是一套 AI 生成后的 Shopee 商品资源）
   const subTaskIds = [];
@@ -1204,11 +1249,11 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
   if (testMode) {
     await updateTaskIndexStatus(env, taskId, 'pending');
     await env.DB.prepare("UPDATE ews_shopee_products SET status='pending', updated_at=datetime('now') WHERE id=?").bind(taskId).run();
-    return json({ success: true, task_id: taskId, sub_tasks: subTasks, test_mode: true, total_plans: planRecords.length, jobs_count: planRecords.length,
+    return json({ success: true, task_id: taskId, sub_tasks: subTasks, test_mode: true, total_plans: planRecords.length, jobs_count: planRecords.length, required_credits: requiredCredits,
       message: '测试模式：已创建 ' + subTasks.length + ' 个子任务、' + planRecords.length + ' 个推送计划' });
   }
   ctx.waitUntil(shopeeReleaseTaskQueue(env, taskId, ctx));
-  return json({ success: true, task_id: taskId, sub_tasks: subTasks, total_plans: planRecords.length, jobs_count: planRecords.length, message: '已创建 ' + planRecords.length + ' 个推送计划' });
+  return json({ success: true, task_id: taskId, sub_tasks: subTasks, total_plans: planRecords.length, jobs_count: planRecords.length, required_credits: requiredCredits, message: '已创建 ' + planRecords.length + ' 个推送计划' });
 }
 
 function workflowPlanWhereClause(flags, alias = '') {
@@ -1550,7 +1595,8 @@ const CALLBACK_QUEUE_MAX_ATTEMPTS = 5;
 const MIN_IMAGE_QUEUE_ACTIVE = 4;
 const MAX_IMAGE_QUEUE_ACTIVE = 12;
 const IMAGE_QUEUE_MAX_ATTEMPTS = 5;
-const DEFAULT_PUSH_PLAN_TIMEOUT_MINUTES = 15;
+const MIN_PUSH_PLAN_TIMEOUT_MINUTES = 20;
+const DEFAULT_PUSH_PLAN_TIMEOUT_MINUTES = 20;
 const MAX_PUSH_PLAN_TIMEOUT_MINUTES = 1440;
 
 function d1Changes(result) {
@@ -1574,7 +1620,7 @@ function pushPlanPlatform(planTable) {
 function parsePushPlanTimeoutMinutes(value) {
   const n = parseInt(value);
   if (Number.isNaN(n)) return DEFAULT_PUSH_PLAN_TIMEOUT_MINUTES;
-  return Math.min(Math.max(n, 5), MAX_PUSH_PLAN_TIMEOUT_MINUTES);
+  return Math.min(Math.max(n, MIN_PUSH_PLAN_TIMEOUT_MINUTES), MAX_PUSH_PLAN_TIMEOUT_MINUTES);
 }
 
 async function getPushPlanTimeoutMinutes(env) {
@@ -2424,6 +2470,7 @@ async function jstHandleExport(env, taskId) {
     const subTaskId = subTaskIds[setIdx] || '';
     const subTask = subTaskMap.get(subTaskId);
     const setLabel = '第' + (setIdx + 1) + '套';
+    const exportedSkuCodes = new Set();
     if (!subTaskId) { addExportError(setLabel + ' 缺少子任务'); continue; }
     if (!(subTask?.title || detail.topic_items || '').trim()) addExportError(setLabel + ' 缺少商品标题；请启用商品元数据工作流或填写参考标题');
     if (metadataPlanned && !(subTask?.recommended_copy || '').trim()) addExportError(setLabel + ' 缺少AI推荐文案');
@@ -2440,6 +2487,11 @@ async function jstHandleExport(env, taskId) {
       const variant = variants[vIdx];
       const skuTitle = skuTitleMap[subTaskId + '_' + variant.id] || '';
       if (skuTitlePlanned && !skuTitle.trim()) addExportError(setLabel + ' SKU#' + (vIdx + 1) + ' 缺少AI SKU标题');
+      const styleCode = subTaskId ? subTaskId.slice(0, 8) : `${taskId.slice(0, 8)}-S${setIdx + 1}`;
+      const skuSuffix = String(variant.sku_code || '').trim() || `V${vIdx + 1}`;
+      const exportedSkuCode = `${styleCode}-${skuSuffix}`.toLocaleLowerCase();
+      if (exportedSkuCodes.has(exportedSkuCode)) addExportError(setLabel + ' SKU#' + (vIdx + 1) + ' 导出商品编码重复');
+      exportedSkuCodes.add(exportedSkuCode);
       const skuGroupKey = shopeeVariationGroupKey(variant.tier1_value);
       if (variationImageMode === 'upload' && !checkedSkuImages.has(skuGroupKey) && !getSkuUrl(setIdx, subTaskId, variant)) addExportError(setLabel + ' 一级规格“' + (variant.tier1_value || '') + '”缺少自上传SKU图片');
       if (skuImagePlanned && !checkedSkuImages.has(skuGroupKey) && !getSkuUrl(setIdx, subTaskId, variant)) addExportError(setLabel + ' 一级规格“' + (variant.tier1_value || '') + '”缺少AI SKU图片');
@@ -2586,7 +2638,7 @@ function validateShopeeRow(product, variations) {
   for (var vi = 0; vi < variations.length; vi++) {
     var sku = variations[vi].sku || '';
     if (sku) {
-      if (skuSet[sku]) warnings.push('SKU "' + sku + '" 重复（变体#' + (vi+1) + '），店内不可重复');
+      if (skuSet[sku]) errors.push('SKU "' + sku + '" 重复（变体#' + (vi+1) + '），店内不可重复');
       skuSet[sku] = true;
     }
   }
@@ -2687,6 +2739,7 @@ async function shopeeHandleExport(env, taskId) {
   if (subTasks.length > 0 && subTasks.length < expectedSetCount) addExportError('AI商品套图数量不足: ' + subTasks.length + '/' + expectedSetCount);
   if (!isSingleProduct && !product.variation_name1_export) addExportError('缺少AI规范化一级规格名');
   if (productType === 'two' && !product.variation_name2_export) addExportError('缺少AI规范化二级规格名');
+  const exportedSkuCodes = new Set();
   for (let si = 0; si < subTasks.length; si++) {
     const subTask = subTasks[si];
     const setIdx = subTask.set_index ?? si;
@@ -2704,6 +2757,9 @@ async function shopeeHandleExport(env, taskId) {
       const skuCode = skuCodeFor(subTask, setIdx, v, vi);
       const option1 = option1For(subTask, v);
       const option2 = option2For(v);
+      const skuKey = skuCode.toLocaleLowerCase();
+      if (exportedSkuCodes.has(skuKey)) addExportError(setLabel + ' 变体#' + (vi + 1) + ' 导出SKU重复');
+      exportedSkuCodes.add(skuKey);
       if (!isSingleProduct && (option1.length < 1 || option1.length > 20)) addExportError(setLabel + ' 变体#' + (vi + 1) + ' 缺少合规一级规格值(1~20字符)');
       if (productType === 'two' && (option2.length < 1 || option2.length > 20)) addExportError(setLabel + ' 变体#' + (vi + 1) + ' 缺少合规二级规格值(1~20字符)');
       if (!isSingleProduct && variationImageMode === 'upload' && !getSkuUrl(setIdx, subTask.id || '', vi, v)) addExportError(setLabel + ' 变体#' + (vi + 1) + ' 缺少自上传SKU变体图');
