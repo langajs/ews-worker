@@ -764,9 +764,8 @@ async function handleUpdateTask(request, env, path) {
     if (normalizedImageMode !== 'none') {
       for (const group of variationGroups) {
         const imageUrls = [...new Set(group.variations.map(variation => variation.image_per_variation).filter(Boolean))];
-        if (normalizedImageMode === 'ai' && imageUrls.length !== 1) return error(`一级规格值“${group.name}”必须且只能使用一张SKU参考图`, 400);
-        if (imageUrls.length > 1) return error(`一级规格值“${group.name}”只能使用一张SKU图片`, 400);
-        if (imageUrls.length === 1) for (const variation of group.variations) variation.image_per_variation = imageUrls[0];
+        if (imageUrls.length !== 1) return error(`一级规格值“${group.name}”必须且只能上传一张${normalizedImageMode === 'ai' ? 'SKU参考图' : 'SKU成品图'}`, 400);
+        for (const variation of group.variations) variation.image_per_variation = imageUrls[0];
       }
     }
     const dimensions = [length_cm, width_cm, height_cm].map(parseNumberOrNull);
@@ -883,8 +882,8 @@ async function handleUpdateTask(request, env, path) {
     if (jstImageMode !== 'none') {
       for (const group of getJstVariationGroups(normalizedVariants)) {
         const imageUrls = [...new Set(group.variations.map(variation => variation.sku_image).filter(Boolean))];
-        if (imageUrls.length > 1) return error(`一级规格值“${group.name}”只能使用一张SKU图片`, 400);
-        if (imageUrls.length === 1) for (const variation of group.variations) variation.sku_image = imageUrls[0];
+        if (imageUrls.length !== 1) return error(`一级规格值“${group.name}”必须且只能上传一张${jstImageMode === 'ai' ? 'SKU参考图' : 'SKU成品图'}`, 400);
+        for (const variation of group.variations) variation.sku_image = imageUrls[0];
       }
     }
 
@@ -2442,6 +2441,7 @@ async function jstHandleExport(env, taskId) {
       const skuTitle = skuTitleMap[subTaskId + '_' + variant.id] || '';
       if (skuTitlePlanned && !skuTitle.trim()) addExportError(setLabel + ' SKU#' + (vIdx + 1) + ' 缺少AI SKU标题');
       const skuGroupKey = shopeeVariationGroupKey(variant.tier1_value);
+      if (variationImageMode === 'upload' && !checkedSkuImages.has(skuGroupKey) && !getSkuUrl(setIdx, subTaskId, variant)) addExportError(setLabel + ' 一级规格“' + (variant.tier1_value || '') + '”缺少自上传SKU图片');
       if (skuImagePlanned && !checkedSkuImages.has(skuGroupKey) && !getSkuUrl(setIdx, subTaskId, variant)) addExportError(setLabel + ' 一级规格“' + (variant.tier1_value || '') + '”缺少AI SKU图片');
       checkedSkuImages.add(skuGroupKey);
     }
@@ -2706,6 +2706,7 @@ async function shopeeHandleExport(env, taskId) {
       const option2 = option2For(v);
       if (!isSingleProduct && (option1.length < 1 || option1.length > 20)) addExportError(setLabel + ' 变体#' + (vi + 1) + ' 缺少合规一级规格值(1~20字符)');
       if (productType === 'two' && (option2.length < 1 || option2.length > 20)) addExportError(setLabel + ' 变体#' + (vi + 1) + ' 缺少合规二级规格值(1~20字符)');
+      if (!isSingleProduct && variationImageMode === 'upload' && !getSkuUrl(setIdx, subTask.id || '', vi, v)) addExportError(setLabel + ' 变体#' + (vi + 1) + ' 缺少自上传SKU变体图');
       if (!isSingleProduct && variationImageMode === 'ai' && skuImagePlanned && !getSkuUrl(setIdx, subTask.id || '', vi, v)) addExportError(setLabel + ' 变体#' + (vi + 1) + ' 缺少AI SKU变体图');
       if (skuCode.length >= 100) addExportError(setLabel + ' 变体#' + (vi + 1) + ' 导出SKU超过100字符');
     }
