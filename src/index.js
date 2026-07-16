@@ -1,6 +1,5 @@
 // EWS - Cloudflare Worker 主入口（统一路由 + 分平台分发）
 
-import { PhotonImage, SamplingFilter, crop, resize } from '@cf-wasm/photon/workerd';
 import {
   query, getOne, getConfig, updateConfig, getPlatformConfig,
   createUser, getUserByUsername, getUserList, updateUserPassword,
@@ -2198,39 +2197,12 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
 }
 
 const SHOPEE_ITEM_IMAGE_LIMIT_BYTES = 2 * 1024 * 1024;
-const SHOPEE_ITEM_IMAGE_MAX_SIDE = 1200;
-const SHOPEE_FAST_JPEG_QUALITY = 88;
-const SHOPEE_RETRY_JPEG_QUALITY = 82;
-const SHOPEE_FINAL_JPEG_QUALITY = 55;
+const SHOPEE_PNG_JPEG_QUALITY = 88;
 const IMAGE_FETCH_TIMEOUT_MS = 30000;
 const MAX_SOURCE_IMAGE_BYTES = 16 * 1024 * 1024;
 
 function isShopeeItemImage(platform, imageType) {
   return platform === 'shopee' && (imageType === 'main' || imageType === 'sub');
-}
-
-function freePhotonImage(img) {
-  if (img) img.free();
-}
-
-function isJpegContentType(contentType) {
-  return /^image\/jpe?g\b/i.test(contentType || '');
-}
-
-function canReuseShopeeItemImage(buffer, contentType) {
-  if (!buffer || buffer.byteLength > SHOPEE_ITEM_IMAGE_LIMIT_BYTES) return false;
-  if (!isJpegContentType(contentType)) return false;
-  let input = null;
-  try {
-    input = PhotonImage.new_from_byteslice(new Uint8Array(buffer));
-    const width = input.get_width();
-    const height = input.get_height();
-    return width > 0 && width === height;
-  } catch (_) {
-    return false;
-  } finally {
-    freePhotonImage(input);
-  }
 }
 
 async function fetchImageWithTimeout(imageUrl) {
@@ -2271,49 +2243,22 @@ async function readImageResponse(resp) {
   return bytes.buffer;
 }
 
-function encodeShopeeJpegFast(image) {
-  const primary = image.get_bytes_jpeg(SHOPEE_FAST_JPEG_QUALITY);
-  if (primary.byteLength <= SHOPEE_ITEM_IMAGE_LIMIT_BYTES) return primary;
-  const retry = image.get_bytes_jpeg(SHOPEE_RETRY_JPEG_QUALITY);
-  return retry.byteLength < primary.byteLength ? retry : primary;
+function detectImageContentType(buffer, declaredType) {
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a) return 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  return String(declaredType || '').split(';', 1)[0].trim().toLowerCase();
 }
 
-function normalizeShopeeItemImage(buffer) {
-  let input = null;
-  let square = null;
-  let resized = null;
-  try {
-    input = PhotonImage.new_from_byteslice(new Uint8Array(buffer));
-    const width = input.get_width();
-    const height = input.get_height();
-    if (!width || !height) throw new Error('Invalid image dimensions');
-
-    const side = Math.min(width, height);
-    let working = input;
-    if (width !== height) {
-      const left = Math.floor((width - side) / 2);
-      const top = Math.floor((height - side) / 2);
-      square = crop(input, left, top, left + side, top + side);
-      working = square;
-    }
-
-    const encoded = encodeShopeeJpegFast(working);
-    if (encoded.byteLength <= SHOPEE_ITEM_IMAGE_LIMIT_BYTES) return encoded;
-
-    const targetSide = Math.min(side, SHOPEE_ITEM_IMAGE_MAX_SIDE);
-    if (working.get_width() > targetSide || working.get_height() > targetSide) {
-      resized = resize(working, targetSide, targetSide, SamplingFilter.Lanczos3);
-      const resizedBytes = encodeShopeeJpegFast(resized);
-      if (resizedBytes.byteLength <= SHOPEE_ITEM_IMAGE_LIMIT_BYTES) return resizedBytes;
-    }
-    const finalBytes = (resized || working).get_bytes_jpeg(SHOPEE_FINAL_JPEG_QUALITY);
-    if (finalBytes.byteLength <= SHOPEE_ITEM_IMAGE_LIMIT_BYTES) return finalBytes;
-    throw new Error('Shopee image remains above 2MB after compression');
-  } finally {
-    freePhotonImage(resized);
-    freePhotonImage(square);
-    freePhotonImage(input);
-  }
+async function transcodeShopeePngToJpeg(env, buffer) {
+  if (!env.IMAGES) throw new Error('Cloudflare Images binding is unavailable');
+  const output = await env.IMAGES
+    .input(new Uint8Array(buffer))
+    .transform({ background: '#ffffff' })
+    .output({ format: 'image/jpeg', quality: SHOPEE_PNG_JPEG_QUALITY, anim: false });
+  const response = await output.response();
+  if (!response.ok) throw new Error(`PNG to JPEG conversion failed: HTTP ${response.status}`);
+  return response.arrayBuffer();
 }
 
 async function processOneImage(env, platform, task_id, sub_task_id, set_index, image_type, image_position, image_url, publicUrl) {
@@ -2321,11 +2266,14 @@ async function processOneImage(env, platform, task_id, sub_task_id, set_index, i
     const resp = await fetchImageWithTimeout(image_url);
     if (!resp.ok) return null;
     let buffer = await readImageResponse(resp);
-    let contentType = resp.headers.get('content-type') || 'image/jpeg';
+    let contentType = detectImageContentType(buffer, resp.headers.get('content-type') || 'image/jpeg');
     if (!/^image\//i.test(contentType) && !/^application\/octet-stream\b/i.test(contentType)) return null;
     if (isShopeeItemImage(platform, image_type)) {
-      if (!canReuseShopeeItemImage(buffer, contentType)) buffer = normalizeShopeeItemImage(buffer);
-      contentType = 'image/jpeg';
+      if (contentType === 'image/png') {
+        buffer = await transcodeShopeePngToJpeg(env, buffer);
+        contentType = 'image/jpeg';
+      }
+      if (buffer.byteLength > SHOPEE_ITEM_IMAGE_LIMIT_BYTES) throw new Error('Shopee image remains above 2MB after PNG to JPEG conversion');
     }
     const ext = 'jpg';
     const fileName = `${image_type}_${image_position}.${ext}`;
