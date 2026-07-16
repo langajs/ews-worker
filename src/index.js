@@ -1,7 +1,8 @@
 // EWS - Cloudflare Worker 主入口（统一路由 + 分平台分发）
 
 import jpeg from 'jpeg-js';
-import { PNG } from 'pngjs';
+// pngjs 的 Node zlib 路径与 workerd 不兼容，必须使用 browser 构建。
+import pngjs from 'pngjs/browser.js';
 import {
   query, getOne, getConfig, updateConfig, getPlatformConfig,
   createUser, getUserByUsername, getUserList, updateUserPassword,
@@ -24,6 +25,8 @@ import {
   shopeeSaveImage, shopeeCheckParentCompletion, shopeeRefundCredits, shopeeUpdateVariationExports,
 } from './db.js';
 import { generateToken, hashPassword, verifyPassword, authenticateRequest, DEFAULT_PASSWORD } from './auth.js';
+
+const { PNG } = pngjs;
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -1648,8 +1651,8 @@ async function getPushPlanTimeoutMinutes(env) {
 
 async function getImageQueueLimits(env) {
   const stats = await getOne(env, `SELECT
-    SUM(CASE WHEN status='processing' AND processing_at >= datetime('now', '-5 minutes') THEN 1 ELSE 0 END) AS active,
-    SUM(CASE WHEN status='pending' OR (status='processing' AND processing_at < datetime('now', '-5 minutes')) THEN 1 ELSE 0 END) AS queued
+    SUM(CASE WHEN status='processing' AND processing_at >= datetime('now', '-2 minutes') THEN 1 ELSE 0 END) AS active,
+    SUM(CASE WHEN status='pending' OR (status='processing' AND processing_at < datetime('now', '-2 minutes')) THEN 1 ELSE 0 END) AS queued
     FROM ews_image_queue`);
   const active = stats?.active || 0;
   const outstanding = active + (stats?.queued || 0);
@@ -1776,7 +1779,7 @@ async function recoverStaleImageQueue(env) {
   const reason = '图片队列处理超时，已达到最大重试次数';
   const exhausted = await query(env, `SELECT * FROM ews_image_queue
     WHERE status='processing' AND attempts >= ?
-      AND (processing_at IS NULL OR processing_at='' OR processing_at < datetime('now', '-5 minutes'))
+      AND (processing_at IS NULL OR processing_at='' OR processing_at < datetime('now', '-2 minutes'))
     ORDER BY updated_at ASC LIMIT 50`, [IMAGE_QUEUE_MAX_ATTEMPTS]);
   for (const row of (exhausted?.results || [])) {
     const planStatus = await failImageQueuePlan(env, row, reason);
@@ -1787,14 +1790,14 @@ async function recoverStaleImageQueue(env) {
     const result = await env.DB.prepare(`UPDATE ews_image_queue
       SET status='failed', error=?, updated_at=datetime('now')
       WHERE id=? AND status='processing' AND attempts >= ?
-        AND (processing_at IS NULL OR processing_at='' OR processing_at < datetime('now', '-5 minutes'))`)
+        AND (processing_at IS NULL OR processing_at='' OR processing_at < datetime('now', '-2 minutes'))`)
       .bind(reason, row.id, IMAGE_QUEUE_MAX_ATTEMPTS).run();
     if (d1Changes(result) < 1) continue;
   }
   await env.DB.prepare(`UPDATE ews_image_queue
     SET status='pending', error='图片队列处理超时，重新入队', updated_at=datetime('now')
     WHERE status='processing' AND attempts < ?
-      AND (processing_at IS NULL OR processing_at='' OR processing_at < datetime('now', '-5 minutes'))`)
+      AND (processing_at IS NULL OR processing_at='' OR processing_at < datetime('now', '-2 minutes'))`)
     .bind(IMAGE_QUEUE_MAX_ATTEMPTS).run();
 }
 
@@ -1937,7 +1940,10 @@ async function processImageQueue(env, ctx, preferredId) {
     }
     await recoverStaleImageQueue(env);
     const candidates = await query(env, `SELECT * FROM ews_image_queue
-      WHERE attempts < ? AND (status='pending' OR (status='processing' AND processing_at < datetime('now', '-5 minutes')))
+      WHERE attempts < ? AND (
+        (status='pending' AND (attempts=0 OR updated_at <= datetime('now', '-30 seconds')))
+        OR (status='processing' AND processing_at < datetime('now', '-2 minutes'))
+      )
       ORDER BY received_at ASC LIMIT ?`, [IMAGE_QUEUE_MAX_ATTEMPTS, limits.batchSize]);
     const rows = candidates?.results || [];
     if (!rows.length) return;
@@ -1954,8 +1960,11 @@ async function processImageQueueRow(env, ctx, row, limits) {
   const claim = await env.DB.prepare(`UPDATE ews_image_queue
     SET status='processing', attempts=attempts+1, processing_at=datetime('now'), updated_at=datetime('now'), error=''
     WHERE id=? AND attempts < ?
-      AND (status='pending' OR (status='processing' AND processing_at < datetime('now', '-5 minutes')))
-      AND (SELECT COUNT(*) FROM ews_image_queue WHERE status='processing' AND processing_at >= datetime('now', '-5 minutes')) < ?`)
+      AND (
+        (status='pending' AND (attempts=0 OR updated_at <= datetime('now', '-30 seconds')))
+        OR (status='processing' AND processing_at < datetime('now', '-2 minutes'))
+      )
+      AND (SELECT COUNT(*) FROM ews_image_queue WHERE status='processing' AND processing_at >= datetime('now', '-2 minutes')) < ?`)
     .bind(row.id, IMAGE_QUEUE_MAX_ATTEMPTS, queueLimits.maxActive).run();
   const attempts = (row.attempts || 0) + 1;
   const claimedChanges = d1Changes(claim);
@@ -1993,9 +2002,8 @@ async function processImageQueuePayload(env, ctx, row) {
   const image_type = row.image_type;
   const image_position = parseInt(row.image_position) || 1;
   const whType = `${image_type}_${image_position}`;
-  const result = row.image_url ? await processOneImage(env, idx.platform, task_id, sub_task_id, subTask.set_index, image_type, image_position, row.image_url, publicUrl) : null;
-
-  if (result) {
+  if (row.image_url) {
+    await processOneImage(env, idx.platform, task_id, sub_task_id, subTask.set_index, image_type, image_position, row.image_url, publicUrl);
     await completePushPlanFromCallback(env, planTable, task_id, whType, sub_task_id);
   } else {
     const planInfo = await env.DB.prepare(`SELECT id, webhook_url, payload, retry_count FROM ${planTable} WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`)
@@ -2200,7 +2208,7 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
 
 const SHOPEE_ITEM_IMAGE_LIMIT_BYTES = 2 * 1024 * 1024;
 const SHOPEE_PNG_JPEG_QUALITY = 88;
-const IMAGE_FETCH_TIMEOUT_MS = 30000;
+const IMAGE_FETCH_TIMEOUT_MS = 15000;
 const MAX_SOURCE_IMAGE_BYTES = 16 * 1024 * 1024;
 
 function isShopeeItemImage(platform, imageType) {
@@ -2212,6 +2220,9 @@ async function fetchImageWithTimeout(imageUrl) {
   const timer = setTimeout(() => controller.abort(), IMAGE_FETCH_TIMEOUT_MS);
   try {
     return await fetch(imageUrl, { signal: controller.signal });
+  } catch (err) {
+    if (controller.signal.aborted) throw new Error('图片下载超过 15 秒');
+    throw err;
   } finally {
     clearTimeout(timer);
   }
@@ -2271,18 +2282,24 @@ function transcodeShopeePngToJpeg(buffer) {
 async function processOneImage(env, platform, task_id, sub_task_id, set_index, image_type, image_position, image_url, publicUrl) {
   try {
     const resp = await fetchImageWithTimeout(image_url);
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      const message = `图片下载失败: HTTP ${resp.status}`;
+      if (resp.status >= 400 && resp.status < 500 && ![408, 429].includes(resp.status)) throw callbackPermanentError(message);
+      throw new Error(message);
+    }
     let buffer = await readImageResponse(resp);
     let contentType = detectImageContentType(buffer, resp.headers.get('content-type') || 'image/jpeg');
-    if (!/^image\//i.test(contentType) && !/^application\/octet-stream\b/i.test(contentType)) return null;
-    if (isShopeeItemImage(platform, image_type)) {
+    if (!/^image\//i.test(contentType) && !/^application\/octet-stream\b/i.test(contentType)) {
+      throw callbackPermanentError(`图片格式不受支持: ${contentType || 'unknown'}`);
+    }
+    if (isShopeeItemImage(platform, image_type) && buffer.byteLength > SHOPEE_ITEM_IMAGE_LIMIT_BYTES) {
       if (contentType === 'image/png') {
         buffer = transcodeShopeePngToJpeg(buffer);
         contentType = 'image/jpeg';
       }
-      if (buffer.byteLength > SHOPEE_ITEM_IMAGE_LIMIT_BYTES) throw new Error('Shopee image remains above 2MB after PNG to JPEG conversion');
+      if (buffer.byteLength > SHOPEE_ITEM_IMAGE_LIMIT_BYTES) throw callbackPermanentError('Shopee 主图/附图转码后仍超过 2MB');
     }
-    const ext = 'jpg';
+    const ext = contentType === 'image/png' ? 'png' : 'jpg';
     const fileName = `${image_type}_${image_position}.${ext}`;
     const r2Key = `ews/${task_id}/${sub_task_id}/${fileName}`;
     await env.R2.put(r2Key, buffer, { httpMetadata: { contentType } });
@@ -2290,7 +2307,10 @@ async function processOneImage(env, platform, task_id, sub_task_id, set_index, i
     if (platform === 'shopee') await shopeeSaveImage(env, { parent_task_id: task_id, sub_task_id, set_index, image_type, position: image_position, image_url: fullUrl });
     else await jstSaveImage(env, { id: '', parent_task_id: task_id, sub_task_id, variant_id: null, set_index, image_type, position: image_position, image_url: fullUrl });
     return { type: image_type, position: image_position, url: fullUrl };
-  } catch (err) { console.error('processOneImage failed:', err.message); return null; }
+  } catch (err) {
+    console.error('processOneImage failed:', task_id, sub_task_id, `${image_type}_${image_position}`, err.message);
+    throw err;
+  }
 }
 
 // ========== 推送计划 ==========
