@@ -2208,6 +2208,7 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
 
 const SHOPEE_ITEM_IMAGE_LIMIT_BYTES = 2 * 1024 * 1024;
 const SHOPEE_PNG_JPEG_QUALITY = 88;
+const SHOPEE_RESIZE_TARGET_BYTES = Math.floor(SHOPEE_ITEM_IMAGE_LIMIT_BYTES * 0.95);
 const IMAGE_FETCH_TIMEOUT_MS = 15000;
 const MAX_SOURCE_IMAGE_BYTES = 16 * 1024 * 1024;
 
@@ -2263,6 +2264,53 @@ function detectImageContentType(buffer, declaredType) {
   return String(declaredType || '').split(';', 1)[0].trim().toLowerCase();
 }
 
+function resizeRgbaBilinear(source, sourceWidth, sourceHeight, targetWidth, targetHeight) {
+  const target = new Uint8Array(targetWidth * targetHeight * 4);
+  const leftOffsets = new Uint32Array(targetWidth);
+  const rightOffsets = new Uint32Array(targetWidth);
+  const xWeights = new Float32Array(targetWidth);
+  const xRatio = sourceWidth / targetWidth;
+  const yRatio = sourceHeight / targetHeight;
+
+  for (let x = 0; x < targetWidth; x++) {
+    const sourceX = Math.max(0, (x + 0.5) * xRatio - 0.5);
+    const left = Math.min(sourceWidth - 1, Math.floor(sourceX));
+    leftOffsets[x] = left * 4;
+    rightOffsets[x] = Math.min(sourceWidth - 1, left + 1) * 4;
+    xWeights[x] = sourceX - left;
+  }
+
+  for (let y = 0; y < targetHeight; y++) {
+    const sourceY = Math.max(0, (y + 0.5) * yRatio - 0.5);
+    const top = Math.min(sourceHeight - 1, Math.floor(sourceY));
+    const bottom = Math.min(sourceHeight - 1, top + 1);
+    const yWeight = sourceY - top;
+    const inverseYWeight = 1 - yWeight;
+    const topRow = top * sourceWidth * 4;
+    const bottomRow = bottom * sourceWidth * 4;
+    const targetRow = y * targetWidth * 4;
+
+    for (let x = 0; x < targetWidth; x++) {
+      const xWeight = xWeights[x];
+      const inverseXWeight = 1 - xWeight;
+      const topLeft = topRow + leftOffsets[x];
+      const topRight = topRow + rightOffsets[x];
+      const bottomLeft = bottomRow + leftOffsets[x];
+      const bottomRight = bottomRow + rightOffsets[x];
+      const targetOffset = targetRow + x * 4;
+
+      for (let channel = 0; channel < 3; channel++) {
+        const topValue = source[topLeft + channel] * inverseXWeight + source[topRight + channel] * xWeight;
+        const bottomValue = source[bottomLeft + channel] * inverseXWeight + source[bottomRight + channel] * xWeight;
+        target[targetOffset + channel] = Math.round(topValue * inverseYWeight + bottomValue * yWeight);
+      }
+      target[targetOffset + 3] = 255;
+    }
+  }
+
+  return target;
+}
+
 function transcodeShopeePngToJpeg(buffer) {
   const decoded = PNG.sync.read(Buffer.from(buffer));
   const pixels = decoded.data;
@@ -2276,7 +2324,15 @@ function transcodeShopeePngToJpeg(buffer) {
       pixels[offset + 3] = 255;
     }
   }
-  return jpeg.encode({ data: pixels, width: decoded.width, height: decoded.height }, SHOPEE_PNG_JPEG_QUALITY).data;
+  let encoded = jpeg.encode({ data: pixels, width: decoded.width, height: decoded.height }, SHOPEE_PNG_JPEG_QUALITY).data;
+  if (encoded.byteLength <= SHOPEE_ITEM_IMAGE_LIMIT_BYTES) return encoded;
+
+  const scale = Math.sqrt(SHOPEE_RESIZE_TARGET_BYTES / encoded.byteLength);
+  const targetWidth = Math.max(1, Math.floor(decoded.width * scale));
+  const targetHeight = Math.max(1, Math.floor(decoded.height * scale));
+  const resized = resizeRgbaBilinear(pixels, decoded.width, decoded.height, targetWidth, targetHeight);
+  encoded = jpeg.encode({ data: resized, width: targetWidth, height: targetHeight }, SHOPEE_PNG_JPEG_QUALITY).data;
+  return encoded;
 }
 
 async function processOneImage(env, platform, task_id, sub_task_id, set_index, image_type, image_position, image_url, publicUrl) {
@@ -2292,7 +2348,7 @@ async function processOneImage(env, platform, task_id, sub_task_id, set_index, i
     if (!/^image\//i.test(contentType) && !/^application\/octet-stream\b/i.test(contentType)) {
       throw callbackPermanentError(`图片格式不受支持: ${contentType || 'unknown'}`);
     }
-    if (isShopeeItemImage(platform, image_type) && buffer.byteLength > SHOPEE_ITEM_IMAGE_LIMIT_BYTES) {
+    if (isShopeeItemImage(platform, image_type)) {
       if (contentType === 'image/png') {
         buffer = transcodeShopeePngToJpeg(buffer);
         contentType = 'image/jpeg';
