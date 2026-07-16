@@ -1,5 +1,7 @@
 // EWS - Cloudflare Worker 主入口（统一路由 + 分平台分发）
 
+import jpeg from 'jpeg-js';
+import { PNG } from 'pngjs';
 import {
   query, getOne, getConfig, updateConfig, getPlatformConfig,
   createUser, getUserByUsername, getUserList, updateUserPassword,
@@ -2250,15 +2252,20 @@ function detectImageContentType(buffer, declaredType) {
   return String(declaredType || '').split(';', 1)[0].trim().toLowerCase();
 }
 
-async function transcodeShopeePngToJpeg(env, buffer) {
-  if (!env.IMAGES) throw new Error('Cloudflare Images binding is unavailable');
-  const output = await env.IMAGES
-    .input(new Uint8Array(buffer))
-    .transform({ background: '#ffffff' })
-    .output({ format: 'image/jpeg', quality: SHOPEE_PNG_JPEG_QUALITY, anim: false });
-  const response = await output.response();
-  if (!response.ok) throw new Error(`PNG to JPEG conversion failed: HTTP ${response.status}`);
-  return response.arrayBuffer();
+function transcodeShopeePngToJpeg(buffer) {
+  const decoded = PNG.sync.read(Buffer.from(buffer));
+  const pixels = decoded.data;
+  for (let offset = 0; offset < pixels.length; offset += 4) {
+    const alpha = pixels[offset + 3];
+    if (alpha < 255) {
+      const background = 255 * (255 - alpha);
+      pixels[offset] = Math.round((pixels[offset] * alpha + background) / 255);
+      pixels[offset + 1] = Math.round((pixels[offset + 1] * alpha + background) / 255);
+      pixels[offset + 2] = Math.round((pixels[offset + 2] * alpha + background) / 255);
+      pixels[offset + 3] = 255;
+    }
+  }
+  return jpeg.encode({ data: pixels, width: decoded.width, height: decoded.height }, SHOPEE_PNG_JPEG_QUALITY).data;
 }
 
 async function processOneImage(env, platform, task_id, sub_task_id, set_index, image_type, image_position, image_url, publicUrl) {
@@ -2270,7 +2277,7 @@ async function processOneImage(env, platform, task_id, sub_task_id, set_index, i
     if (!/^image\//i.test(contentType) && !/^application\/octet-stream\b/i.test(contentType)) return null;
     if (isShopeeItemImage(platform, image_type)) {
       if (contentType === 'image/png') {
-        buffer = await transcodeShopeePngToJpeg(env, buffer);
+        buffer = transcodeShopeePngToJpeg(buffer);
         contentType = 'image/jpeg';
       }
       if (buffer.byteLength > SHOPEE_ITEM_IMAGE_LIMIT_BYTES) throw new Error('Shopee image remains above 2MB after PNG to JPEG conversion');
