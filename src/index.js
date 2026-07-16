@@ -879,13 +879,12 @@ async function handleUpdateTask(request, env, path) {
       combinationKeys.add(combinationKey);
       const variantStock = v.stock === undefined || v.stock === null || v.stock === '' ? defaultStock : Number(v.stock);
       if (!Number.isInteger(variantStock) || variantStock < 0 || variantStock > 99999999) return error(`变体#${i + 1}库存必须为0~99999999`, 400);
-      const marketPrice = parseNumberOrNull(v.market_price);
       const minDistributionPrice = parseNumberOrNull(v.min_distribution_price);
       const maxDistributionPrice = parseNumberOrNull(v.max_distribution_price);
-      for (const [raw,label,parsed] of [[v.market_price,'市场价',marketPrice],[v.min_distribution_price,'最低分销控价',minDistributionPrice],[v.max_distribution_price,'最高分销控价',maxDistributionPrice]]) {
+      for (const [raw,label,parsed] of [[v.min_distribution_price,'最低分销控价',minDistributionPrice],[v.max_distribution_price,'最高分销控价',maxDistributionPrice]]) {
         if (raw !== undefined && raw !== null && raw !== '' && parsed === null) return error(`变体#${i + 1}${label}必须为数字`, 400);
       }
-      if ([marketPrice,minDistributionPrice,maxDistributionPrice].some(value => value !== null && value < 0)) return error(`变体#${i + 1}模板价格不能小于0`, 400);
+      if ([minDistributionPrice,maxDistributionPrice].some(value => value !== null && value < 0)) return error(`变体#${i + 1}分销控价不能小于0`, 400);
       if (minDistributionPrice !== null && maxDistributionPrice !== null && maxDistributionPrice < minDistributionPrice) return error(`变体#${i + 1}最高分销控价不能低于最低分销控价`, 400);
       const skuCode = String(v.sku_code || v.sku || '').trim();
       if (skuCode.length > JST_USER_SKU_MAX_LENGTH) return error(`变体#${i + 1}商家SKU不能超过${JST_USER_SKU_MAX_LENGTH}字符（系统会添加${SKU_PREFIX_LENGTH}字符随机前缀）`, 400);
@@ -900,7 +899,7 @@ async function handleUpdateTask(request, env, path) {
         sku_image: productType === 'single' ? '' : String(v.sku_image || ''),
         price: pricing.price, price_float_enabled: pricing.price_float_enabled,
         price_min: pricing.price_min, price_max: pricing.price_max, price_precision: pricing.price_precision,
-        market_price: marketPrice, min_distribution_price: minDistributionPrice, max_distribution_price: maxDistributionPrice,
+        market_price: null, min_distribution_price: minDistributionPrice, max_distribution_price: maxDistributionPrice,
         stock: variantStock, sku_code: skuCode,
         description: skuDescription, sort_order: i,
       });
@@ -2518,7 +2517,7 @@ async function jstHandleExport(env, taskId) {
         '推荐文案': subTask?.recommended_copy || detail.recommended_copy || '',
         '商品描述': subTask?.description || detail.description || detail.source_brief || '', '宝贝链接': detail.product_link || '',
         '库存': variant.stock ?? detail.stock ?? 999, '重量(kg)': detail.weight ?? 1.0, '基本售价': exportPrice,
-        '市场|吊牌价': variant.market_price ?? '',
+        '市场|吊牌价': exportPrice,
         '最低分销控价': variant.min_distribution_price ?? '', '最高分销控价': variant.max_distribution_price ?? '',
         '供应商名': detail.supplier_name || '',
         '3:4主图': '', '长图': '', '透明素材图': '', '白底图': '',
