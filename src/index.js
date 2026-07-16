@@ -1,8 +1,6 @@
 // EWS - Cloudflare Worker 主入口（统一路由 + 分平台分发）
 
-import jpeg from 'jpeg-js';
-// pngjs 的 Node zlib 路径与 workerd 不兼容，必须使用 browser 构建。
-import pngjs from 'pngjs/browser.js';
+import { AwsClient } from 'aws4fetch';
 import {
   query, getOne, getConfig, updateConfig, getPlatformConfig,
   createUser, getUserByUsername, getUserList, updateUserPassword,
@@ -25,8 +23,6 @@ import {
   shopeeSaveImage, shopeeCheckParentCompletion, shopeeRefundCredits, shopeeUpdateVariationExports,
 } from './db.js';
 import { generateToken, hashPassword, verifyPassword, authenticateRequest, DEFAULT_PASSWORD } from './auth.js';
-
-const { PNG } = pngjs;
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -206,6 +202,10 @@ export default {
     ctx.waitUntil(processPendingQueue(env, ctx));
   },
 
+  async queue(batch, env, ctx) {
+    await processNativeCallbackQueue(batch, env, ctx);
+  },
+
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -258,6 +258,8 @@ export default {
       // --- 回调 ---
       if (path === '/api/callback' && method === 'POST')
         return handleCallback(request, env, ctx);
+      if (path === '/api/internal/r2-upload-ticket' && method === 'POST')
+        return handleR2UploadTicket(request, env);
 
       // --- 上传 ---
       if (path === '/api/upload' && method === 'POST')
@@ -1384,6 +1386,8 @@ async function completePushPlanFromCallback(env, planTable, taskId, webhookType,
   if (subTaskId) params.push(subTaskId);
   const completed = await env.DB.prepare(`UPDATE ${safeTable} SET status='done', error='', next_retry_at='', updated_at=datetime('now') WHERE task_id=? AND webhook_type=?${subTaskClause} AND status='processing'`).bind(...params).run();
   if (d1Changes(completed) > 0) return true;
+  const donePlan = await getOne(env, `SELECT id FROM ${safeTable} WHERE task_id=? AND webhook_type=?${subTaskClause} AND status='done'`, params);
+  if (donePlan) return true;
   const pendingPlan = await getOne(env, `SELECT id FROM ${safeTable} WHERE task_id=? AND webhook_type=?${subTaskClause} AND status='pending'`, params);
   if (pendingPlan) {
     const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
@@ -1619,6 +1623,10 @@ const IMAGE_QUEUE_MAX_ATTEMPTS = 5;
 const MIN_PUSH_PLAN_TIMEOUT_MINUTES = 20;
 const DEFAULT_PUSH_PLAN_TIMEOUT_MINUTES = 20;
 const MAX_PUSH_PLAN_TIMEOUT_MINUTES = 1440;
+const CALLBACK_QUEUE_INLINE_MAX_BYTES = 48 * 1024;
+const CALLBACK_INBOX_PREFIX = 'ews-callback-inbox/';
+const R2_UPLOAD_TICKET_TTL_SECONDS = 300;
+const R2_UPLOAD_MAX_BYTES = 1900000;
 
 function d1Changes(result) {
   const meta = result?.meta || {};
@@ -1801,6 +1809,82 @@ async function recoverStaleImageQueue(env) {
     .bind(IMAGE_QUEUE_MAX_ATTEMPTS).run();
 }
 
+function imageObjectKey(taskId, subTaskId, imageType, imagePosition, planId) {
+  const safe = value => String(value || '').replace(/[^A-Za-z0-9_-]/g, '_');
+  return `ews/${safe(taskId)}/${safe(subTaskId)}/${safe(imageType)}_${parseInt(imagePosition)}_${safe(planId)}.jpg`;
+}
+
+async function findUploadTicketPlan(env, idx, body) {
+  const imageType = String(body.image_type || '').trim();
+  const imagePosition = parseInt(body.image_position);
+  if (!['main', 'sub', 'detail', 'sku'].includes(imageType)) throw callbackPermanentError('无效的图片类型');
+  if (!Number.isInteger(imagePosition) || imagePosition < 1) throw callbackPermanentError('图片位置无效');
+  const subTaskId = String(body.sub_task_id || '').trim();
+  if (!subTaskId) throw callbackPermanentError('缺少 sub_task_id');
+  const subTaskTable = idx.platform === 'shopee' ? 'ews_shopee_sub_tasks' : 'ews_jst_sub_tasks';
+  const subTask = await getOne(env, `SELECT id FROM ${subTaskTable} WHERE id=? AND parent_task_id=?`, [subTaskId, body.task_id]);
+  if (!subTask) throw callbackPermanentError('sub_task_id 不属于当前任务');
+  const planTable = idx.platform === 'shopee' ? 'ews_shopee_push_plans' : 'ews_jst_push_plans';
+  const plan = await findProcessingCallbackPlan(env, planTable, body.task_id, `${imageType}_${imagePosition}`, subTaskId, String(body.plan_id || '').trim());
+  if (!plan) throw callbackPermanentError('图片计划不存在或不在处理中');
+  return { plan, imageType, imagePosition, subTaskId };
+}
+
+async function createR2PresignedPut(env, key, planId, sha256) {
+  const accountId = String(env.R2_ACCOUNT_ID || '').trim();
+  const accessKeyId = String(env.R2_ACCESS_KEY_ID || '').trim();
+  const secretAccessKey = String(env.R2_SECRET_ACCESS_KEY || '').trim();
+  if (!accountId || !accessKeyId || !secretAccessKey) throw new Error('R2 S3 上传凭据尚未配置');
+  const bucket = String(env.R2_BUCKET_NAME || 'ossapac').trim();
+  const encodedKey = key.split('/').map(encodeURIComponent).join('/');
+  const url = new URL(`https://${accountId}.r2.cloudflarestorage.com/${encodeURIComponent(bucket)}/${encodedKey}`);
+  url.searchParams.set('X-Amz-Expires', String(R2_UPLOAD_TICKET_TTL_SECONDS));
+  const headers = {
+    'content-type': 'image/jpeg',
+    'x-amz-meta-plan-id': planId,
+    'x-amz-meta-sha256': sha256,
+  };
+  const signer = new AwsClient({ accessKeyId, secretAccessKey, service: 's3', region: 'auto', retries: 0 });
+  const request = await signer.sign(url, { method: 'PUT', headers, aws: { signQuery: true, allHeaders: true } });
+  return { uploadUrl: request.url, headers };
+}
+
+async function handleR2UploadTicket(request, env) {
+  const body = await parseBody(request);
+  if (!body || typeof body !== 'object' || typeof body.get === 'function') return error('无效的请求体', 400);
+  const taskId = String(body.task_id || '').trim();
+  if (!taskId) return error('缺少 task_id', 400);
+  const idx = await getTaskIndex(env, taskId);
+  if (!idx) return error('任务不存在', 404);
+  const config = await getConfig(env, idx.platform || '');
+  const receivedSecret = body.secret ?? body.callback_secret;
+  if (config.callback_secret && receivedSecret !== config.callback_secret) return error('上传票据密钥无效', 403);
+  const contentType = String(body.content_type || '').toLowerCase();
+  const sizeBytes = parseInt(body.size_bytes);
+  const sha256 = String(body.sha256 || '').toLowerCase();
+  if (contentType !== 'image/jpeg') return error('上传图片必须为 image/jpeg', 400);
+  if (!Number.isInteger(sizeBytes) || sizeBytes < 1 || sizeBytes > R2_UPLOAD_MAX_BYTES) return error(`上传图片必须小于 ${R2_UPLOAD_MAX_BYTES} bytes`, 400);
+  if (!/^[a-f0-9]{64}$/.test(sha256)) return error('图片 sha256 无效', 400);
+  try {
+    const ticketPlan = await findUploadTicketPlan(env, idx, { ...body, task_id: taskId });
+    const r2Key = imageObjectKey(taskId, ticketPlan.subTaskId, ticketPlan.imageType, ticketPlan.imagePosition, ticketPlan.plan.id);
+    const signed = await createR2PresignedPut(env, r2Key, ticketPlan.plan.id, sha256);
+    return json({
+      success: true,
+      method: 'PUT',
+      upload_url: signed.uploadUrl,
+      headers: signed.headers,
+      r2_key: r2Key,
+      expires_in: R2_UPLOAD_TICKET_TTL_SECONDS,
+      max_size: R2_UPLOAD_MAX_BYTES,
+    });
+  } catch (err) {
+    if (err.permanent) return error(err.message, 400);
+    console.error('R2 upload ticket failed:', err.message);
+    return json({ success: false, retryable: true, error: err.message || 'R2上传票据签发失败' }, 503);
+  }
+}
+
 async function handleCallback(request, env, ctx) {
   const body = await parseBody(request);
   if (!body || typeof body !== 'object' || typeof body.get === 'function') return error('无效的请求体', 400);
@@ -1814,13 +1898,87 @@ async function handleCallback(request, env, ctx) {
 
   try {
     const queueId = uuid(16);
-    await env.DB.prepare("INSERT INTO ews_callback_queue (id, task_id, platform, payload, status, received_at, updated_at) VALUES (?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))")
-      .bind(queueId, task_id, idx.platform || '', JSON.stringify(body)).run();
-    ctx.waitUntil(processCallbackQueue(env, ctx, queueId));
+    const payload = { ...body };
+    delete payload.secret;
+    delete payload.callback_secret;
+    const serializedPayload = JSON.stringify(payload);
+    let payloadKey = '';
+    const queueMessage = { id: queueId, task_id, platform: idx.platform || '' };
+    if (new TextEncoder().encode(serializedPayload).byteLength > CALLBACK_QUEUE_INLINE_MAX_BYTES) {
+      payloadKey = `${CALLBACK_INBOX_PREFIX}${queueId}.json`;
+      await env.R2.put(payloadKey, serializedPayload, {
+        httpMetadata: { contentType: 'application/json; charset=utf-8' },
+        customMetadata: { 'queue-id': queueId },
+      });
+      queueMessage.payload_key = payloadKey;
+    } else {
+      queueMessage.payload = payload;
+    }
+    try {
+      await env.CALLBACK_EVENTS.send(queueMessage);
+    } catch (err) {
+      if (payloadKey) await env.R2.delete(payloadKey).catch(() => {});
+      throw err;
+    }
     return json({ success: true, queued: true, queue_id: queueId, message: '回调已入队' });
   } catch (err) {
     console.error('callback enqueue failed:', err.message);
     return json({ success: false, queued: false, retryable: true, error: '回调队列写入失败，请稍后重试' }, 503);
+  }
+}
+
+function nativeCallbackPayloadKey(value) {
+  const key = String(value || '');
+  if (!key.startsWith(CALLBACK_INBOX_PREFIX) || !/^ews-callback-inbox\/[A-Za-z0-9_-]+\.json$/.test(key)) {
+    throw callbackPermanentError('回调 inbox key 无效');
+  }
+  return key;
+}
+
+async function loadNativeCallbackPayload(env, item) {
+  if (item.payload && typeof item.payload === 'object') return item.payload;
+  const payloadKey = nativeCallbackPayloadKey(item.payload_key);
+  const object = await env.R2.get(payloadKey);
+  if (!object) throw new Error('回调 inbox 数据尚不可用');
+  let payload;
+  try { payload = JSON.parse(await object.text()); }
+  catch (_) { throw callbackPermanentError('回调 inbox 数据不是有效 JSON'); }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw callbackPermanentError('回调 inbox 数据无效');
+  return payload;
+}
+
+async function deleteNativeCallbackPayload(env, value) {
+  let payloadKey;
+  try { payloadKey = nativeCallbackPayloadKey(value); }
+  catch (_) { return; }
+  await env.R2.delete(payloadKey);
+}
+
+async function processNativeCallbackQueue(batch, env, ctx) {
+  for (const message of batch.messages) {
+    const item = message.body || {};
+    let payload;
+    try {
+      payload = await loadNativeCallbackPayload(env, item);
+      await processCallbackPayload(env, ctx, payload, true);
+      if (item.payload_key) await deleteNativeCallbackPayload(env, item.payload_key);
+      message.ack();
+    } catch (err) {
+      const permanent = err.permanent === true;
+      const exhausted = message.attempts >= CALLBACK_QUEUE_MAX_ATTEMPTS;
+      if (permanent || exhausted) {
+        await failCallbackPushPlan(env, {
+          task_id: item.task_id || payload?.task_id || '',
+          platform: item.platform || '',
+          payload: JSON.stringify(payload || {}),
+        }, permanent ? (err.message || '回调数据无效') : `${err.message || '回调处理失败'}；已达到自动重试上限`);
+        if (item.payload_key) await deleteNativeCallbackPayload(env, item.payload_key);
+        message.ack();
+      } else {
+        message.retry({ delaySeconds: Math.min(300, 30 * message.attempts) });
+      }
+      console.error('native callback queue item failed:', message.id, err.message);
+    }
   }
 }
 
@@ -1909,26 +2067,6 @@ async function processCallbackQueueRow(env, ctx, row) {
   return true;
 }
 
-async function enqueueImageCallback(env, idx, body) {
-  const imageId = uuid(16);
-  await env.DB.prepare(`INSERT INTO ews_image_queue
-    (id, task_id, platform, sub_task_id, set_index, image_type, image_position, image_url, error_message, error_retryable, status, received_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))`)
-    .bind(
-      imageId,
-      body.task_id,
-      idx.platform || '',
-      body.sub_task_id || '',
-      body.set_index ?? 0,
-      body.image_type,
-      parseInt(body.image_position) || 1,
-      body.image_url || '',
-      body.error || '',
-      body.retryable === false ? 0 : 1
-    ).run();
-  return imageId;
-}
-
 async function processImageQueue(env, ctx, preferredId) {
   try {
     const limits = await getImageQueueLimits(env);
@@ -1982,6 +2120,31 @@ async function processImageQueueRow(env, ctx, row, limits) {
   return true;
 }
 
+async function processUploadedR2Image(env, platform, taskId, subTaskId, setIndex, imageType, imagePosition, planId, r2Key, sha256, publicUrl) {
+  if (!planId) throw callbackPermanentError('R2图片回调缺少 plan_id');
+  const expectedKey = imageObjectKey(taskId, subTaskId, imageType, imagePosition, planId);
+  if (r2Key !== expectedKey) throw callbackPermanentError('R2图片路径与任务计划不匹配');
+  const object = await env.R2.head(r2Key);
+  if (!object) throw new Error('R2图片尚未写入完成');
+  const contentType = String(object.httpMetadata?.contentType || '').toLowerCase();
+  const storedSha256 = String(object.customMetadata?.sha256 || '').toLowerCase();
+  const storedPlanId = String(object.customMetadata?.['plan-id'] || '');
+  const invalid = object.size < 1
+    || object.size > R2_UPLOAD_MAX_BYTES
+    || contentType !== 'image/jpeg'
+    || !/^[a-f0-9]{64}$/.test(sha256)
+    || storedSha256 !== sha256
+    || storedPlanId !== planId;
+  if (invalid) {
+    await env.R2.delete(r2Key).catch(() => {});
+    throw callbackPermanentError('R2图片校验失败');
+  }
+  const fullUrl = publicUrl ? `${publicUrl.replace(/\/+$/, '')}/${r2Key}` : r2Key;
+  if (platform === 'shopee') await shopeeSaveImage(env, { parent_task_id: taskId, sub_task_id: subTaskId, set_index: setIndex, image_type: imageType, position: imagePosition, image_url: fullUrl });
+  else await jstSaveImage(env, { id: '', parent_task_id: taskId, sub_task_id: subTaskId, variant_id: null, set_index: setIndex, image_type: imageType, position: imagePosition, image_url: fullUrl });
+  return { type: imageType, position: imagePosition, url: fullUrl };
+}
+
 async function processImageQueuePayload(env, ctx, row) {
   const task_id = row.task_id;
   const idx = await getTaskIndex(env, task_id);
@@ -2002,9 +2165,19 @@ async function processImageQueuePayload(env, ctx, row) {
   const image_type = row.image_type;
   const image_position = parseInt(row.image_position) || 1;
   const whType = `${image_type}_${image_position}`;
-  if (row.image_url) {
+  if (row.r2_key) {
+    await processUploadedR2Image(env, idx.platform, task_id, sub_task_id, subTask.set_index, image_type, image_position,
+      String(row.plan_id || ''), String(row.r2_key || ''), String(row.sha256 || '').toLowerCase(), publicUrl);
+    const completed = row.plan_id
+      ? await completePushPlanByIdFromCallback(env, planTable, task_id, row.plan_id)
+      : await completePushPlanFromCallback(env, planTable, task_id, whType, sub_task_id);
+    if (!completed) throw new Error('图片计划暂时无法完成，请稍后重试');
+  } else if (row.image_url) {
     await processOneImage(env, idx.platform, task_id, sub_task_id, subTask.set_index, image_type, image_position, row.image_url, publicUrl);
-    await completePushPlanFromCallback(env, planTable, task_id, whType, sub_task_id);
+    const completed = row.plan_id
+      ? await completePushPlanByIdFromCallback(env, planTable, task_id, row.plan_id)
+      : await completePushPlanFromCallback(env, planTable, task_id, whType, sub_task_id);
+    if (!completed) throw new Error('图片计划暂时无法完成，请稍后重试');
   } else {
     const planInfo = await env.DB.prepare(`SELECT id, webhook_url, payload, retry_count FROM ${planTable} WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`)
       .bind(task_id, sub_task_id, whType).first();
@@ -2038,7 +2211,7 @@ async function processImageQueuePayload(env, ctx, row) {
 
 async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
   if (!body || typeof body !== 'object') throw callbackPermanentError('无效的请求体');
-  const { task_id, sub_task_id, products, image_type, image_position, image_url, error: errMsg } = body;
+  const { task_id, sub_task_id, products, image_type, image_position, image_url, r2_key, error: errMsg } = body;
   if (!task_id) throw callbackPermanentError('缺少 task_id');
   const idx = await getTaskIndex(env, task_id);
   if (!idx) throw callbackPermanentError('任务不存在');
@@ -2054,7 +2227,7 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
   if (callbackWorkflowType === 'sku_title' || (!isShopee && callbackWorkflowType === 'title')) {
     throw callbackPermanentError('旧版独立标题工作流已停用，请使用metadata聚合元数据工作流');
   }
-  if (errMsg && image_type === undefined && image_url === undefined) {
+  if (errMsg && image_type === undefined && image_url === undefined && r2_key === undefined) {
     await handleWorkflowErrorCallback(env, idx, body);
     return { success: true, sub_task_id, workflow_error: true };
   }
@@ -2169,24 +2342,28 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
   }
   if (products && isShopee) await completePushPlanFromCallback(env, 'ews_shopee_push_plans', task_id, 'title');
 
-  // 图片回调先进入图片队列，避免回调并发直接放大 R2/D1 压力
-  let imageQueued = false;
-  const hasImageCallback = image_type !== undefined || image_url !== undefined || (errMsg && sub_task_id);
+  let imageHandled = false;
+  const hasImageCallback = image_type !== undefined || image_url !== undefined || r2_key !== undefined || (errMsg && sub_task_id);
   if (hasImageCallback) {
     if (!['main','sub','detail','sku'].includes(image_type)) throw callbackPermanentError('无效的图片类型');
     if (!sub_task_id) throw callbackPermanentError('图片回调缺少 sub_task_id');
     const normalizedPosition = parseInt(image_position);
     if (!Number.isInteger(normalizedPosition) || normalizedPosition < 1) throw callbackPermanentError('图片回调的 image_position 无效');
-    if (!image_url && !errMsg) throw callbackPermanentError('图片回调缺少 image_url 或 error');
+    if (!r2_key && !image_url && !errMsg) throw callbackPermanentError('图片回调缺少 r2_key、image_url 或 error');
     const subTaskTable = isShopee ? 'ews_shopee_sub_tasks' : 'ews_jst_sub_tasks';
     const callbackSubTask = await getOne(env, `SELECT id, set_index FROM ${subTaskTable} WHERE id=? AND parent_task_id=?`, [sub_task_id, task_id]);
     if (!callbackSubTask) throw callbackPermanentError('图片回调的 sub_task_id 不属于当前任务');
-    const imageQueueId = await enqueueImageCallback(env, idx, { ...body, set_index: callbackSubTask.set_index, image_position: normalizedPosition });
-    ctx.waitUntil(processImageQueue(env, ctx, imageQueueId));
-    imageQueued = true;
+    await processImageQueuePayload(env, ctx, {
+      ...body,
+      set_index: callbackSubTask.set_index,
+      image_position: normalizedPosition,
+      error_message: body.error || '',
+      error_retryable: body.retryable === false ? 0 : 1,
+    });
+    imageHandled = true;
   }
 
-  if (!imageQueued) {
+  if (!imageHandled) {
     // 检查子任务完成
     if (sub_task_id) {
       const imgStatus = await checkSubTaskImages(env, sub_task_id);
@@ -2203,12 +2380,10 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
     }
   }
 
-  return { success: true, sub_task_id, image_queued: imageQueued };
+  return { success: true, sub_task_id, image_handled: imageHandled };
 }
 
 const SHOPEE_ITEM_IMAGE_LIMIT_BYTES = 2 * 1024 * 1024;
-const SHOPEE_PNG_JPEG_QUALITY = 88;
-const SHOPEE_RESIZE_TARGET_BYTES = Math.floor(SHOPEE_ITEM_IMAGE_LIMIT_BYTES * 0.95);
 const IMAGE_FETCH_TIMEOUT_MS = 15000;
 const MAX_SOURCE_IMAGE_BYTES = 16 * 1024 * 1024;
 
@@ -2264,77 +2439,6 @@ function detectImageContentType(buffer, declaredType) {
   return String(declaredType || '').split(';', 1)[0].trim().toLowerCase();
 }
 
-function resizeRgbaBilinear(source, sourceWidth, sourceHeight, targetWidth, targetHeight) {
-  const target = new Uint8Array(targetWidth * targetHeight * 4);
-  const leftOffsets = new Uint32Array(targetWidth);
-  const rightOffsets = new Uint32Array(targetWidth);
-  const xWeights = new Float32Array(targetWidth);
-  const xRatio = sourceWidth / targetWidth;
-  const yRatio = sourceHeight / targetHeight;
-
-  for (let x = 0; x < targetWidth; x++) {
-    const sourceX = Math.max(0, (x + 0.5) * xRatio - 0.5);
-    const left = Math.min(sourceWidth - 1, Math.floor(sourceX));
-    leftOffsets[x] = left * 4;
-    rightOffsets[x] = Math.min(sourceWidth - 1, left + 1) * 4;
-    xWeights[x] = sourceX - left;
-  }
-
-  for (let y = 0; y < targetHeight; y++) {
-    const sourceY = Math.max(0, (y + 0.5) * yRatio - 0.5);
-    const top = Math.min(sourceHeight - 1, Math.floor(sourceY));
-    const bottom = Math.min(sourceHeight - 1, top + 1);
-    const yWeight = sourceY - top;
-    const inverseYWeight = 1 - yWeight;
-    const topRow = top * sourceWidth * 4;
-    const bottomRow = bottom * sourceWidth * 4;
-    const targetRow = y * targetWidth * 4;
-
-    for (let x = 0; x < targetWidth; x++) {
-      const xWeight = xWeights[x];
-      const inverseXWeight = 1 - xWeight;
-      const topLeft = topRow + leftOffsets[x];
-      const topRight = topRow + rightOffsets[x];
-      const bottomLeft = bottomRow + leftOffsets[x];
-      const bottomRight = bottomRow + rightOffsets[x];
-      const targetOffset = targetRow + x * 4;
-
-      for (let channel = 0; channel < 3; channel++) {
-        const topValue = source[topLeft + channel] * inverseXWeight + source[topRight + channel] * xWeight;
-        const bottomValue = source[bottomLeft + channel] * inverseXWeight + source[bottomRight + channel] * xWeight;
-        target[targetOffset + channel] = Math.round(topValue * inverseYWeight + bottomValue * yWeight);
-      }
-      target[targetOffset + 3] = 255;
-    }
-  }
-
-  return target;
-}
-
-function transcodeShopeePngToJpeg(buffer) {
-  const decoded = PNG.sync.read(Buffer.from(buffer));
-  const pixels = decoded.data;
-  for (let offset = 0; offset < pixels.length; offset += 4) {
-    const alpha = pixels[offset + 3];
-    if (alpha < 255) {
-      const background = 255 * (255 - alpha);
-      pixels[offset] = Math.round((pixels[offset] * alpha + background) / 255);
-      pixels[offset + 1] = Math.round((pixels[offset + 1] * alpha + background) / 255);
-      pixels[offset + 2] = Math.round((pixels[offset + 2] * alpha + background) / 255);
-      pixels[offset + 3] = 255;
-    }
-  }
-  let encoded = jpeg.encode({ data: pixels, width: decoded.width, height: decoded.height }, SHOPEE_PNG_JPEG_QUALITY).data;
-  if (encoded.byteLength <= SHOPEE_ITEM_IMAGE_LIMIT_BYTES) return encoded;
-
-  const scale = Math.sqrt(SHOPEE_RESIZE_TARGET_BYTES / encoded.byteLength);
-  const targetWidth = Math.max(1, Math.floor(decoded.width * scale));
-  const targetHeight = Math.max(1, Math.floor(decoded.height * scale));
-  const resized = resizeRgbaBilinear(pixels, decoded.width, decoded.height, targetWidth, targetHeight);
-  encoded = jpeg.encode({ data: resized, width: targetWidth, height: targetHeight }, SHOPEE_PNG_JPEG_QUALITY).data;
-  return encoded;
-}
-
 async function processOneImage(env, platform, task_id, sub_task_id, set_index, image_type, image_position, image_url, publicUrl) {
   try {
     const resp = await fetchImageWithTimeout(image_url);
@@ -2349,11 +2453,7 @@ async function processOneImage(env, platform, task_id, sub_task_id, set_index, i
       throw callbackPermanentError(`图片格式不受支持: ${contentType || 'unknown'}`);
     }
     if (isShopeeItemImage(platform, image_type)) {
-      if (contentType === 'image/png') {
-        buffer = transcodeShopeePngToJpeg(buffer);
-        contentType = 'image/jpeg';
-      }
-      if (buffer.byteLength > SHOPEE_ITEM_IMAGE_LIMIT_BYTES) throw callbackPermanentError('Shopee 主图/附图转码后仍超过 2MB');
+      if (buffer.byteLength > SHOPEE_ITEM_IMAGE_LIMIT_BYTES) throw callbackPermanentError('Shopee 主图/附图超过 2MB');
     }
     const ext = contentType === 'image/png' ? 'png' : 'jpg';
     const fileName = `${image_type}_${image_position}.${ext}`;

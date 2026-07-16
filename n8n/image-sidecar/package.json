@@ -1,0 +1,8 @@
+{
+  "name": "ews-image-sidecar",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "sharp": "^0.34.3"
+  }
+}

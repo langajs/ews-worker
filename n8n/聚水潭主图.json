@@ -227,12 +227,12 @@
       },
       {
         "parameters": {
-          "jsCode": "const response = $input.first().json || {};\nconst original = $node['提取参数'].json;\n\nfunction errorText(value) {\n  if (!value) return '';\n  if (typeof value === 'string') return value;\n  if (value.message) return String(value.message);\n  if (value.description) return String(value.description);\n  try { return JSON.stringify(value); } catch (_) { return String(value); }\n}\n\nconst error = response.timedOut\n  ? '图片生成超过900秒，已终止轮询'\n  : errorText(response.error) || errorText(response.status) || '图片生成失败';\n\nreturn {\n  callback_secret: original.callbackSecret,\n  task_id: original.taskId,\n  sub_task_id: original.subTaskId,\n  set_index: original.setIndex,\n  image_type: original.imageType,\n  image_position: original.imagePosition,\n  error,\n  callbackUrl: original.callbackUrl,\n};"
+          "jsCode": "const response = $input.first().json || {};\nconst original = $node['提取参数'].json;\n\nfunction errorText(value) {\n  if (!value) return '';\n  if (typeof value === 'string') return value;\n  if (value.message) return String(value.message);\n  if (value.description) return String(value.description);\n  try { return JSON.stringify(value); } catch (_) { return String(value); }\n}\n\nconst error = response.timedOut\n  ? '图片生成超过900秒，已终止轮询'\n  : errorText(response.error) || errorText(response.status) || '图片生成失败';\n\nreturn {\n  callback_secret: original.callbackSecret,\n  task_id: original.taskId,\n  sub_task_id: original.subTaskId,\n  set_index: original.setIndex,\n  image_type: original.imageType,\n  image_position: original.imagePosition,\n  error,\n  retryable: response.retryable !== false,\n  callbackUrl: original.callbackUrl,\n};"
         },
         "type": "n8n-nodes-base.code",
         "typeVersion": 2,
         "position": [
-          1040,
+          1520,
           96
         ],
         "id": "2a43c128-d55f-4a0b-91ac-4103d354641c",
@@ -253,13 +253,13 @@
           },
           "sendBody": true,
           "specifyBody": "json",
-          "jsonBody": "={{ {\n  callback_secret: $json.callback_secret,\n  task_id: $json.task_id,\n  sub_task_id: $json.sub_task_id,\n  set_index: $json.set_index,\n  image_type: $json.image_type,\n  image_position: $json.image_position,\n  error: $json.error\n} }}",
+          "jsonBody": "={{ {\n  callback_secret: $json.callback_secret,\n  task_id: $json.task_id,\n  sub_task_id: $json.sub_task_id,\n  set_index: $json.set_index,\n  image_type: $json.image_type,\n  image_position: $json.image_position,\n  error: $json.error,\n  retryable: $json.retryable !== false\n} }}",
           "options": {}
         },
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.4,
         "position": [
-          1264,
+          1760,
           96
         ],
         "id": "8e31e68d-c4b7-4ab6-bf21-4e8ddf5c02e3",
@@ -271,7 +271,7 @@
       {
         "parameters": {
           "method": "POST",
-          "url": "={{ $json.callbackUrl }}",
+          "url": "={{ $node['提取参数'].json.callbackUrl }}",
           "sendHeaders": true,
           "headerParameters": {
             "parameters": [
@@ -283,13 +283,13 @@
           },
           "sendBody": true,
           "specifyBody": "json",
-          "jsonBody": "={{ {\n  callback_secret: $json.callback_secret,\n  task_id: $json.task_id,\n  sub_task_id: $json.sub_task_id,\n  set_index: $json.set_index,\n  image_type: $json.image_type,\n  image_position: $json.image_position,\n  image_url: $json.image_url\n} }}",
+          "jsonBody": "={{ {\n  callback_secret: $node['提取参数'].json.callbackSecret,\n  task_id: $node['提取参数'].json.taskId,\n  plan_id: $node['Webhook'].json.body.plan_id || '',\n  sub_task_id: $node['提取参数'].json.subTaskId,\n  set_index: $node['提取参数'].json.setIndex,\n  image_type: $node['提取参数'].json.imageType,\n  image_position: $node['提取参数'].json.imagePosition,\n  r2_key: $json.r2_key,\n  size_bytes: $json.size_bytes,\n  sha256: $json.sha256,\n  content_type: $json.content_type,\n  etag: $json.etag\n} }}",
           "options": {}
         },
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.4,
         "position": [
-          1040,
+          1520,
           -96
         ],
         "id": "850fcaab-ad42-420d-8aca-8fafa1a7a5ca",
@@ -378,6 +378,70 @@
         ],
         "id": "b3000000-0000-4000-8000-000000000003",
         "name": "拒绝请求"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://ews-image-sidecar:3000/process-upload",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ {\n  source_url: $json.image_url,\n  ticket_url: String($node['提取参数'].json.callbackUrl || '').replace('/api/callback', '/api/internal/r2-upload-ticket'),\n  callback_secret: $node['提取参数'].json.callbackSecret,\n  task_id: $node['提取参数'].json.taskId,\n  plan_id: $node['Webhook'].json.body.plan_id || '',\n  sub_task_id: $node['提取参数'].json.subTaskId,\n  set_index: $node['提取参数'].json.setIndex,\n  image_type: $node['提取参数'].json.imageType,\n  image_position: $node['提取参数'].json.imagePosition\n} }}",
+          "options": {
+            "timeout": 120000
+          }
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          1040,
+          -96
+        ],
+        "id": "fb64732f-e5d7-4b19-8dd6-5f88787ce0b4",
+        "name": "处理并上传R2",
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 3
+            },
+            "conditions": [
+              {
+                "id": "f2718236-3b6a-4c58-8aa4-ff914eed0be9",
+                "leftValue": "={{ $json.success ? 'true' : 'false' }}",
+                "rightValue": "true",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals",
+                  "name": "filter.operator.equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          1280,
+          -96
+        ],
+        "id": "f5ef7a77-38c6-46c9-b491-99f954e95f51",
+        "name": "R2上传成功"
       }
     ],
     "pinData": {},
@@ -452,7 +516,7 @@
         "main": [
           [
             {
-              "node": "成功回调",
+              "node": "处理并上传R2",
               "type": "main",
               "index": 0
             }
@@ -540,6 +604,35 @@
           [
             {
               "node": "任务完成",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "处理并上传R2": {
+        "main": [
+          [
+            {
+              "node": "R2上传成功",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "R2上传成功": {
+        "main": [
+          [
+            {
+              "node": "成功回调",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "失败通知",
               "type": "main",
               "index": 0
             }
