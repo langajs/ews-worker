@@ -623,8 +623,36 @@ function getJstVariationGroups(variations) {
   return groups;
 }
 
+function isGeneratedTaskImageKey(taskPrefix, key) {
+  if (!key.startsWith(taskPrefix)) return false;
+  const relative = key.slice(taskPrefix.length);
+  const parts = relative.split('/');
+  return parts.length === 2
+    && /^[A-Za-z0-9_-]+$/.test(parts[0])
+    && /^(main|sub|detail|sku)_\d+(?:_[A-Za-z0-9_-]+)?\.jpg$/.test(parts[1]);
+}
+
+async function deleteGeneratedTaskObjects(env, taskId) {
+  const safeTaskId = String(taskId || '').replace(/[^A-Za-z0-9_-]/g, '_');
+  const taskPrefix = `ews/${safeTaskId}/`;
+  let cursor;
+  let deleted = 0;
+  do {
+    const options = { prefix: taskPrefix };
+    if (cursor) options.cursor = cursor;
+    const objects = await env.R2.list(options);
+    const keys = objects.objects.map(object => object.key).filter(key => isGeneratedTaskImageKey(taskPrefix, key));
+    for (let index = 0; index < keys.length; index += 100) await env.R2.delete(keys.slice(index, index + 100));
+    deleted += keys.length;
+    cursor = objects.truncated ? objects.cursor : undefined;
+  } while (cursor);
+  return deleted;
+}
+
 async function resetGeneratedTaskArtifacts(env, taskId, platform) {
   const prefix = platform === 'shopee' ? 'ews_shopee' : 'ews_jst';
+  const deletedObjects = await deleteGeneratedTaskObjects(env, taskId);
+  if (deletedObjects > 0) console.log('reset task generated images deleted:', taskId, deletedObjects);
   await env.DB.prepare("DELETE FROM ews_callback_queue WHERE task_id=?").bind(taskId).run().catch(() => {});
   await env.DB.prepare("DELETE FROM ews_image_queue WHERE task_id=?").bind(taskId).run().catch(() => {});
   await env.DB.prepare(`DELETE FROM ${prefix}_push_plans WHERE task_id=?`).bind(taskId).run();
