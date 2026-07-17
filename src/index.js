@@ -289,9 +289,6 @@ export default {
       if (path.match(/^\/api\/users\/[^\/]+$/) && method === 'DELETE')
         return requireAuth(request, env, () => handleDeleteUser(request, env, path));
 
-      // --- R2 ---
-      if (path.startsWith('/r2/')) return handleR2File(path, env);
-
       return error('Not Found', 404);
     } catch (err) {
       console.error('Route error:', err);
@@ -3012,13 +3009,4 @@ async function handleUpload(request, env) {
   const config = await getConfig(env);
   const publicUrl = config.r2_public_url || '';
   return json({ success: true, key, url: publicUrl ? `${publicUrl.replace(/\/+$/, '')}/${key}` : null, message: '上传成功' });
-}
-
-// ========== R2 ==========
-
-async function handleR2File(path, env) {
-  const key = path.replace(/^\/r2\//, '');
-  const object = await env.R2.get(key);
-  if (!object) return error('文件不存在', 404);
-  return new Response(object.body, { headers: { 'Content-Type': object.httpMetadata?.contentType || 'application/octet-stream', 'Cache-Control': 'public, max-age=31536000' } });
 }
