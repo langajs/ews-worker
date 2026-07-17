@@ -2476,21 +2476,40 @@ async function handleGetPlans(env, path) {
   const idx = await getTaskIndex(env, taskId);
   if (!idx) return error('任务不存在', 404);
   const plansTable = idx.platform === 'jst' ? 'ews_jst_push_plans' : 'ews_shopee_push_plans';
+  const imagesTable = idx.platform === 'jst' ? 'ews_jst_task_images' : 'ews_shopee_task_images';
   const [config, results] = await Promise.all([
     getConfig(env),
     env.DB.batch([
       env.DB.prepare(`SELECT * FROM ${plansTable} WHERE task_id=? ORDER BY batch_order ASC, webhook_type ASC`).bind(taskId),
       env.DB.prepare(`SELECT status, COUNT(*) as cnt FROM ${plansTable} WHERE task_id=? GROUP BY status`).bind(taskId),
+      env.DB.prepare(`SELECT sub_task_id, image_type, position, image_url FROM ${imagesTable} WHERE parent_task_id=? AND status='completed' AND image_url<>''`).bind(taskId),
     ]),
   ]);
   const publicUrl = (config.r2_public_url || '').replace(/\/+$/, '');
   const plans = results[0]?.results || [];
   const stats = results[1]?.results || [];
+  const imageUrls = new Map((results[2]?.results || []).map(image => [
+    `${image.sub_task_id || ''}|${image.image_type}|${parseInt(image.position) || 1}`,
+    image.image_url || '',
+  ]));
   const s = { pending: 0, processing: 0, done: 0, failed: 0, total: 0 };
   for (const r of stats) { s[r.status] = r.cnt; s.total += r.cnt; }
   return json({ success: true, plans: plans.map(p => {
     let preview_url = '';
-    try { const pl = JSON.parse(p.payload); if (pl.image_type && pl.image_position && pl.sub_task_id && publicUrl) preview_url = `${publicUrl}/ews/${pl.task_id}/${pl.sub_task_id}/${pl.image_type}_${pl.image_position}.jpg`; } catch(_) {}
+    const imagePlan = /^(main|sub|detail|sku)_(\d+)$/.exec(p.webhook_type || '');
+    let imageType = imagePlan?.[1] || '';
+    let imagePosition = parseInt(imagePlan?.[2]) || 0;
+    if (!imageType) {
+      try {
+        const payload = JSON.parse(p.payload || '{}');
+        imageType = ['main','sub','detail','sku'].includes(payload.image_type) ? payload.image_type : '';
+        imagePosition = parseInt(payload.image_position) || 0;
+      } catch (_) {}
+    }
+    if (imageType && imagePosition && p.sub_task_id) {
+      preview_url = imageUrls.get(`${p.sub_task_id}|${imageType}|${imagePosition}`) || '';
+      if (preview_url && !/^https?:\/\//i.test(preview_url) && publicUrl) preview_url = `${publicUrl}/${preview_url.replace(/^\/+/, '')}`;
+    }
     const { user_id, is_image, ...publicPlan } = p;
     return { ...publicPlan, preview_url };
   }), stats: s });
