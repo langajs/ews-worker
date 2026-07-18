@@ -10,6 +10,10 @@ function ticketOrigin(value) {
   return parsed.origin;
 }
 
+function enabled(value) {
+  return ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
+}
+
 export function loadConfig(environment = process.env) {
   const serviceSecret = String(environment.IMAGE_SERVICE_SECRET || '').trim();
   if (!serviceSecret) throw new Error('缺少 IMAGE_SERVICE_SECRET');
@@ -31,6 +35,7 @@ export function loadConfig(environment = process.env) {
     serviceSecret,
     sourceHostAllowlist: String(environment.SOURCE_HOST_ALLOWLIST || '')
       .split(',').map(value => value.trim().toLowerCase()).filter(Boolean),
+    allowBenchmarkDns: enabled(environment.ALLOW_BENCHMARK_DNS),
     logLevel: String(environment.LOG_LEVEL || 'info'),
   });
 }

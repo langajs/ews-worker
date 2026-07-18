@@ -6,7 +6,7 @@ export async function downloadImage(sourceUrl, config) {
   let url = parsePublicSourceUrl(sourceUrl, config);
   let response;
   for (let redirect = 0; redirect <= 3; redirect++) {
-    await assertPublicResolution(url);
+    await assertPublicResolution(url, config);
     response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(config.downloadTimeoutMs) });
     if (![301, 302, 303, 307, 308].includes(response.status)) break;
     const location = response.headers.get('location');

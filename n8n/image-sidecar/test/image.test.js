@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import sharp from 'sharp';
+import { loadConfig } from '../src/config.js';
 import { encodeJpeg } from '../src/image.js';
 import { parsePublicSourceUrl, secretsEqual, validateImageJob } from '../src/security.js';
 
@@ -45,4 +46,10 @@ test('拒绝内网图片源', () => {
   assert.throws(() => parsePublicSourceUrl('http://127.0.0.1/image.png', config), /不允许访问内网/);
   assert.throws(() => parsePublicSourceUrl('http://192.168.1.2/image.png', config), /不允许访问内网/);
   assert.throws(() => parsePublicSourceUrl('http://[::1]/image.png', config), /不允许访问内网/);
+  assert.throws(() => parsePublicSourceUrl('http://198.18.1.30/image.png', { ...config, allowBenchmarkDns: true }), /不允许访问内网/);
+});
+
+test('代理DNS网段必须显式启用', () => {
+  assert.equal(loadConfig({ IMAGE_SERVICE_SECRET: 'secret' }).allowBenchmarkDns, false);
+  assert.equal(loadConfig({ IMAGE_SERVICE_SECRET: 'secret', ALLOW_BENCHMARK_DNS: 'true' }).allowBenchmarkDns, true);
 });

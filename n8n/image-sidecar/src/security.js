@@ -9,7 +9,7 @@ export function secretsEqual(actual, expected) {
   return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer);
 }
 
-function isPrivateIpv4(address) {
+function isPrivateIpv4(address, options = {}) {
   const parts = address.split('.').map(Number);
   if (parts.length !== 4 || parts.some(part => !Number.isInteger(part))) return true;
   return parts[0] === 0 || parts[0] === 10 || parts[0] === 127 || parts[0] >= 224
@@ -17,13 +17,13 @@ function isPrivateIpv4(address) {
     || (parts[0] === 169 && parts[1] === 254)
     || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)
     || (parts[0] === 192 && parts[1] === 168)
-    || (parts[0] === 198 && [18, 19].includes(parts[1]));
+    || (!options.allowBenchmarkDns && parts[0] === 198 && [18, 19].includes(parts[1]));
 }
 
-function isPrivateAddress(address) {
+function isPrivateAddress(address, options = {}) {
   const normalized = String(address || '').toLowerCase().split('%')[0];
   const family = isIP(normalized);
-  if (family === 4) return isPrivateIpv4(normalized);
+  if (family === 4) return isPrivateIpv4(normalized, options);
   if (family !== 6) return true;
   if (normalized === '::' || normalized === '::1' || normalized.startsWith('fc') || normalized.startsWith('fd')) return true;
   if (/^fe[89ab]/.test(normalized)) return true;
@@ -50,13 +50,14 @@ export function parsePublicSourceUrl(value, config) {
   return parsed;
 }
 
-export async function assertPublicResolution(url) {
+export async function assertPublicResolution(url, config) {
   const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (isIP(hostname)) return;
   let addresses;
   try { addresses = await lookup(hostname, { all: true, verbatim: true }); }
   catch (_) { throw new ProcessingError('图片源域名解析失败', true); }
-  if (!addresses.length || addresses.some(item => isPrivateAddress(item.address))) {
+  const resolutionOptions = { allowBenchmarkDns: config.allowBenchmarkDns === true };
+  if (!addresses.length || addresses.some(item => isPrivateAddress(item.address, resolutionOptions))) {
     throw new ProcessingError('图片源URL解析到内网地址', false);
   }
 }
