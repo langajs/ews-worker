@@ -1,0 +1,45 @@
+name: ews-image-service
+
+services:
+  valkey:
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - valkey-data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  image-api:
+    build: .
+    image: ews-image-service:${IMAGE_SERVICE_VERSION:-local}
+    restart: unless-stopped
+    environment: &image-environment
+      IMAGE_SERVICE_SECRET: ${IMAGE_SERVICE_SECRET:?IMAGE_SERVICE_SECRET is required}
+      REDIS_URL: redis://valkey:6379
+      TICKET_ORIGIN: ${TICKET_ORIGIN:-https://ewsz.langaj.cc}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-8}
+      MAX_QUEUE_DEPTH: ${MAX_QUEUE_DEPTH:-10000}
+      JPEG_QUALITY: 88
+      MAX_OUTPUT_BYTES: 1900000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${IMAGE_SERVICE_BIND:-0.0.0.0}:${IMAGE_SERVICE_PORT:-3000}:3000"
+    depends_on:
+      valkey:
+        condition: service_healthy
+
+  image-worker:
+    image: ews-image-service:${IMAGE_SERVICE_VERSION:-local}
+    restart: unless-stopped
+    command: ["npm", "run", "worker"]
+    environment: *image-environment
+    depends_on:
+      valkey:
+        condition: service_healthy
+
+volumes:
+  valkey-data:

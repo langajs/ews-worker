@@ -2,7 +2,15 @@
   "name": "ews-image-sidecar",
   "private": true,
   "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "worker": "node src/worker.js",
+    "test": "node --test"
+  },
   "dependencies": {
+    "bullmq": "^5.58.5",
+    "fastify": "^5.6.1",
+    "ioredis": "^5.7.0",
     "sharp": "^0.34.3"
   }
 }
