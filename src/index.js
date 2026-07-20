@@ -2934,7 +2934,7 @@ async function shopeeHandleExport(env, taskId) {
     return json({ success: false, error: 'Shopee资源未生成完成，已阻止导出', errors: exportErrors, warnings: validation.warnings }, 400);
   }
 
-  // 列顺序必须匹配 Shopee 2026-07-14 basic template (A~AL)
+  // 列顺序必须匹配 Shopee 2026-07-20 basic template (A~AL)
   function makeRow(subTask, setIdx, variationsIdx) {
     var v = variations[variationsIdx];
     var images = productImages(setIdx, subTask.id || '');
@@ -2985,7 +2985,7 @@ async function shopeeHandleExport(env, taskId) {
   var shopeeColumns = ['Category','Product Name','Product Description','Parent SKU','Variation Integration No.','Variation Name1','Option for Variation 1','Image per Variation','Variation Name2','Option for Variation 2','Price','Stock','SKU','Size Chart Template','Size Chart Image','GTIN','Cover image','Item Image 1','Item Image 2','Item Image 3','Item Image 4','Item Image 5','Item Image 6','Item Image 7','Item Image 8','Weight','Length','Width','Height','Hỏa Tốc','Nhanh','Hàng Cồng Kềnh','Trong Ngày','Tủ nhận hàng - Viettel Smartbox','Tủ nhận hàng - SPX','Điểm nhận hàng','Pre-order DTS','Fail Reason'];
   if (rows.some(row => row.length !== shopeeColumns.length)) return error('Shopee模板列映射异常', 500);
   return json({ success: true, rows, columns: shopeeColumns, task_title: product.name, export_format: 'shopee',
-    template_file: 'Shopee_mass_upload_2026-07-14_basic_template.xlsx', template_sheet: 'Template', template_start_row: 7, template_column_count: shopeeColumns.length,
+    template_file: 'Shopee_mass_upload_2026-07-20_basic_template.xlsx', template_sheet: 'Template', template_start_row: 7, template_column_count: shopeeColumns.length,
     validation: { warnings: validation.warnings } });
 }
 
