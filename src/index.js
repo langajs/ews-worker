@@ -494,6 +494,7 @@ function serializeShopeeTemplateVersion(version) {
 function serializeShopeeTemplateProfile(profile, version = profile) {
   const template = serializeShopeeTemplateVersion(version);
   const displayName = profile.user_alias || profile.system_name || profile.profile_code;
+  const latestUpdatedBy = template?.uploaded_by || '';
   return {
     id: profile.id,
     market: profile.market,
@@ -504,8 +505,8 @@ function serializeShopeeTemplateProfile(profile, version = profile) {
     display_name: displayName,
     name: displayName,
     status: profile.status,
-    created_by: profile.created_by || '',
-    is_owner: profile.created_by === profile.request_user_id,
+    latest_updated_by: latestUpdatedBy,
+    can_update_template: true,
     user_alias: profile.user_alias || '',
     user_note: profile.user_note || '',
     is_favorite: Number(profile.is_favorite || 0) === 1,
@@ -530,7 +531,7 @@ function shopeeTemplateProfileIdFromPath(path) {
 
 async function handleGetShopeeTemplateProfiles(request, env) {
   const result = await shopeeListTemplateProfiles(env, request.auth.username, request.auth.role === 'admin');
-  const profiles = (result?.results || []).map(row => serializeShopeeTemplateProfile({ ...row, request_user_id: request.auth.username }));
+  const profiles = (result?.results || []).map(row => serializeShopeeTemplateProfile(row));
   return json({ success: true, profiles, stores: profiles });
 }
 
@@ -543,7 +544,7 @@ async function handleGetShopeeTemplateProfile(request, env, path) {
   const dataVersion = currentVersion || latestVersion;
   const categories = dataVersion ? (await shopeeGetTemplateCategories(env, dataVersion.id))?.results || [] : [];
   const manifest = parseJson(dataVersion?.manifest_json, {});
-  const serialized = serializeShopeeTemplateProfile({ ...profile, request_user_id: request.auth.username }, currentVersion || latestVersion);
+  const serialized = serializeShopeeTemplateProfile(profile, currentVersion || latestVersion);
   const response = {
     success: true,
     profile: serialized,
@@ -643,9 +644,6 @@ async function handleUploadShopeeTemplate(request, env) {
       created_by: request.auth.username,
     });
   }
-  if (request.auth.role !== 'admin' && profile?.created_by !== request.auth.username) {
-    return error(`该模板由用户 ${profile?.created_by || '未知'} 上传，只有创建者或管理员可以更新模板`, 403);
-  }
   const sha256 = await sha256Hex(buffer);
   const schemaHash = await sha256Hex(new TextEncoder().encode(parsed.comparison_source));
   const currentVersion = profile.current_version_id ? await shopeeGetCurrentTemplateVersion(env, profileId) : null;
@@ -666,7 +664,7 @@ async function handleUploadShopeeTemplate(request, env) {
   if (currentVersion && sameTemplateContent) {
     await shopeeUpdateTemplateUserMeta(env, profileId, request.auth.username, userMeta);
     const refreshed = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
-    const serialized = serializeShopeeTemplateProfile({ ...refreshed, request_user_id: request.auth.username }, currentVersion);
+    const serialized = serializeShopeeTemplateProfile(refreshed, currentVersion);
     return json({
       success: true,
       duplicate: true,
@@ -727,9 +725,7 @@ async function handleUploadShopeeTemplate(request, env) {
     const concurrentProfile = concurrentVersion ? await shopeeGetTemplateProfile(env, profileId, request.auth.username).catch(() => null) : null;
     if (concurrentVersion && concurrentProfile?.current_version_id === concurrentVersion.id) {
       await shopeeUpdateTemplateUserMeta(env, profileId, request.auth.username, userMeta);
-      const serializedConcurrent = serializeShopeeTemplateProfile(
-        { ...concurrentProfile, request_user_id: request.auth.username }, concurrentVersion
-      );
+      const serializedConcurrent = serializeShopeeTemplateProfile(concurrentProfile, concurrentVersion);
       return json({
         success: true,
         duplicate: true,
@@ -744,7 +740,7 @@ async function handleUploadShopeeTemplate(request, env) {
   }
   const savedProfile = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
   const savedVersion = await shopeeGetTemplateVersion(env, versionId);
-  const serialized = serializeShopeeTemplateProfile({ ...savedProfile, request_user_id: request.auth.username }, savedVersion);
+  const serialized = serializeShopeeTemplateProfile(savedProfile, savedVersion);
   const warnings = [];
   const retainedVersionIds = new Set([versionId, currentVersion?.id].filter(Boolean));
   const versions = (await shopeeGetTemplateProfileVersions(env, profileId))?.results || [];
@@ -775,7 +771,7 @@ async function handleUpdateShopeeTemplateMeta(request, env, path) {
   catch (err) { return error(err.message, 400); }
   await shopeeUpdateTemplateUserMeta(env, profileId, request.auth.username, meta);
   const refreshed = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
-  return json({ success: true, profile: serializeShopeeTemplateProfile({ ...refreshed, request_user_id: request.auth.username }), message: '个人别名和备注已更新' });
+  return json({ success: true, profile: serializeShopeeTemplateProfile(refreshed), message: '个人别名和备注已更新' });
 }
 
 async function handleMapShopeeTemplateField(request, env, path) {
