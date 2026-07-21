@@ -312,6 +312,17 @@ function sensitiveSheetSummary(sheets, rowsForSheet) {
   return summary;
 }
 
+function workbookValueSource(sheets, rowsForSheet) {
+  return JSON.stringify(sheets.map(sheet => [
+    sheet.name,
+    sheet.state,
+    [...rowsForSheet(sheet).entries()].sort((left, right) => left[0] - right[0]).map(([rowNumber, values]) => [
+      rowNumber,
+      [...values.entries()].sort((left, right) => left[0] - right[0]),
+    ]),
+  ]));
+}
+
 function categoryRequiredFields(sheets, rowsForSheet, fields) {
   const sheet = sheets.find(candidate => candidate.name.toLowerCase() === 'hiddencatprops');
   if (!sheet) return {};
@@ -343,6 +354,60 @@ function parseDtsRange(value) {
 export async function sha256Hex(buffer) {
   const digest = await crypto.subtle.digest('SHA-256', buffer);
   return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('');
+}
+
+function comparableFields(manifest) {
+  return (manifest?.fields || []).map(field => [
+    field.token || '', field.key || '', Number(field.column || 0), field.label || '',
+    field.requirement || '', field.description || '', field.rule || '',
+  ]).sort((left, right) => left[2] - right[2] || left[0].localeCompare(right[0]));
+}
+
+function comparableChannels(manifest) {
+  return (manifest?.shipping_channels || []).map(channel => [
+    String(channel.id || ''), channel.label || '', channel.price_limit ?? null, channel.supports_preorder !== false,
+  ]).sort((left, right) => left[0].localeCompare(right[0]));
+}
+
+function comparableCategories(categories) {
+  return (categories || []).map(category => [
+    String(category.id || ''), category.name || '', category.dts_range || '', category.dts_min ?? null, category.dts_max ?? null,
+  ]).sort((left, right) => left[0].localeCompare(right[0]));
+}
+
+function comparableCategoryRequirements(manifest) {
+  return Object.entries(manifest?.category_required_fields || {}).map(([categoryId, tokens]) => [
+    String(categoryId), [...new Set(tokens || [])].sort(),
+  ]).sort((left, right) => left[0].localeCompare(right[0]));
+}
+
+function compareKeyedRows(beforeRows, afterRows) {
+  const before = new Map(beforeRows.map(row => [row[0], JSON.stringify(row.slice(1))]));
+  const after = new Map(afterRows.map(row => [row[0], JSON.stringify(row.slice(1))]));
+  const added = [...after.keys()].filter(key => !before.has(key)).sort();
+  const removed = [...before.keys()].filter(key => !after.has(key)).sort();
+  const changed = [...after.keys()].filter(key => before.has(key) && before.get(key) !== after.get(key)).sort();
+  return { before_count: before.size, after_count: after.size, added, removed, changed };
+}
+
+export function compareShopeeTemplateSemantics(beforeManifest, beforeCategories, afterManifest, afterCategories) {
+  const fields = compareKeyedRows(comparableFields(beforeManifest), comparableFields(afterManifest));
+  const channels = compareKeyedRows(comparableChannels(beforeManifest), comparableChannels(afterManifest));
+  const categories = compareKeyedRows(comparableCategories(beforeCategories), comparableCategories(afterCategories));
+  const beforeRequirements = JSON.stringify(comparableCategoryRequirements(beforeManifest));
+  const afterRequirements = JSON.stringify(comparableCategoryRequirements(afterManifest));
+  const signatureChanged = String(beforeManifest?.signature || '') !== String(afterManifest?.signature || '');
+  const hasChanges = signatureChanged
+    || [fields, channels, categories].some(group => group.added.length || group.removed.length || group.changed.length)
+    || beforeRequirements !== afterRequirements;
+  return {
+    has_changes: hasChanges,
+    signature_changed: signatureChanged,
+    category_requirements_changed: beforeRequirements !== afterRequirements,
+    fields,
+    shipping_channels: channels,
+    categories,
+  };
 }
 
 export function parseShopeeTemplate(buffer, { allowAdvanced = false } = {}) {
@@ -443,6 +508,7 @@ export function parseShopeeTemplate(buffer, { allowAdvanced = false } = {}) {
     manifest: {
       format_version: 3,
       token_registry_version: 2,
+      template_fingerprint_version: 2,
       template_type: templateType,
       signature,
       category_scope: categoryScope,
@@ -473,6 +539,7 @@ export function parseShopeeTemplate(buffer, { allowAdvanced = false } = {}) {
       start_row: layout.start_row,
       fields: fields.map(field => [field.token, field.column, field.requirement]),
     }),
+    comparison_source: workbookValueSource(sheets, rowsForSheet),
     categories,
   };
 }

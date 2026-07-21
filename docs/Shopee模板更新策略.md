@@ -9,7 +9,7 @@
 ## 全局档案
 
 - `ews_shopee_template_profiles`：按 `UNIQUE(market, store_context_id)` 保存全局档案，默认编码为 `SHP-VN-{store_context_id}`。
-- `ews_shopee_template_versions`：保存历史版本、上传用户、R2 Key、SHA256、Schema Hash、启用状态和风险标记。
+- `ews_shopee_template_versions`：每个档案只保存当前版本和最多一个上一版本，记录上传用户、R2 Key、SHA256、语义指纹、启用状态和风险标记。
 - `ews_shopee_template_user_meta`：保存每个用户自己的别名、备注和收藏，不修改全局辨识信息。
 - `ews_shopee_template_fields`：保存 token、数据类型、必填性、语义映射和映射状态。
 
@@ -24,7 +24,7 @@ Worker 使用 `fflate` 解压并通过 `fast-xml-parser` 完成以下步骤：
 3. 推导元数据、显示名称、必填规则、说明、限制和数据起始行。
 4. 识别 `channel_id.{channel_id}`、`ps_product_global_attribute.{attribute_id}`、`ps_item_image_*` 等字段族，并从 token 注册表获得系统语义。
 5. 从各工作表的数值密度和相邻文本推断 Category ID、分类路径和 DTS 范围。
-6. 计算 Schema Hash；SHA256 相同视为重复文件，Schema Hash 相同但文件不同视为同结构新版本。
+6. 对所有工作表的单元格内容进行规范化并计算指纹，覆盖官方签名、字段规则、分类/DTS、物流、隐藏映射和店铺私有隐藏表；原始比较内容不落库。与当前版本一致时返回“模板已是最新，无需更新”，不新增版本记录或 R2 对象。
 7. 区分 `Mandatory`、`Conditional Mandatory` 和 `Optional`；对 `HiddenCatProps` 中的类目级 `MANDATORY` 关系建立约束，避免把全部条件必填字段误判为全局必填。
 8. 未知可选 token 留空并警告；未知必填或无法解释的条件必填 token 直接拒绝上传，避免保存无法安全导出的版本。
 
@@ -43,7 +43,7 @@ Worker 使用 `fflate` 解压并通过 `fast-xml-parser` 完成以下步骤：
 ## 权限与归属
 
 - 所有已启用档案都可被登录用户选择，接口返回档案 `created_by` 和版本 `uploaded_by`。
-- 普通用户可以创建新上下文档案，只能向自己创建的档案追加版本；管理员可以向任意档案追加版本。
+- 普通用户可以创建新上下文档案，只能更新自己创建的档案；管理员可以更新任意档案。
 - 创建档案前先用 `INSERT OR IGNORE` 占位并复查所有者，防止两个并发上传请求绕过归属校验。
 - 用户私有别名、备注和收藏仍按用户隔离，不视为修改全局模板。
 
@@ -51,11 +51,11 @@ Worker 使用 `fflate` 解压并通过 `fast-xml-parser` 完成以下步骤：
 
 1. 任务关联 `template_profile_id`，并记录创建时 `template_version_id` 供审计。
 2. 任务只保存商品、SKU、图片和物流等语义数据，不保存 Excel 列号。
-3. 导出默认读取档案当前最新版；当前版本不可用时，历史任务才回退到创建时版本。
+3. 导出默认读取档案当前最新版；模板更新后历史任务同样跟随当前版本，过旧的 `template_version_id` 会在裁剪时重绑到当前版本。
 4. Worker 将数据库中的 token 映射合并到 manifest，再按语义字段向推导出的数据起始行写入。
 5. 其他 ZIP/XML 内容原样保留，包括 `dataValidations`、工作表保护和隐藏工作表。
 
-管理员删除采用软删除，历史任务仍可导出。只有软删除超过 30 天且无任何任务引用时，才允许同时清理 D1 记录和 R2 原始版本。
+上传内容发生变化时，新文件立即成为当前版本，刚替换下来的版本作为唯一的上一版本用于管理员校对；更早版本的字段、分类、版本记录和 R2 文件立即清理。比较说明由当前与上一版本实时计算，不增加比较表。管理员删除仍采用软删除；只有软删除超过 30 天且无任何任务引用时，才允许彻底清理整个档案。
 
 ## 更新验收
 
@@ -63,5 +63,5 @@ Worker 使用 `fflate` 解压并通过 `fast-xml-parser` 完成以下步骤：
 - 比较原始与导出文件的 ZIP 条目、`dataValidations`、`sheetProtection` 和隐藏工作表。
 - 验证同一 `store_context_id` 全局唯一、SHA256 去重、版本切换和用户备注隔离。
 - 验证未知必填 token 被拒绝，私有隐藏数据只产生风险标记且有效版本立即启用。
-- 验证普通用户不能向其他用户创建的档案追加版本，并发上传同一上下文只产生一个所有者。
+- 验证普通用户不能更新其他用户创建的档案，并发上传同一上下文只产生一个所有者。
 - 使用当前店铺实际模板上传 Shopee，验证物流渠道、分类和图片 URL。

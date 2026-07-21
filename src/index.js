@@ -20,6 +20,7 @@ import {
   shopeeGetTemplateCategories, shopeeGetTemplateCategory, shopeeGetTemplateFields, shopeeSaveTemplateVersion,
   shopeeUpdateTemplateUserMeta, shopeeUpdateTemplateProfile, shopeeMapTemplateField, shopeeCountUnmappedRequiredFields,
   shopeeApproveTemplateVersion, shopeeSoftDeleteTemplateProfile, shopeeGetTemplateProfileVersions,
+  shopeeDeleteTemplateVersions,
   shopeeGetTemplateProfileTaskCount, shopeePurgeTemplateProfile,
   shopeeReplaceVariations,
   shopeeCreatePushPlans, shopeeGetPushPlans, shopeeGetPendingPlans, shopeeGetPlanStats,
@@ -30,7 +31,10 @@ import {
 } from './db.js';
 import { generateToken, hashPassword, verifyPassword, authenticateRequest, DEFAULT_PASSWORD } from './auth.js';
 import { processSkuUploadImage } from './sku-upload-image.js';
-import { buildShopeeWorkbook, parseShopeeTemplate, sha256Hex, SHOPEE_TEMPLATE_SEMANTIC_KEYS } from './shopee-template.js';
+import {
+  buildShopeeWorkbook, compareShopeeTemplateSemantics, parseShopeeTemplate, sha256Hex,
+  SHOPEE_TEMPLATE_SEMANTIC_KEYS,
+} from './shopee-template.js';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -511,6 +515,13 @@ function serializeShopeeTemplateProfile(profile, version = profile) {
   };
 }
 
+async function deleteShopeeTemplateVersionObjects(env, versions) {
+  const results = await Promise.allSettled((versions || []).filter(version => version.r2_key).map(version => env.R2.delete(version.r2_key)));
+  const failures = results.filter(result => result.status === 'rejected');
+  if (failures.length) console.error(`Shopee template R2 cleanup failed for ${failures.length} object(s)`);
+  return failures.length;
+}
+
 function shopeeTemplateProfileIdFromPath(path) {
   const parts = path.split('/');
   const marker = parts.indexOf('template-profiles');
@@ -543,7 +554,29 @@ async function handleGetShopeeTemplateProfile(request, env, path) {
   if (request.auth.role === 'admin') {
     const versions = (await shopeeGetTemplateProfileVersions(env, profileId))?.results || [];
     const fields = latestVersion ? (await shopeeGetTemplateFields(env, latestVersion.id))?.results || [] : [];
-    response.versions = versions.map(serializeShopeeTemplateVersion);
+    response.versions = versions.map(version => ({
+      ...serializeShopeeTemplateVersion(version),
+      is_current: version.id === profile.current_version_id,
+      retention_role: version.id === profile.current_version_id ? 'current' : 'previous',
+    }));
+    const comparisonCurrent = versions.find(version => version.id === profile.current_version_id);
+    const comparisonPrevious = versions.find(version => version.id !== profile.current_version_id);
+    if (comparisonCurrent && comparisonPrevious) {
+      const [currentCategories, previousCategories] = await Promise.all([
+        shopeeGetTemplateCategories(env, comparisonCurrent.id),
+        shopeeGetTemplateCategories(env, comparisonPrevious.id),
+      ]);
+      response.version_comparison = {
+        current_version_id: comparisonCurrent.id,
+        previous_version_id: comparisonPrevious.id,
+        ...compareShopeeTemplateSemantics(
+          parseJson(comparisonPrevious.manifest_json, {}), previousCategories?.results || [],
+          parseJson(comparisonCurrent.manifest_json, {}), currentCategories?.results || [],
+        ),
+      };
+    } else {
+      response.version_comparison = null;
+    }
     response.review_version = latestVersion && latestVersion.status !== 'ready' ? serializeShopeeTemplateVersion(latestVersion) : null;
     response.fields = fields;
     response.semantic_registry = [...new Set([...SHOPEE_TEMPLATE_SEMANTIC_KEYS, ...fields.map(field => field.semantic_key).filter(Boolean)])].sort();
@@ -611,17 +644,43 @@ async function handleUploadShopeeTemplate(request, env) {
     });
   }
   if (request.auth.role !== 'admin' && profile?.created_by !== request.auth.username) {
-    return error(`该模板由用户 ${profile?.created_by || '未知'} 上传，只有创建者或管理员可以追加版本`, 403);
+    return error(`该模板由用户 ${profile?.created_by || '未知'} 上传，只有创建者或管理员可以更新模板`, 403);
   }
   const sha256 = await sha256Hex(buffer);
-  const schemaHash = await sha256Hex(new TextEncoder().encode(parsed.schema_source));
-  const duplicate = await shopeeGetTemplateVersionByHash(env, profileId, sha256);
-  if (duplicate) {
+  const schemaHash = await sha256Hex(new TextEncoder().encode(parsed.comparison_source));
+  const currentVersion = profile.current_version_id ? await shopeeGetCurrentTemplateVersion(env, profileId) : null;
+  let sameTemplateContent = currentVersion?.sha256 === sha256
+    || (currentVersion && currentVersion.schema_hash === schemaHash && parseJson(currentVersion.manifest_json, {}).template_fingerprint_version === 2);
+  if (currentVersion && !sameTemplateContent && !parseJson(currentVersion.manifest_json, {}).template_fingerprint_version) {
+    try {
+      const currentObject = await env.R2.get(currentVersion.r2_key);
+      if (currentObject) {
+        const currentParsed = parseShopeeTemplate(await currentObject.arrayBuffer());
+        const currentContentHash = await sha256Hex(new TextEncoder().encode(currentParsed.comparison_source));
+        sameTemplateContent = currentContentHash === schemaHash;
+      }
+    } catch (err) {
+      console.warn('Legacy Shopee template comparison failed:', err.message);
+    }
+  }
+  if (currentVersion && sameTemplateContent) {
     await shopeeUpdateTemplateUserMeta(env, profileId, request.auth.username, userMeta);
-    if (!['disabled', 'deleted'].includes(profile.status)) await shopeeApproveTemplateVersion(env, profileId, duplicate.id, request.auth.username);
     const refreshed = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
-    const serialized = serializeShopeeTemplateProfile({ ...refreshed, request_user_id: request.auth.username }, duplicate);
-    return json({ success: true, duplicate: true, profile: serialized, store: serialized, message: '该文件已存在，已更新你的别名和备注' });
+    const serialized = serializeShopeeTemplateProfile({ ...refreshed, request_user_id: request.auth.username }, currentVersion);
+    return json({
+      success: true,
+      duplicate: true,
+      unchanged: true,
+      profile: serialized,
+      store: serialized,
+      message: '模板已是最新，无需更新',
+    });
+  }
+  const duplicate = await shopeeGetTemplateVersionByHash(env, profileId, sha256);
+  let duplicateCleanupFailures = 0;
+  if (duplicate && duplicate.id !== currentVersion?.id) {
+    const deleted = await shopeeDeleteTemplateVersions(env, profileId, [duplicate], currentVersion?.id || '');
+    duplicateCleanupFailures = await deleteShopeeTemplateVersionObjects(env, deleted);
   }
   const sensitiveSheets = parsed.manifest.sensitive_sheets || [];
   const versionStatus = 'ready';
@@ -664,6 +723,22 @@ async function handleUploadShopeeTemplate(request, env) {
       env.DB.prepare("DELETE FROM ews_shopee_template_profiles WHERE id=? AND current_version_id IS NULL AND NOT EXISTS (SELECT 1 FROM ews_shopee_template_versions WHERE profile_id=?)").bind(profileId, profileId),
     ]).catch(() => {});
     await env.R2.delete(r2Key).catch(() => {});
+    const concurrentVersion = await shopeeGetTemplateVersionByHash(env, profileId, sha256).catch(() => null);
+    const concurrentProfile = concurrentVersion ? await shopeeGetTemplateProfile(env, profileId, request.auth.username).catch(() => null) : null;
+    if (concurrentVersion && concurrentProfile?.current_version_id === concurrentVersion.id) {
+      await shopeeUpdateTemplateUserMeta(env, profileId, request.auth.username, userMeta);
+      const serializedConcurrent = serializeShopeeTemplateProfile(
+        { ...concurrentProfile, request_user_id: request.auth.username }, concurrentVersion
+      );
+      return json({
+        success: true,
+        duplicate: true,
+        unchanged: true,
+        profile: serializedConcurrent,
+        store: serializedConcurrent,
+        message: '模板已由并发请求更新，无需重复保存',
+      });
+    }
     console.error('Shopee template save failed:', err.message);
     return error('模板保存失败，请稍后重试', 503);
   }
@@ -671,9 +746,24 @@ async function handleUploadShopeeTemplate(request, env) {
   const savedVersion = await shopeeGetTemplateVersion(env, versionId);
   const serialized = serializeShopeeTemplateProfile({ ...savedProfile, request_user_id: request.auth.username }, savedVersion);
   const warnings = [];
+  const retainedVersionIds = new Set([versionId, currentVersion?.id].filter(Boolean));
+  const versions = (await shopeeGetTemplateProfileVersions(env, profileId))?.results || [];
+  const staleVersions = versions.filter(version => !retainedVersionIds.has(version.id));
+  const deletedVersions = await shopeeDeleteTemplateVersions(env, profileId, staleVersions, versionId);
+  const r2CleanupFailures = await deleteShopeeTemplateVersionObjects(env, deletedVersions);
+  const cleanupFailures = duplicateCleanupFailures + r2CleanupFailures;
+  if (cleanupFailures) warnings.push(`${cleanupFailures} 个过期模板对象清理失败，已记录服务器日志`);
   if (sensitiveSheets.length) warnings.push(`检测到非空隐藏表：${sensitiveSheets.map(sheet => sheet.name).join('、')}，已记录风险标记`);
   if (parsed.manifest.unknown_optional_tokens?.length) warnings.push(`存在 ${parsed.manifest.unknown_optional_tokens.length} 个未知可选 token，导出时将留空`);
-  return json({ success: true, profile: serialized, store: serialized, review_required: false, warnings, message: '模板已通过结构推理并立即成为当前版本' }, 201);
+  return json({
+    success: true,
+    updated: !!currentVersion,
+    profile: serialized,
+    store: serialized,
+    review_required: false,
+    warnings,
+    message: currentVersion ? '检测到模板更新，已替换当前版本并保留上一版本' : '模板已通过结构推理并成为当前版本',
+  }, 201);
 }
 
 async function handleUpdateShopeeTemplateMeta(request, env, path) {
@@ -748,7 +838,7 @@ async function handleDeleteShopeeTemplateProfile(request, env, path, url) {
   try { await Promise.all(versions.map(version => env.R2.delete(version.r2_key))); }
   catch (err) { return error('R2 原始模板清理失败，D1 记录已保留', 503); }
   await shopeePurgeTemplateProfile(env, profileId);
-  return json({ success: true, message: '模板档案、历史版本和 R2 原始文件已清理' });
+  return json({ success: true, message: '模板档案、保留版本和 R2 原始文件已清理' });
 }
 
 // ========== 用户管理 ==========

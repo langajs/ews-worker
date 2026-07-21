@@ -317,7 +317,27 @@ async function shopeeSoftDeleteTemplateProfile(env, profileId) {
   await env.DB.prepare("UPDATE ews_shopee_template_profiles SET status='deleted',deleted_at=datetime('now'),updated_at=datetime('now') WHERE id=?").bind(profileId).run();
 }
 async function shopeeGetTemplateProfileVersions(env, profileId) {
-  return await query(env, "SELECT * FROM ews_shopee_template_versions WHERE profile_id=? ORDER BY datetime(created_at) DESC, id DESC", [profileId]);
+  return await query(env, "SELECT * FROM ews_shopee_template_versions WHERE profile_id=? AND deleted_at IS NULL ORDER BY datetime(created_at) DESC, id DESC", [profileId]);
+}
+async function shopeeDeleteTemplateVersions(env, profileId, versions, replacementVersionId) {
+  const deleted = [];
+  for (const version of versions) {
+    if (!version?.id || version.id === replacementVersionId) continue;
+    const guard = "NOT EXISTS (SELECT 1 FROM ews_shopee_template_profiles WHERE id=? AND current_version_id=?)";
+    const results = await env.DB.batch([
+      env.DB.prepare(`UPDATE ews_shopee_products SET template_version_id=?
+        WHERE template_profile_id=? AND template_version_id=? AND ${guard}`)
+        .bind(replacementVersionId || '', profileId, version.id, profileId, version.id),
+      env.DB.prepare(`DELETE FROM ews_shopee_template_version_categories WHERE version_id=? AND ${guard}`)
+        .bind(version.id, profileId, version.id),
+      env.DB.prepare(`DELETE FROM ews_shopee_template_fields WHERE version_id=? AND ${guard}`)
+        .bind(version.id, profileId, version.id),
+      env.DB.prepare(`DELETE FROM ews_shopee_template_versions WHERE id=? AND profile_id=? AND ${guard}`)
+        .bind(version.id, profileId, profileId, version.id),
+    ]);
+    if (Number(results.at(-1)?.meta?.changes || 0) > 0) deleted.push(version);
+  }
+  return deleted;
 }
 async function shopeeGetTemplateProfileTaskCount(env, profileId) {
   const row = await getOne(env, "SELECT COUNT(*) AS count FROM ews_shopee_products WHERE template_profile_id=?", [profileId]);
@@ -457,6 +477,7 @@ export {
   shopeeGetTemplateCategories, shopeeGetTemplateCategory, shopeeGetTemplateFields, shopeeSaveTemplateVersion,
   shopeeUpdateTemplateUserMeta, shopeeUpdateTemplateProfile, shopeeMapTemplateField, shopeeCountUnmappedRequiredFields,
   shopeeApproveTemplateVersion, shopeeSoftDeleteTemplateProfile, shopeeGetTemplateProfileVersions,
+  shopeeDeleteTemplateVersions,
   shopeeGetTemplateProfileTaskCount, shopeePurgeTemplateProfile,
   shopeeCreateVariations, shopeeClearVariations, shopeeReplaceVariations,
   shopeeCreatePushPlans, shopeeGetPushPlans, shopeeGetPendingPlans, shopeeUpdatePlanStatus, shopeeGetPlanStats,
