@@ -670,7 +670,9 @@ async function handleUploadShopeeTemplate(request, env) {
   const savedProfile = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
   const savedVersion = await shopeeGetTemplateVersion(env, versionId);
   const serialized = serializeShopeeTemplateProfile({ ...savedProfile, request_user_id: request.auth.username }, savedVersion);
-  const warnings = sensitiveSheets.length ? [`检测到非空隐藏表：${sensitiveSheets.join('、')}，已记录风险标记`] : [];
+  const warnings = [];
+  if (sensitiveSheets.length) warnings.push(`检测到非空隐藏表：${sensitiveSheets.map(sheet => sheet.name).join('、')}，已记录风险标记`);
+  if (parsed.manifest.unknown_optional_tokens?.length) warnings.push(`存在 ${parsed.manifest.unknown_optional_tokens.length} 个未知可选 token，导出时将留空`);
   return json({ success: true, profile: serialized, store: serialized, review_required: false, warnings, message: '模板已通过结构推理并立即成为当前版本' }, 201);
 }
 
@@ -3192,8 +3194,11 @@ async function shopeeHandleExport(env, taskId) {
   });
   const unknownMandatoryFields = templateManifest.fields.filter(field => {
     const registered = fieldMappings.get(field.token);
-    const required = registered ? Number(registered.is_required || 0) === 1 : /mandatory|required/i.test(String(field.requirement || ''));
-    return required && !(registered?.semantic_key || field.semantic_key);
+    const mappingStatus = registered?.mapping_status || field.mapping_status || '';
+    if (registered?.semantic_key || field.semantic_key) return false;
+    if (mappingStatus) return mappingStatus === 'unmapped_required';
+    const requirement = String(field.requirement || '');
+    return !/conditional|có điều kiện/i.test(requirement) && /mandatory|required|bắt buộc/i.test(requirement);
   });
   if (unknownMandatoryFields.length) {
     return json({ success: false, error: '模板版本仍有未映射的必填 token', errors: unknownMandatoryFields.map(field => `${field.label || field.key} (${field.token || field.key})`) }, 409);
@@ -3363,6 +3368,7 @@ async function shopeeHandleExport(env, taskId) {
       ps_width: product.width_cm ?? '',
       ps_height: product.height_cm ?? '',
       ps_product_pre_order_dts: product.pre_order_dts ?? '',
+      ps_brand: product.brand_id || '',
       et_title_reason: '',
     };
     for (const channel of (templateManifest.shipping_channels || [])) row[`channel_id.${channel.id}`] = shipping(String(channel.id));
@@ -3373,6 +3379,20 @@ async function shopeeHandleExport(env, taskId) {
     const subTask = subTasks[si];
     const setIdx = subTask.set_index ?? si;
     for (let vi = 0; vi < variations.length; vi++) rows.push(makeRow(subTask, setIdx, vi));
+  }
+
+  const categoryRequiredKeys = templateManifest.category_required_fields?.[String(product.category_id || '')] || [];
+  const missingCategoryFields = categoryRequiredKeys.filter(key => {
+    const field = templateManifest.fields.find(candidate => candidate.key === key);
+    const dataKey = field?.semantic_key || field?.key || key;
+    return rows.some(row => row[dataKey] === undefined || row[dataKey] === null || row[dataKey] === '');
+  });
+  if (missingCategoryFields.length) {
+    const labels = missingCategoryFields.map(key => {
+      const field = templateManifest.fields.find(candidate => candidate.key === key);
+      return `${field?.label || key} (${key})`;
+    });
+    return json({ success: false, error: '所选 Category ID 存在尚未填写的类目必填字段', errors: labels }, 400);
   }
 
   const templateObject = await env.R2.get(templateVersion.r2_key);

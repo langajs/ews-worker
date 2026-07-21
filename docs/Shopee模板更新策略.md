@@ -22,10 +22,17 @@ Worker 使用 `fflate` 解压并通过 `fast-xml-parser` 完成以下步骤：
 1. 扫描全部工作表，寻找同时包含 `ps_product_name`、`ps_price`、`ps_weight` 的隐藏 token 锚点。
 2. 依据店铺上下文元数据完整度区分正式商品页和 Upload sample，不固定依赖 `Template` 名称。
 3. 推导元数据、显示名称、必填规则、说明、限制和数据起始行。
-4. 识别 `channel_id.*`、`ps_item_image_*` 等字段族，并从 token 注册表获得系统语义。
+4. 识别 `channel_id.{channel_id}`、`ps_product_global_attribute.{attribute_id}`、`ps_item_image_*` 等字段族，并从 token 注册表获得系统语义。
 5. 从各工作表的数值密度和相邻文本推断 Category ID、分类路径和 DTS 范围。
 6. 计算 Schema Hash；SHA256 相同视为重复文件，Schema Hash 相同但文件不同视为同结构新版本。
-7. 未知可选 token 留空并警告；未知必填 token 直接拒绝上传，避免保存无法安全导出的版本。
+7. 区分 `Mandatory`、`Conditional Mandatory` 和 `Optional`；对 `HiddenCatProps` 中的类目级 `MANDATORY` 关系建立约束，避免把全部条件必填字段误判为全局必填。
+8. 未知可选 token 留空并警告；未知必填或无法解释的条件必填 token 直接拒绝上传，避免保存无法安全导出的版本。
+
+## 高级模板语料预识别
+
+`Shopee_mass_upload` 中的 28 份 Advanced Template 仅用于扩充 token 注册表和回归解析器，不作为任务导出的工作簿。样本覆盖 28 个类目域、1563 个全局属性 ID，全部属性列都遵循 `ps_product_global_attribute.{attribute_id}`，另有稳定字段 `ps_brand`。属性 ID、类目 ID 和模板元数据 D2 的 `store_context_id` 是三种独立标识，未知 token 不代表未知店铺。
+
+系统遇到未见过的 `store_context_id` 时，会创建新的全局模板档案；字段则按稳定 token、字段族和隐藏类目规则匹配，不依赖预先登记店铺 ID。新属性 ID 可以通过字段族自动识别，真正未知的无条件必填字段仍会被拒绝。
 
 缺少官方隐藏 token、结构损坏、宏、外部链接、嵌入对象或非 `basic` 类型的文件直接拒绝，不能按可见列名猜测导出。
 

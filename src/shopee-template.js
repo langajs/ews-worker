@@ -22,11 +22,12 @@ const TOKEN_SEMANTICS = new Set([
   'ps_price', 'ps_stock', 'ps_sku_short', 'ps_new_size_chart', 'et_title_size_chart', 'ps_gtin_code',
   'ps_item_cover_image', 'ps_item_image_1', 'ps_item_image_2', 'ps_item_image_3', 'ps_item_image_4',
   'ps_item_image_5', 'ps_item_image_6', 'ps_item_image_7', 'ps_item_image_8',
-  'ps_weight', 'ps_length', 'ps_width', 'ps_height', 'ps_product_pre_order_dts', 'et_title_reason',
+  'ps_weight', 'ps_length', 'ps_width', 'ps_height', 'ps_product_pre_order_dts', 'ps_brand', 'et_title_reason',
 ]);
 const CORE_TEMPLATE_TOKENS = ['ps_product_name', 'ps_price', 'ps_weight'];
 const REQUIRED_TEMPLATE_TOKENS = ['ps_product_name', 'ps_product_description', 'ps_price', 'ps_weight'];
 const SENSITIVE_SHEET_NAMES = new Set(['hiddenshopbrand', 'hiddentax']);
+const GLOBAL_ATTRIBUTE_TOKEN = /^ps_product_global_attribute\.(\d+)$/;
 
 export const SHOPEE_TEMPLATE_SEMANTIC_KEYS = Object.freeze([...TOKEN_SEMANTICS].sort());
 
@@ -183,17 +184,23 @@ function tokenKey(token) {
 
 function tokenDefinition(token) {
   const key = tokenKey(token);
-  const dynamic = /^channel_id\.\d+$/.test(key);
-  const semanticKey = TOKEN_SEMANTICS.has(key) || dynamic ? key : '';
+  const channel = /^channel_id\.(\d+)$/.exec(key);
+  const attribute = GLOBAL_ATTRIBUTE_TOKEN.exec(key);
+  const semanticKey = TOKEN_SEMANTICS.has(key) || channel || attribute ? key : '';
   return {
     key,
     semantic_key: semanticKey,
     data_type: NUMBER_TOKENS.has(semanticKey) ? 'number' : 'string',
+    token_family: channel ? 'shipping_channel' : (attribute ? 'product_global_attribute' : 'fixed'),
+    attribute_id: attribute?.[1] || '',
   };
 }
 
-function isRequiredRequirement(value) {
-  return /mandatory|required|bắt buộc/i.test(String(value || ''));
+function requirementType(value) {
+  const requirement = String(value || '').trim();
+  if (/conditional|có điều kiện/i.test(requirement)) return 'conditional';
+  if (/mandatory|required|bắt buộc/i.test(requirement)) return 'required';
+  return 'optional';
 }
 
 function countPopulatedColumns(rows, rowNumber, columns) {
@@ -210,7 +217,7 @@ function locateProductSheet(sheets, rowsForSheet) {
       const tokenCount = [...keys].filter(key => key.startsWith('ps_') || key.startsWith('et_title_') || key.startsWith('channel_id.')).length;
       const hasStoreContext = [...rows.keys()].some(candidateRow =>
         candidateRow !== rowNumber && Math.abs(candidateRow - rowNumber) <= 12
-        && cell(rows, candidateRow, 0).toLowerCase() === 'basic'
+        && ['basic', 'advanced'].includes(cell(rows, candidateRow, 0).toLowerCase())
         && cell(rows, candidateRow, 1) && cell(rows, candidateRow, 3));
       candidates.push({ sheet, rows, token_row: rowNumber, score: tokenCount + (hasStoreContext ? 1000 : 0) });
     }
@@ -258,6 +265,18 @@ function locateCategorySheet(sheets, rowsForSheet, productPath) {
   for (const sheet of sheets) {
     if (sheet.path === productPath || SENSITIVE_SHEET_NAMES.has(sheet.name.toLowerCase())) continue;
     const rows = rowsForSheet(sheet);
+    for (const values of rows.values()) {
+      const tokenColumns = new Map([...values.entries()].map(([index, value]) => [tokenKey(value), index]));
+      if (!tokenColumns.has('et_title_category_name') || !tokenColumns.has('et_title_category_id')) continue;
+      candidates.push({
+        sheet,
+        rows,
+        id_column: tokenColumns.get('et_title_category_id'),
+        name_column: tokenColumns.get('et_title_category_name'),
+        dts_column: tokenColumns.get('et_title_dts_range') ?? null,
+        score: 100000,
+      });
+    }
     const columns = new Set();
     for (const values of rows.values()) for (const index of values.keys()) columns.add(index);
     for (const idColumn of columns) {
@@ -293,6 +312,23 @@ function sensitiveSheetSummary(sheets, rowsForSheet) {
   return summary;
 }
 
+function categoryRequiredFields(sheets, rowsForSheet, fields) {
+  const sheet = sheets.find(candidate => candidate.name.toLowerCase() === 'hiddencatprops');
+  if (!sheet) return {};
+  const conditionalFields = fields.filter(field => field.requirement_type === 'conditional');
+  if (!conditionalFields.length) return {};
+  const requirements = {};
+  for (const values of rowsForSheet(sheet).values()) {
+    const categoryMatch = String(values.get(0) || '').trim().match(/^(\d+)(?:-|$)/);
+    if (!categoryMatch) continue;
+    const required = conditionalFields
+      .filter(field => String(values.get(field.column) || '').trim().toUpperCase() === 'MANDATORY')
+      .map(field => field.key);
+    if (required.length) requirements[categoryMatch[1]] = required;
+  }
+  return requirements;
+}
+
 function parsePriceLimit(text) {
   const matches = String(text || '').match(/(?:VND\s*)?[0-9][0-9,]*(?:\.[0-9]+)?/gi) || [];
   const values = matches.map(value => Number(value.replace(/VND\s*/i, '').replace(/,/g, ''))).filter(value => Number.isFinite(value) && value >= 1000);
@@ -309,7 +345,7 @@ export async function sha256Hex(buffer) {
   return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('');
 }
 
-export function parseShopeeTemplate(buffer) {
+export function parseShopeeTemplate(buffer, { allowAdvanced = false } = {}) {
   const bytes = new Uint8Array(buffer);
   inspectZipArchive(bytes);
   let files;
@@ -330,7 +366,9 @@ export function parseShopeeTemplate(buffer) {
   const tokenRowNumber = productSheet.token_row;
   const metadataRow = locateMetadataRow(templateRows, tokenRowNumber);
   const templateType = cell(templateRows, metadataRow, 0).toLowerCase();
-  if (templateType !== 'basic') throw new Error('当前仅支持 Shopee Basic Template，请上传店铺基础模板');
+  if (templateType !== 'basic' && !(allowAdvanced && templateType === 'advanced')) {
+    throw new Error('当前仅支持 Shopee Basic Template，请上传店铺基础模板');
+  }
   const signature = cell(templateRows, metadataRow, 1);
   const categoryScope = cell(templateRows, metadataRow, 2);
   const contextId = cell(templateRows, metadataRow, 3);
@@ -350,14 +388,18 @@ export function parseShopeeTemplate(buffer) {
     seenTokens.add(token);
     const definition = tokenDefinition(token);
     const requirement = cell(templateRows, layout.requirement_row, index);
-    const required = isRequiredRequirement(requirement);
+    const requirementKind = requirementType(requirement);
+    const requiresMapping = requirementKind !== 'optional';
     fields.push({
       token,
       key: definition.key,
       semantic_key: definition.semantic_key,
       data_type: definition.data_type,
-      mapping_status: definition.semantic_key ? 'mapped' : (required ? 'unmapped_required' : 'unmapped_optional'),
-      is_required: required,
+      token_family: definition.token_family,
+      attribute_id: definition.attribute_id,
+      mapping_status: definition.semantic_key ? 'mapped' : (requiresMapping ? 'unmapped_required' : 'unmapped_optional'),
+      is_required: requirementKind === 'required',
+      requirement_type: requirementKind,
       column: index,
       column_name: columnName(index),
       label: cell(templateRows, layout.label_row, index),
@@ -392,12 +434,15 @@ export function parseShopeeTemplate(buffer) {
   }
   if (!categories.length) throw new Error('模板分类目录为空');
   const sensitiveSheets = sensitiveSheetSummary(sheets, rowsForSheet);
+  const categoryRequirements = categoryRequiredFields(sheets, rowsForSheet, fields);
   const unknownRequiredTokens = fields.filter(field => field.mapping_status === 'unmapped_required').map(field => field.token);
   const unknownOptionalTokens = fields.filter(field => field.mapping_status === 'unmapped_optional').map(field => field.token);
+  const dynamicTokens = fields.filter(field => field.token_family !== 'fixed').map(field => field.token);
 
   return {
     manifest: {
-      format_version: 2,
+      format_version: 3,
+      token_registry_version: 2,
       template_type: templateType,
       signature,
       category_scope: categoryScope,
@@ -418,6 +463,8 @@ export function parseShopeeTemplate(buffer) {
       category_sheet_path: categorySheet.sheet.path,
       unknown_required_tokens: unknownRequiredTokens,
       unknown_optional_tokens: unknownOptionalTokens,
+      recognized_dynamic_tokens: dynamicTokens,
+      category_required_fields: categoryRequirements,
       sensitive_sheets: sensitiveSheets,
     },
     schema_source: JSON.stringify({
