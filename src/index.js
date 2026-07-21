@@ -551,6 +551,7 @@ const SHOPEE_TEMPLATE_COLUMNS = Object.freeze([
 ]);
 const SHOPEE_SHIPPING_CHANNEL_IDS = Object.freeze(['5001','5012','50039','50052']);
 const SHOPEE_SHIPPING_PRICE_LIMITS = Object.freeze({ '5001': 100000000 });
+const SHOPEE_PREORDER_BLOCKED_CHANNEL_IDS = Object.freeze(['5012']);
 const JST_TEMPLATE_COLUMNS = Object.freeze([
   '款式编码','商品编码','颜色','规格','商品主图','商品详情图','图片地址','商品名称','推荐文案','商品描述','宝贝链接',
   '库存','重量(kg)','基本售价','市场|吊牌价','最低分销控价','最高分销控价','供应商名','3:4主图','长图','透明素材图','白底图',
@@ -573,6 +574,11 @@ function normalizeShopeeShippingChannels(value) {
   }
   const allowed = new Set(SHOPEE_SHIPPING_CHANNEL_IDS);
   return [...new Set((Array.isArray(channels) ? channels : []).map(String).filter(channel => allowed.has(channel)))];
+}
+
+function normalizeShopeePreOrderShippingChannels(channels, preOrderDts) {
+  if (preOrderDts === null || preOrderDts === undefined || preOrderDts === '') return channels;
+  return channels.filter(channel => !SHOPEE_PREORDER_BLOCKED_CHANNEL_IDS.includes(channel));
 }
 
 function shopeeVariationGroupKey(value) {
@@ -836,15 +842,19 @@ async function handleUpdateTask(request, env, path) {
     const dimensionCount = dimensions.filter(value => value !== null).length;
     if (dimensionCount !== 0 && dimensionCount !== 3) return error('长、宽、高必须同时填写或全部留空', 400);
     if (dimensions.some(value => value !== null && (value <= 0 || value > 10000000))) return error('长、宽、高必须大于0且不超过10000000', 400);
-    const channels = normalizeShopeeShippingChannels(shipping_channels);
-    if (!channels.length) return error('至少选择一个物流渠道', 400);
+    const preOrderDts = pre_order_dts === undefined || pre_order_dts === null || pre_order_dts === '' ? null : parseInt(pre_order_dts);
+    const rawChannels = normalizeShopeeShippingChannels(shipping_channels);
+    const channels = normalizeShopeePreOrderShippingChannels(rawChannels, preOrderDts);
+    if (!channels.length) {
+      if (preOrderDts !== null && rawChannels.some(channel => SHOPEE_PREORDER_BLOCKED_CHANNEL_IDS.includes(channel))) return error('预售商品不能使用5012 / Trong Ngày，请至少选择其他物流渠道', 400);
+      return error('至少选择一个物流渠道', 400);
+    }
     for (const channel of channels) {
       if (SHOPEE_SHIPPING_PRICE_LIMITS[channel] && highestPrice > SHOPEE_SHIPPING_PRICE_LIMITS[channel]) return error(`物流渠道${channel}允许的最高价格为${SHOPEE_SHIPPING_PRICE_LIMITS[channel]}`, 400);
     }
     const sizeChartTemplate = String(size_chart_template_id || '').trim();
     const sizeChartImage = String(size_chart_image || '').trim();
     if (sizeChartTemplate && sizeChartImage) return error('尺码表模板和尺码表图片只能填写一个', 400);
-    const preOrderDts = pre_order_dts === undefined || pre_order_dts === null || pre_order_dts === '' ? null : parseInt(pre_order_dts);
     if (preOrderDts !== null && (!Number.isInteger(preOrderDts) || preOrderDts < 5 || preOrderDts > 30)) return error('预售DTS必须为5~30天', 400);
     await env.DB.prepare("UPDATE ews_tasks SET name=?, status='pending', updated_at=datetime('now') WHERE id=?").bind(taskName, taskId).run();
     await shopeeCreateProduct(env, {
@@ -2785,7 +2795,12 @@ function validateShopeeRow(product, variations) {
   var dimensionCount = dimensions.filter(function(value) { return value !== null; }).length;
   if (dimensionCount !== 0 && dimensionCount !== 3) errors.push('长、宽、高必须同时填写或全部留空');
   var shippingChannels = normalizeShopeeShippingChannels(product.shipping_channels);
-  if (!shippingChannels.length) errors.push('至少需要开启一个物流渠道');
+  var blockedPreOrderChannels = product.pre_order_dts === null || product.pre_order_dts === undefined || product.pre_order_dts === ''
+    ? []
+    : shippingChannels.filter(function(channel) { return SHOPEE_PREORDER_BLOCKED_CHANNEL_IDS.includes(channel); });
+  shippingChannels = normalizeShopeePreOrderShippingChannels(shippingChannels, product.pre_order_dts);
+  if (blockedPreOrderChannels.length) warnings.push('Pre-order DTS 已自动关闭不支持预售的物流渠道: ' + blockedPreOrderChannels.join(', '));
+  if (!shippingChannels.length) errors.push(blockedPreOrderChannels.length ? '预售商品不能使用5012 / Trong Ngày，请至少开启其他物流渠道' : '至少需要开启一个物流渠道');
   for (var ci = 0; ci < shippingChannels.length; ci++) {
     var channelLimit = SHOPEE_SHIPPING_PRICE_LIMITS[shippingChannels[ci]];
     if (channelLimit && highest > channelLimit) errors.push('物流渠道' + shippingChannels[ci] + '允许的最高价格为' + channelLimit);
@@ -2843,7 +2858,7 @@ async function shopeeHandleExport(env, taskId) {
   const expectedSetCount = Math.max(parseInt(product.generate_count) || 1, 1);
   const subTasks = (product.sub_tasks && product.sub_tasks.length) ? product.sub_tasks : [];
   const imageMap = new Map((product.images_rec || []).map(image => [image.sub_task_id + '|' + image.image_type + '|' + image.position, image.image_url || '']));
-  var shippingChannels = normalizeShopeeShippingChannels(product.shipping_channels);
+  var shippingChannels = normalizeShopeePreOrderShippingChannels(normalizeShopeeShippingChannels(product.shipping_channels), product.pre_order_dts);
 
   function generatedImage(type, pos, setIdx, subTaskId) {
     return imageMap.get(subTaskId + '|' + type + '|' + pos) || '';
