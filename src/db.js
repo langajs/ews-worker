@@ -181,6 +181,60 @@ async function jstGetPlanStats(env, tid) { var r = await query(env, "SELECT stat
 async function jstRefundCredits(env, tid) { var t = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id = ?", [tid]); if (t?.user_id) await env.DB.prepare("UPDATE ews_users SET credits = credits + 1 WHERE id = ?").bind(t.user_id).run(); }
 
 // ==================== Shopee 模块 ====================
+async function shopeeListStores(env, userId) {
+  return await query(env, `SELECT s.*, t.id AS template_id, t.filename, t.sha256, t.signature,
+    t.field_count, t.category_count, t.manifest_json, t.created_at AS template_created_at
+    FROM ews_shopee_stores s
+    JOIN ews_shopee_store_templates t ON t.store_id=s.id AND t.is_active=1
+    WHERE s.user_id=? AND s.is_active=1 ORDER BY s.updated_at DESC`, [userId]);
+}
+async function shopeeGetStore(env, storeId, userId) {
+  return await getOne(env, "SELECT * FROM ews_shopee_stores WHERE id=? AND user_id=?", [storeId, userId]);
+}
+async function shopeeGetStoreByContext(env, userId, contextId) {
+  return await getOne(env, "SELECT * FROM ews_shopee_stores WHERE user_id=? AND template_context_id=?", [userId, contextId]);
+}
+async function shopeeGetActiveStoreTemplate(env, storeId) {
+  return await getOne(env, "SELECT * FROM ews_shopee_store_templates WHERE store_id=? AND is_active=1 ORDER BY created_at DESC LIMIT 1", [storeId]);
+}
+async function shopeeGetStoreTemplateByHash(env, storeId, sha256) {
+  return await getOne(env, "SELECT * FROM ews_shopee_store_templates WHERE store_id=? AND sha256=?", [storeId, sha256]);
+}
+async function shopeeGetTemplateCategories(env, templateId) {
+  return await query(env, "SELECT category_id AS id, category_name AS name, dts_range, dts_min, dts_max FROM ews_shopee_template_categories WHERE template_id=? ORDER BY category_name", [templateId]);
+}
+async function shopeeGetTemplateCategory(env, templateId, categoryId) {
+  return await getOne(env, "SELECT category_id AS id, category_name AS name, dts_range, dts_min, dts_max FROM ews_shopee_template_categories WHERE template_id=? AND category_id=?", [templateId, categoryId]);
+}
+async function shopeeSaveStoreTemplate(env, store, template, categories) {
+  await env.DB.prepare(`INSERT INTO ews_shopee_stores (id,user_id,name,template_context_id,is_active,created_at,updated_at)
+    VALUES (?,?,?,?,1,datetime('now'),datetime('now'))
+    ON CONFLICT(id) DO UPDATE SET name=excluded.name, template_context_id=excluded.template_context_id, is_active=1, updated_at=datetime('now')`)
+    .bind(store.id, store.user_id, store.name, store.template_context_id).run();
+  await env.DB.prepare(`INSERT INTO ews_shopee_store_templates
+    (id,store_id,user_id,filename,r2_key,sha256,signature,template_type,field_count,category_count,manifest_json,is_active,created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,0,datetime('now'))`)
+    .bind(template.id, store.id, store.user_id, template.filename, template.r2_key, template.sha256, template.signature,
+      template.template_type, template.field_count, template.category_count, template.manifest_json).run();
+  const insert = "INSERT INTO ews_shopee_template_categories (template_id,category_id,category_name,dts_range,dts_min,dts_max) VALUES (?,?,?,?,?,?)";
+  for (let offset = 0; offset < categories.length; offset += 75) {
+    const statements = categories.slice(offset, offset + 75).map(category => env.DB.prepare(insert).bind(
+      template.id, category.id, category.name, category.dts_range || '', category.dts_min ?? null, category.dts_max ?? null
+    ));
+    await env.DB.batch(statements);
+  }
+  await env.DB.batch([
+    env.DB.prepare("UPDATE ews_shopee_store_templates SET is_active=0 WHERE store_id=?").bind(store.id),
+    env.DB.prepare("UPDATE ews_shopee_store_templates SET is_active=1 WHERE id=?").bind(template.id),
+    env.DB.prepare("UPDATE ews_shopee_stores SET is_active=1, updated_at=datetime('now') WHERE id=?").bind(store.id),
+  ]);
+}
+async function shopeeRenameStore(env, storeId, userId, name) {
+  await env.DB.prepare("UPDATE ews_shopee_stores SET name=?, updated_at=datetime('now') WHERE id=? AND user_id=?").bind(name, storeId, userId).run();
+}
+async function shopeeDisableStore(env, storeId, userId) {
+  await env.DB.prepare("UPDATE ews_shopee_stores SET is_active=0, updated_at=datetime('now') WHERE id=? AND user_id=?").bind(storeId, userId).run();
+}
 async function shopeeCreateProduct(env, p) {
   await env.DB.prepare(`INSERT INTO ews_shopee_products
     (id, task_id, category_id, name, main_description, reference_title, reference_image, auxiliary_images, generate_count, mode, main_image_count, detail_image_count, parent_sku, cover_image, images, weight_kg, length_cm, width_cm, height_cm, gtin, brand_id, hs_code, tax_code, origin_country, variation_name1, variation_name2, variation_image_mode, max_purchase_qty, size_chart_template_id, size_chart_image, pre_order_dts, shipping_channels, source_brief, product_type, variation_name1_export, variation_name2_export, max_purchase_start_date, max_purchase_period_days, max_purchase_end_date, status, created_at, updated_at)
@@ -213,6 +267,7 @@ async function shopeeCreateProduct(env, p) {
       p.product_type || 'one', p.variation_name1_export || '', p.variation_name2_export || '',
       p.max_purchase_start_date || '', p.max_purchase_period_days ?? null, p.max_purchase_end_date || ''
     ).run();
+  await env.DB.prepare("UPDATE ews_shopee_products SET store_id=? WHERE id=?").bind(p.store_id || '', p.id).run();
 }
 async function shopeeGetProduct(env, pid) {
   const results = await env.DB.batch([
@@ -298,6 +353,8 @@ export {
   jstCreatePushPlans, jstGetPushPlans, jstGetPendingPlans, jstUpdatePlanStatus, jstGetPlanStats,
   jstRefundCredits,
   shopeeCreateProduct, shopeeGetProduct, shopeeDeleteProduct,
+  shopeeListStores, shopeeGetStore, shopeeGetStoreByContext, shopeeGetActiveStoreTemplate, shopeeGetStoreTemplateByHash,
+  shopeeGetTemplateCategories, shopeeGetTemplateCategory, shopeeSaveStoreTemplate, shopeeRenameStore, shopeeDisableStore,
   shopeeCreateVariations, shopeeClearVariations, shopeeReplaceVariations,
   shopeeCreatePushPlans, shopeeGetPushPlans, shopeeGetPendingPlans, shopeeUpdatePlanStatus, shopeeGetPlanStats,
   shopeeCreateExportRecord,

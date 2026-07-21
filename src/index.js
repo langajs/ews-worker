@@ -15,6 +15,8 @@ import {
   jstCreatePushPlans, jstGetPushPlans, jstGetPendingPlans, jstGetPlanStats,
   jstRefundCredits,
   shopeeCreateProduct, shopeeGetProduct, shopeeDeleteProduct,
+  shopeeListStores, shopeeGetStore, shopeeGetStoreByContext, shopeeGetActiveStoreTemplate, shopeeGetStoreTemplateByHash,
+  shopeeGetTemplateCategories, shopeeGetTemplateCategory, shopeeSaveStoreTemplate, shopeeRenameStore, shopeeDisableStore,
   shopeeReplaceVariations,
   shopeeCreatePushPlans, shopeeGetPushPlans, shopeeGetPendingPlans, shopeeGetPlanStats,
   shopeeCreateExportRecord,
@@ -24,11 +26,13 @@ import {
 } from './db.js';
 import { generateToken, hashPassword, verifyPassword, authenticateRequest, DEFAULT_PASSWORD } from './auth.js';
 import { processSkuUploadImage } from './sku-upload-image.js';
+import { buildShopeeWorkbook, parseShopeeTemplate, sha256Hex } from './shopee-template.js';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Expose-Headers': 'Content-Disposition',
   'Access-Control-Max-Age': '86400',
 };
 
@@ -244,6 +248,18 @@ export default {
       if (path === '/api/config' && method === 'PUT')
         return requireAuth(request, env, () => handleUpdateConfig(request, env));
 
+      // --- Shopee 店铺模板 ---
+      if (path === '/api/shopee/stores' && method === 'GET')
+        return requireAuth(request, env, () => handleGetShopeeStores(request, env));
+      if (path === '/api/shopee/stores' && method === 'POST')
+        return requireAuth(request, env, () => handleUploadShopeeStoreTemplate(request, env));
+      if (path.match(/^\/api\/shopee\/stores\/[^\/]+$/) && method === 'GET')
+        return requireAuth(request, env, () => handleGetShopeeStore(request, env, path));
+      if (path.match(/^\/api\/shopee\/stores\/[^\/]+$/) && method === 'PUT')
+        return requireAuth(request, env, () => handleRenameShopeeStore(request, env, path));
+      if (path.match(/^\/api\/shopee\/stores\/[^\/]+$/) && method === 'DELETE')
+        return requireAuth(request, env, () => handleDisableShopeeStore(request, env, path));
+
       // --- 统一任务 ---
       if (path === '/api/tasks/init' && method === 'POST')
         return requireAuth(request, env, () => handleInitTask(request, env));
@@ -422,6 +438,140 @@ async function handleUpdateConfig(request, env) {
   return json({ success: true, message: '配置更新成功', platform });
 }
 
+// ========== Shopee 店铺模板 ===========
+
+function parseJson(value, fallback) {
+  try { return JSON.parse(value); } catch (_) { return fallback; }
+}
+
+function serializeShopeeStore(store, template) {
+  const manifest = parseJson(template?.manifest_json, {});
+  return {
+    id: store.id,
+    name: store.name,
+    template_context_id: store.template_context_id,
+    updated_at: store.updated_at,
+    template: template ? {
+      id: template.template_id || template.id,
+      filename: template.filename,
+      sha256: template.sha256,
+      signature: template.signature,
+      template_type: template.template_type,
+      field_count: template.field_count,
+      category_count: template.category_count,
+      created_at: template.template_created_at || template.created_at,
+      shipping_channels: manifest.shipping_channels || [],
+    } : null,
+  };
+}
+
+function shopeeStoreIdFromPath(path) { return decodeURIComponent(path.split('/')[4] || ''); }
+
+async function handleGetShopeeStores(request, env) {
+  const result = await shopeeListStores(env, request.auth.username);
+  const stores = (result?.results || []).map(row => serializeShopeeStore(row, row));
+  return json({ success: true, stores });
+}
+
+async function handleGetShopeeStore(request, env, path) {
+  const storeId = shopeeStoreIdFromPath(path);
+  const store = await shopeeGetStore(env, storeId, request.auth.username);
+  if (!store) return error('店铺不存在', 404);
+  const template = await shopeeGetActiveStoreTemplate(env, storeId);
+  if (!template) return error('店铺尚未配置可用模板', 409);
+  const categories = (await shopeeGetTemplateCategories(env, template.id))?.results || [];
+  const manifest = parseJson(template.manifest_json, {});
+  return json({ success: true, store: serializeShopeeStore(store, template), categories, shipping_channels: manifest.shipping_channels || [] });
+}
+
+async function handleUploadShopeeStoreTemplate(request, env) {
+  const formData = await parseBody(request);
+  if (!(formData instanceof FormData)) return error('请使用 multipart/form-data 上传店铺模板', 400);
+  const file = formData.get('file');
+  if (!file || typeof file.arrayBuffer !== 'function') return error('请选择有效的 XLSX 模板文件', 400);
+  const filename = String(file.name || '').trim();
+  if (!/\.xlsx$/i.test(filename)) return error('仅支持 Shopee 下载的 .xlsx 基础模板', 400);
+  if (file.size < 1 || file.size > 5 * 1024 * 1024) return error('模板文件大小必须在 1B 到 5MB 之间', 400);
+  const storeNameInput = String(formData.get('name') || '').trim();
+  if (storeNameInput.length > 60) return error('店铺名称不能超过60字符', 400);
+  const buffer = await file.arrayBuffer();
+  let parsed;
+  try {
+    parsed = parseShopeeTemplate(buffer);
+  } catch (err) {
+    return error(err.message || '模板解析失败', 400);
+  }
+  const contextId = parsed.manifest.context_id;
+  const requestedStoreId = String(formData.get('store_id') || '').trim();
+  let store = requestedStoreId ? await shopeeGetStore(env, requestedStoreId, request.auth.username) : await shopeeGetStoreByContext(env, request.auth.username, contextId);
+  if (requestedStoreId && !store) return error('店铺不存在或无权更新', 404);
+  if (store && store.template_context_id !== contextId) return error('该模板属于另一店铺，D2 店铺上下文不匹配', 400);
+  const storeId = store?.id || uuid(16);
+  const storeName = storeNameInput || store?.name || `Shopee 店铺 ${contextId}`;
+  if (!storeName) return error('请填写店铺名称', 400);
+  const sha256 = await sha256Hex(buffer);
+  const duplicate = await shopeeGetStoreTemplateByHash(env, storeId, sha256);
+  if (duplicate) {
+    await env.DB.batch([
+      env.DB.prepare("UPDATE ews_shopee_stores SET name=?, is_active=1, updated_at=datetime('now') WHERE id=? AND user_id=?").bind(storeName, storeId, request.auth.username),
+      env.DB.prepare("UPDATE ews_shopee_store_templates SET is_active=0 WHERE store_id=?").bind(storeId),
+      env.DB.prepare("UPDATE ews_shopee_store_templates SET is_active=1 WHERE id=?").bind(duplicate.id),
+    ]);
+    const refreshed = await shopeeGetStore(env, storeId, request.auth.username);
+    return json({ success: true, duplicate: true, store: serializeShopeeStore(refreshed, duplicate), message: '该模板已存在，已恢复为当前版本' });
+  }
+  const templateId = uuid(20);
+  const r2Key = `ews/shopee-templates/${storeId}/${templateId}.xlsx`;
+  try {
+    await env.R2.put(r2Key, buffer, { httpMetadata: { contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' } });
+    await shopeeSaveStoreTemplate(env, {
+      id: storeId,
+      user_id: request.auth.username,
+      name: storeName,
+      template_context_id: contextId,
+    }, {
+      id: templateId,
+      filename,
+      r2_key: r2Key,
+      sha256,
+      signature: parsed.manifest.signature,
+      template_type: parsed.manifest.template_type,
+      field_count: parsed.manifest.field_count,
+      category_count: parsed.manifest.category_count,
+      manifest_json: JSON.stringify(parsed.manifest),
+    }, parsed.categories);
+  } catch (err) {
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM ews_shopee_template_categories WHERE template_id=?").bind(templateId),
+      env.DB.prepare("DELETE FROM ews_shopee_store_templates WHERE id=? AND is_active=0").bind(templateId),
+    ]).catch(() => {});
+    await env.R2.delete(r2Key).catch(() => {});
+    console.error('Shopee template save failed:', err.message);
+    return error('模板保存失败，请稍后重试', 503);
+  }
+  const savedStore = await shopeeGetStore(env, storeId, request.auth.username);
+  const savedTemplate = await shopeeGetActiveStoreTemplate(env, storeId);
+  return json({ success: true, store: serializeShopeeStore(savedStore, savedTemplate), message: '店铺模板已解析并启用' }, 201);
+}
+
+async function handleRenameShopeeStore(request, env, path) {
+  const storeId = shopeeStoreIdFromPath(path);
+  const name = String((await parseBody(request))?.name || '').trim();
+  if (!name || name.length > 60) return error('店铺名称必须为1~60个字符', 400);
+  const store = await shopeeGetStore(env, storeId, request.auth.username);
+  if (!store) return error('店铺不存在', 404);
+  await shopeeRenameStore(env, storeId, request.auth.username, name);
+  return json({ success: true, message: '店铺名称已更新' });
+}
+
+async function handleDisableShopeeStore(request, env, path) {
+  const storeId = shopeeStoreIdFromPath(path);
+  const store = await shopeeGetStore(env, storeId, request.auth.username);
+  if (!store) return error('店铺不存在', 404);
+  await shopeeDisableStore(env, storeId, request.auth.username);
+  return json({ success: true, message: '店铺已停用，历史任务和原模板仍保留' });
+}
+
 // ========== 用户管理 ==========
 
 async function handleGetUsers(request, env) {
@@ -555,13 +705,6 @@ const JST_USER_SKU_MAX_LENGTH = JST_SKU_MAX_LENGTH - SKU_PREFIX_LENGTH;
 const SHOPEE_USER_SKU_MAX_LENGTH = SHOPEE_SKU_MAX_LENGTH - SKU_PREFIX_LENGTH;
 const SHOPEE_DESCRIPTION_MIN_LENGTH = 100;
 const SHOPEE_DESCRIPTION_MAX_LENGTH = 3000;
-const SHOPEE_TEMPLATE_VERSION = '2026-07-21';
-const SHOPEE_TEMPLATE_FILE = 'Shopee_mass_upload_current.xlsx';
-const SHOPEE_TEMPLATE_COLUMNS = Object.freeze([
-  'Category','Product Name','Product Description','Parent SKU','Variation Integration No.','Variation Name1','Option for Variation 1','Image per Variation','Variation Name2','Option for Variation 2','Price','Stock','SKU','Size Chart Template','Size Chart Image','GTIN','Cover image','Item Image 1','Item Image 2','Item Image 3','Item Image 4','Item Image 5','Item Image 6','Item Image 7','Item Image 8','Weight','Length','Width','Height','Nhanh','Trong Ngày','Tủ nhận hàng - Viettel Smartbox','Tủ nhận hàng - SPX','Pre-order DTS','Fail Reason',
-]);
-const SHOPEE_SHIPPING_CHANNEL_IDS = Object.freeze(['5001','5012','50039','50052']);
-const SHOPEE_SHIPPING_PRICE_LIMITS = Object.freeze({ '5001': 100000000 });
 const SHOPEE_PREORDER_BLOCKED_CHANNEL_IDS = Object.freeze(['5012']);
 const JST_TEMPLATE_COLUMNS = Object.freeze([
   '款式编码','商品编码','颜色','规格','商品主图','商品详情图','图片地址','商品名称','推荐文案','商品描述','宝贝链接',
@@ -578,13 +721,13 @@ function normalizeShopeeProductType(value, variations) {
   return (variations || []).some(variation => String(variation?.option2 || '').trim()) ? 'two' : 'one';
 }
 
-function normalizeShopeeShippingChannels(value) {
+function normalizeShopeeShippingChannels(value, allowedChannels = null) {
   let channels = value;
   if (typeof channels === 'string') {
     try { channels = JSON.parse(channels); } catch (_) { channels = []; }
   }
-  const allowed = new Set(SHOPEE_SHIPPING_CHANNEL_IDS);
-  return [...new Set((Array.isArray(channels) ? channels : []).map(String).filter(channel => allowed.has(channel)))];
+  const allowed = Array.isArray(allowedChannels) ? new Set(allowedChannels.map(String)) : null;
+  return [...new Set((Array.isArray(channels) ? channels : []).map(String).filter(channel => /^\d+$/.test(channel) && (!allowed || allowed.has(channel))))];
 }
 
 function normalizeShopeePreOrderShippingChannels(channels, preOrderDts) {
@@ -767,10 +910,20 @@ async function handleUpdateTask(request, env, path, idx) {
   const body = await parseBody(request);
 
   if (idx.platform === 'shopee') {
-    const { name, source_brief, product_type, main_description, reference_title, reference_image, auxiliary_images, generate_count, mode, category_id, cover_image, images, length_cm, width_cm, height_cm, gtin, variation_name1, variation_name2, variation_image_mode, size_chart_template_id, size_chart_image, pre_order_dts, shipping_channels, variations } = body || {};
+    const { store_id, name, source_brief, product_type, main_description, reference_title, reference_image, auxiliary_images, generate_count, mode, category_id, cover_image, images, length_cm, width_cm, height_cm, gtin, variation_name1, variation_name2, variation_image_mode, size_chart_template_id, size_chart_image, pre_order_dts, shipping_channels, variations } = body || {};
     const taskName = String(name || '').trim();
     if (!taskName) return error('任务名称不能为空', 400);
     if (taskName.length > 30) return error('任务名称不能超过30字符', 400);
+    const storeId = String(store_id || '').trim();
+    if (!storeId) return error('请选择 Shopee 店铺模板', 400);
+    const store = await shopeeGetStore(env, storeId, idx.user_id);
+    if (!store || store.is_active === 0) return error('所选 Shopee 店铺不存在或已停用', 400);
+    const storeTemplate = await shopeeGetActiveStoreTemplate(env, storeId);
+    if (!storeTemplate) return error('所选店铺没有可用模板', 400);
+    const templateManifest = parseJson(storeTemplate.manifest_json, {});
+    const templateShipping = Array.isArray(templateManifest.shipping_channels) ? templateManifest.shipping_channels : [];
+    const allowedShippingIds = templateShipping.map(channel => String(channel.id));
+    if (!allowedShippingIds.length) return error('店铺模板没有可用物流渠道，请重新上传模板', 400);
     if (!reference_image) return error('核心参考图不能为空', 400);
     const sourceBrief = String(source_brief || '').trim();
     if (sourceBrief.length < 10 || sourceBrief.length > 2000) return error('商品事实必须为10~2000字符', 400);
@@ -850,22 +1003,35 @@ async function handleUpdateTask(request, env, path, idx) {
     if (dimensionCount !== 0 && dimensionCount !== 3) return error('长、宽、高必须同时填写或全部留空', 400);
     if (dimensions.some(value => value !== null && (value <= 0 || value > 10000000))) return error('长、宽、高必须大于0且不超过10000000', 400);
     const preOrderDts = pre_order_dts === undefined || pre_order_dts === null || pre_order_dts === '' ? null : parseInt(pre_order_dts);
-    const rawChannels = normalizeShopeeShippingChannels(shipping_channels);
+    const requestedChannels = normalizeShopeeShippingChannels(shipping_channels);
+    const unsupportedChannels = requestedChannels.filter(channel => !allowedShippingIds.includes(channel));
+    if (unsupportedChannels.length) return error('当前店铺模板不支持物流渠道: ' + unsupportedChannels.join(', '), 400);
+    const rawChannels = normalizeShopeeShippingChannels(requestedChannels, allowedShippingIds);
     const channels = normalizeShopeePreOrderShippingChannels(rawChannels, preOrderDts);
     if (!channels.length) {
       if (preOrderDts !== null && rawChannels.some(channel => SHOPEE_PREORDER_BLOCKED_CHANNEL_IDS.includes(channel))) return error('预售商品不能使用5012 / Trong Ngày，请至少选择其他物流渠道', 400);
       return error('至少选择一个物流渠道', 400);
     }
     for (const channel of channels) {
-      if (SHOPEE_SHIPPING_PRICE_LIMITS[channel] && highestPrice > SHOPEE_SHIPPING_PRICE_LIMITS[channel]) return error(`物流渠道${channel}允许的最高价格为${SHOPEE_SHIPPING_PRICE_LIMITS[channel]}`, 400);
+      const channelLimit = Number(templateShipping.find(item => String(item.id) === channel)?.price_limit);
+      if (Number.isFinite(channelLimit) && channelLimit > 0 && highestPrice > channelLimit) return error(`物流渠道${channel}允许的最高价格为${channelLimit}`, 400);
     }
     const sizeChartTemplate = String(size_chart_template_id || '').trim();
     const sizeChartImage = String(size_chart_image || '').trim();
     if (sizeChartTemplate && sizeChartImage) return error('尺码表模板和尺码表图片只能填写一个', 400);
     if (preOrderDts !== null && (!Number.isInteger(preOrderDts) || preOrderDts < 5 || preOrderDts > 30)) return error('预售DTS必须为5~30天', 400);
+    const categoryId = String(category_id || '').trim();
+    if (categoryId && !/^\d+$/.test(categoryId)) return error('Category ID 必须为数字', 400);
+    const templateCategory = categoryId ? await shopeeGetTemplateCategory(env, storeTemplate.id, categoryId) : null;
+    if (categoryId && !templateCategory) return error('所选 Category ID 不在当前店铺模板中', 400);
+    if (preOrderDts !== null && templateCategory?.dts_min !== null && templateCategory?.dts_min !== undefined) {
+      if (preOrderDts < Number(templateCategory.dts_min) || preOrderDts > Number(templateCategory.dts_max)) {
+        return error(`该分类的 Pre-order DTS 范围为 ${templateCategory.dts_range}`, 400);
+      }
+    }
     await env.DB.prepare("UPDATE ews_tasks SET name=?, status='pending', updated_at=datetime('now') WHERE id=?").bind(taskName, taskId).run();
     await shopeeCreateProduct(env, {
-      id: taskId, task_id: taskId, name: taskName, category_id: category_id || '',
+      id: taskId, task_id: taskId, store_id: storeId, name: taskName, category_id: categoryId,
       source_brief: sourceBrief, product_type: productType,
       main_description: main_description || '',
       reference_title: String(reference_title || '').trim(),
@@ -2715,7 +2881,17 @@ async function jstHandleExport(env, taskId) {
 }
 
 // ========== Shopee 模板校验 ==========
-function validateShopeeRow(product, variations) {
+const SHOPEE_EXPORT_TOKEN_KEYS = new Set([
+  'ps_category', 'ps_product_name', 'ps_product_description', 'ps_sku_parent_short',
+  'et_title_variation_integration_no', 'et_title_variation_1', 'et_title_option_for_variation_1',
+  'et_title_image_per_variation', 'et_title_variation_2', 'et_title_option_for_variation_2',
+  'ps_price', 'ps_stock', 'ps_sku_short', 'ps_new_size_chart', 'et_title_size_chart', 'ps_gtin_code',
+  'ps_item_cover_image', 'ps_item_image_1', 'ps_item_image_2', 'ps_item_image_3', 'ps_item_image_4',
+  'ps_item_image_5', 'ps_item_image_6', 'ps_item_image_7', 'ps_item_image_8',
+  'ps_weight', 'ps_length', 'ps_width', 'ps_height', 'ps_product_pre_order_dts', 'et_title_reason',
+]);
+
+function validateShopeeRow(product, variations, templateManifest, templateCategory) {
   var warnings = []; var errors = [];
   var n = product.name || '';
   var desc = product.description || '';
@@ -2789,7 +2965,9 @@ function validateShopeeRow(product, variations) {
   var dimensions = [product.length_cm, product.width_cm, product.height_cm].map(parseNumberOrNull);
   var dimensionCount = dimensions.filter(function(value) { return value !== null; }).length;
   if (dimensionCount !== 0 && dimensionCount !== 3) errors.push('长、宽、高必须同时填写或全部留空');
-  var shippingChannels = normalizeShopeeShippingChannels(product.shipping_channels);
+  var templateShipping = Array.isArray(templateManifest?.shipping_channels) ? templateManifest.shipping_channels : [];
+  var allowedShippingIds = templateShipping.map(function(channel) { return String(channel.id); });
+  var shippingChannels = normalizeShopeeShippingChannels(product.shipping_channels, allowedShippingIds);
   var blockedPreOrderChannels = product.pre_order_dts === null || product.pre_order_dts === undefined || product.pre_order_dts === ''
     ? []
     : shippingChannels.filter(function(channel) { return SHOPEE_PREORDER_BLOCKED_CHANNEL_IDS.includes(channel); });
@@ -2797,13 +2975,18 @@ function validateShopeeRow(product, variations) {
   if (blockedPreOrderChannels.length) warnings.push('Pre-order DTS 已自动关闭不支持预售的物流渠道: ' + blockedPreOrderChannels.join(', '));
   if (!shippingChannels.length) errors.push(blockedPreOrderChannels.length ? '预售商品不能使用5012 / Trong Ngày，请至少开启其他物流渠道' : '至少需要开启一个物流渠道');
   for (var ci = 0; ci < shippingChannels.length; ci++) {
-    var channelLimit = SHOPEE_SHIPPING_PRICE_LIMITS[shippingChannels[ci]];
+    var channelLimit = Number(templateShipping.find(function(channel) { return String(channel.id) === shippingChannels[ci]; })?.price_limit);
     if (channelLimit && highest > channelLimit) errors.push('物流渠道' + shippingChannels[ci] + '允许的最高价格为' + channelLimit);
   }
   if (product.size_chart_template_id && product.size_chart_image) errors.push('尺码表模板和尺码表图片只能填写一个');
 
   // 分类ID
   if (categoryId && !/^\d+$/.test(categoryId)) warnings.push('分类ID(Category)应为数字（当前: ' + categoryId + '）');
+  if (categoryId && !templateCategory) errors.push('分类ID不在当前店铺模板中');
+  if (product.pre_order_dts !== null && product.pre_order_dts !== undefined && product.pre_order_dts !== '' && templateCategory?.dts_min !== null && templateCategory?.dts_min !== undefined) {
+    var dts = Number(product.pre_order_dts);
+    if (dts < Number(templateCategory.dts_min) || dts > Number(templateCategory.dts_max)) errors.push('当前分类的Pre-order DTS范围为' + templateCategory.dts_range);
+  }
 
   // HS Code
   if (hsCode && !/^\d{4,8}$/.test(hsCode)) warnings.push('HS Code应为4/6/8位数字（当前: ' + hsCode + '）');
@@ -2827,6 +3010,18 @@ function validateShopeeRow(product, variations) {
 async function shopeeHandleExport(env, taskId) {
   const product = await shopeeGetProduct(env, taskId);
   if (!product) return error('商品不存在', 404);
+  if (!product.store_id) return error('任务未关联 Shopee 店铺模板，请在任务中重新选择店铺', 409);
+  const storeTemplate = await shopeeGetActiveStoreTemplate(env, product.store_id);
+  if (!storeTemplate) return error('任务关联的店铺没有可用模板，请先上传最新模板', 409);
+  const templateManifest = parseJson(storeTemplate.manifest_json, {});
+  const unknownMandatoryFields = (templateManifest.fields || []).filter(field =>
+    String(field.requirement || '').trim().toLowerCase() === 'mandatory' &&
+    !SHOPEE_EXPORT_TOKEN_KEYS.has(field.key) && !/^channel_id\.\d+$/.test(field.key)
+  );
+  if (unknownMandatoryFields.length) {
+    return json({ success: false, error: '店铺模板出现系统尚未适配的必填字段', errors: unknownMandatoryFields.map(field => `${field.label || field.key} (${field.key})`) }, 409);
+  }
+  const templateCategory = product.category_id ? await shopeeGetTemplateCategory(env, storeTemplate.id, product.category_id) : null;
   const skuImagePlan = await getOne(env, "SELECT 1 AS present FROM ews_shopee_push_plans WHERE task_id=? AND webhook_type GLOB 'sku_[0-9]*' LIMIT 1", [taskId]);
   const skuImagePlanned = !!skuImagePlan?.present;
   const variations = product.variations || [];
@@ -2835,7 +3030,7 @@ async function shopeeHandleExport(env, taskId) {
   const firstGeneratedDescription = String(product.sub_tasks?.[0]?.description || '').trim();
 
   // 校验
-  var validation = validateShopeeRow({ ...product, description: firstGeneratedDescription }, variations);
+  var validation = validateShopeeRow({ ...product, description: firstGeneratedDescription }, variations, templateManifest, templateCategory);
   // 有错误则拒绝导出，有警告则附带
   if (!validation.valid) {
     return json({ success: false, error: '数据校验失败', errors: validation.errors, warnings: validation.warnings }, 400);
@@ -2853,7 +3048,8 @@ async function shopeeHandleExport(env, taskId) {
   const expectedSetCount = Math.max(parseInt(product.generate_count) || 1, 1);
   const subTasks = (product.sub_tasks && product.sub_tasks.length) ? product.sub_tasks : [];
   const imageMap = new Map((product.images_rec || []).map(image => [image.sub_task_id + '|' + image.image_type + '|' + image.position, image.image_url || '']));
-  var shippingChannels = normalizeShopeePreOrderShippingChannels(normalizeShopeeShippingChannels(product.shipping_channels), product.pre_order_dts);
+  const allowedShippingIds = (templateManifest.shipping_channels || []).map(channel => String(channel.id));
+  var shippingChannels = normalizeShopeePreOrderShippingChannels(normalizeShopeeShippingChannels(product.shipping_channels, allowedShippingIds), product.pre_order_dts);
 
   function generatedImage(type, pos, setIdx, subTaskId) {
     return imageMap.get(subTaskId + '|' + type + '|' + pos) || '';
@@ -2949,7 +3145,7 @@ async function shopeeHandleExport(env, taskId) {
     return json({ success: false, error: 'Shopee资源未生成完成，已阻止导出', errors: exportErrors, warnings: validation.warnings }, 400);
   }
 
-  // 列顺序必须匹配 Shopee 2026-07-21 basic template (A~AI)
+  // 先构造平台语义字段，再由店铺模板隐藏 token 决定实际列位置。
   function makeRow(subTask, setIdx, variationsIdx) {
     var v = variations[variationsIdx];
     var images = productImages(setIdx, subTask.id || '');
@@ -2959,36 +3155,41 @@ async function shopeeHandleExport(env, taskId) {
     var option2 = option2For(v);
     var skuCode = skuCodeFor(subTask, setIdx, v, variationsIdx);
     var exportPrice = exportPriceForVariant(v, taskId, setIdx, variationsIdx);
-    return [
-      product.category_id || '',                          // A Category
-      subTask.title || '',                                // B Product Name
-      productDescriptionFor(subTask),                     // C Product Description
-      parentSku,                                          // D Parent SKU
-      isSingleProduct ? '' : parentSku,                   // E Variation Integration No.
-      isSingleProduct ? '' : product.variation_name1_export || '', // F Variation Name1
-      option1,                                            // G Option for Variation 1
-      getSkuUrl(setIdx, subTask.id || '', variationsIdx, v), // H Image per Variation
-      productType === 'two' ? product.variation_name2_export || '' : '', // I Variation Name2
-      option2,                                            // J Option for Variation 2
-      exportPrice,                                        // K Price
-      v.stock ?? '',                                      // L Stock
-      skuCode,                                            // M SKU
-      product.size_chart_template_id || '',               // N Size Chart Template
-      product.size_chart_image || '',                     // O Size Chart Image
-      product.gtin || '',                                 // P GTIN
-      coverImage,                                         // Q Cover image
-      images[0] || '', images[1] || '', images[2] || '',  // R-T Item Image 1~3
-      images[3] || '', images[4] || '', images[5] || '',  // U-W Item Image 4~6
-      images[6] || '', images[7] || '',                   // X-Y Item Image 7~8
-      weightInGrams(v),                                   // Z Weight(g)
-      product.length_cm ?? '',                            // AA Length
-      product.width_cm ?? '',                             // AB Width
-      product.height_cm ?? '',                            // AC Height
-      shipping('5001'), shipping('5012'),                 // AD-AE Shipping
-      shipping('50039'), shipping('50052'),               // AF-AG Shipping
-      product.pre_order_dts ?? '',                        // AH Pre-order DTS
-      '',                                                 // AI Fail Reason
-    ];
+    const row = {
+      ps_category: product.category_id || '',
+      ps_product_name: subTask.title || '',
+      ps_product_description: productDescriptionFor(subTask),
+      ps_sku_parent_short: parentSku,
+      et_title_variation_integration_no: isSingleProduct ? '' : parentSku,
+      et_title_variation_1: isSingleProduct ? '' : product.variation_name1_export || '',
+      et_title_option_for_variation_1: option1,
+      et_title_image_per_variation: getSkuUrl(setIdx, subTask.id || '', variationsIdx, v),
+      et_title_variation_2: productType === 'two' ? product.variation_name2_export || '' : '',
+      et_title_option_for_variation_2: option2,
+      ps_price: exportPrice,
+      ps_stock: v.stock ?? '',
+      ps_sku_short: skuCode,
+      ps_new_size_chart: product.size_chart_template_id || '',
+      et_title_size_chart: product.size_chart_image || '',
+      ps_gtin_code: product.gtin || '',
+      ps_item_cover_image: coverImage,
+      ps_item_image_1: images[0] || '',
+      ps_item_image_2: images[1] || '',
+      ps_item_image_3: images[2] || '',
+      ps_item_image_4: images[3] || '',
+      ps_item_image_5: images[4] || '',
+      ps_item_image_6: images[5] || '',
+      ps_item_image_7: images[6] || '',
+      ps_item_image_8: images[7] || '',
+      ps_weight: weightInGrams(v),
+      ps_length: product.length_cm ?? '',
+      ps_width: product.width_cm ?? '',
+      ps_height: product.height_cm ?? '',
+      ps_product_pre_order_dts: product.pre_order_dts ?? '',
+      et_title_reason: '',
+    };
+    for (const channel of (templateManifest.shipping_channels || [])) row[`channel_id.${channel.id}`] = shipping(String(channel.id));
+    return row;
   }
 
   for (let si = 0; si < subTasks.length; si++) {
@@ -2997,10 +3198,25 @@ async function shopeeHandleExport(env, taskId) {
     for (let vi = 0; vi < variations.length; vi++) rows.push(makeRow(subTask, setIdx, vi));
   }
 
-  if (rows.some(row => row.length !== SHOPEE_TEMPLATE_COLUMNS.length)) return error('Shopee模板列映射异常', 500);
-  return json({ success: true, rows, columns: SHOPEE_TEMPLATE_COLUMNS, task_title: product.name, export_format: 'shopee',
-    template_file: SHOPEE_TEMPLATE_FILE, template_version: SHOPEE_TEMPLATE_VERSION, template_sheet: 'Template', template_start_row: 7, template_column_count: SHOPEE_TEMPLATE_COLUMNS.length,
-    validation: { warnings: validation.warnings } });
+  const templateObject = await env.R2.get(storeTemplate.r2_key);
+  if (!templateObject) return error('店铺原始模板文件不存在，请重新上传模板', 409);
+  try {
+    const workbook = buildShopeeWorkbook(await templateObject.arrayBuffer(), templateManifest, rows);
+    const safeName = String(product.name || taskId.slice(0, 8)).replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').slice(0, 60) || taskId.slice(0, 8);
+    const filename = `Shopee_${safeName}_${new Date().toISOString().slice(0, 10)}.xlsx`;
+    return new Response(workbook, {
+      status: 200,
+      headers: {
+        ...CORS_HEADERS,
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'Content-Disposition': `attachment; filename="Shopee_export.xlsx"; filename*=UTF-8''${encodeURIComponent(filename)}`,
+        'Cache-Control': 'no-store',
+      },
+    });
+  } catch (err) {
+    console.error('Shopee workbook build failed:', err.message);
+    return error('店铺模板写入失败，请重新上传最新模板', 500);
+  }
 }
 
 // ========== 上传 ==========
