@@ -15,7 +15,7 @@ import {
   jstCreatePushPlans, jstGetPushPlans, jstGetPendingPlans, jstGetPlanStats,
   jstRefundCredits,
   shopeeCreateProduct, shopeeGetProduct, shopeeDeleteProduct,
-  shopeeListTemplateProfiles, shopeeGetTemplateProfile, shopeeGetTemplateProfileByContext,
+  shopeeListTemplateProfiles, shopeeGetTemplateProfile, shopeeGetTemplateProfileByContext, shopeeClaimTemplateProfile,
   shopeeGetTemplateVersion, shopeeGetCurrentTemplateVersion, shopeeGetLatestTemplateVersion, shopeeGetTemplateVersionByHash,
   shopeeGetTemplateCategories, shopeeGetTemplateCategory, shopeeGetTemplateFields, shopeeSaveTemplateVersion,
   shopeeUpdateTemplateUserMeta, shopeeUpdateTemplateProfile, shopeeMapTemplateField, shopeeCountUnmappedRequiredFields,
@@ -476,6 +476,7 @@ function serializeShopeeTemplateVersion(version) {
     logistics_count: Number(version.logistics_count ?? manifest.shipping_channels?.length ?? 0),
     category_count: Number(version.category_count || 0),
     status: version.version_status || version.status,
+    uploaded_by: version.version_uploaded_by || version.uploaded_by || '',
     has_sensitive_data: Number(version.has_sensitive_data || 0) === 1,
     sensitive_sheets: parseJson(version.sensitive_summary, manifest.sensitive_sheets || []),
     warnings: manifest.unknown_optional_tokens || [],
@@ -499,6 +500,8 @@ function serializeShopeeTemplateProfile(profile, version = profile) {
     display_name: displayName,
     name: displayName,
     status: profile.status,
+    created_by: profile.created_by || '',
+    is_owner: profile.created_by === profile.request_user_id,
     user_alias: profile.user_alias || '',
     user_note: profile.user_note || '',
     is_favorite: Number(profile.is_favorite || 0) === 1,
@@ -516,7 +519,7 @@ function shopeeTemplateProfileIdFromPath(path) {
 
 async function handleGetShopeeTemplateProfiles(request, env) {
   const result = await shopeeListTemplateProfiles(env, request.auth.username, request.auth.role === 'admin');
-  const profiles = (result?.results || []).map(row => serializeShopeeTemplateProfile(row));
+  const profiles = (result?.results || []).map(row => serializeShopeeTemplateProfile({ ...row, request_user_id: request.auth.username }));
   return json({ success: true, profiles, stores: profiles });
 }
 
@@ -529,7 +532,7 @@ async function handleGetShopeeTemplateProfile(request, env, path) {
   const dataVersion = currentVersion || latestVersion;
   const categories = dataVersion ? (await shopeeGetTemplateCategories(env, dataVersion.id))?.results || [] : [];
   const manifest = parseJson(dataVersion?.manifest_json, {});
-  const serialized = serializeShopeeTemplateProfile(profile, currentVersion || latestVersion);
+  const serialized = serializeShopeeTemplateProfile({ ...profile, request_user_id: request.auth.username }, currentVersion || latestVersion);
   const response = {
     success: true,
     profile: serialized,
@@ -580,6 +583,14 @@ async function handleUploadShopeeTemplate(request, env) {
   }
   const market = 'VN';
   const storeContextId = parsed.manifest.store_context_id;
+  const unknownRequired = parsed.manifest.unknown_required_tokens || [];
+  if (unknownRequired.length) {
+    return json({
+      success: false,
+      error: '模板包含系统无法识别的必填 token，不能安全导出',
+      errors: unknownRequired,
+    }, 400);
+  }
   const requestedProfileId = String(formData.get('profile_id') || formData.get('store_id') || '').trim();
   let profile = requestedProfileId
     ? await shopeeGetTemplateProfile(env, requestedProfileId, request.auth.username)
@@ -589,19 +600,31 @@ async function handleUploadShopeeTemplate(request, env) {
   if (profile?.status === 'deleted') return error('该模板档案已删除，请由管理员恢复后再上传', 409);
   const profileId = profile?.id || `shp-vn-${storeContextId}`;
   const profileCode = `SHP-VN-${storeContextId}`;
+  if (!profile) {
+    profile = await shopeeClaimTemplateProfile(env, {
+      id: profileId,
+      market,
+      store_context_id: storeContextId,
+      profile_code: profileCode,
+      system_name: profileCode,
+      created_by: request.auth.username,
+    });
+  }
+  if (request.auth.role !== 'admin' && profile?.created_by !== request.auth.username) {
+    return error(`该模板由用户 ${profile?.created_by || '未知'} 上传，只有创建者或管理员可以追加版本`, 403);
+  }
   const sha256 = await sha256Hex(buffer);
   const schemaHash = await sha256Hex(new TextEncoder().encode(parsed.schema_source));
   const duplicate = await shopeeGetTemplateVersionByHash(env, profileId, sha256);
   if (duplicate) {
     await shopeeUpdateTemplateUserMeta(env, profileId, request.auth.username, userMeta);
-    if (duplicate.status === 'ready' && !['disabled', 'deleted'].includes(profile.status)) await shopeeApproveTemplateVersion(env, profileId, duplicate.id, request.auth.username);
+    if (!['disabled', 'deleted'].includes(profile.status)) await shopeeApproveTemplateVersion(env, profileId, duplicate.id, request.auth.username);
     const refreshed = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
-    const serialized = serializeShopeeTemplateProfile(refreshed, duplicate);
+    const serialized = serializeShopeeTemplateProfile({ ...refreshed, request_user_id: request.auth.username }, duplicate);
     return json({ success: true, duplicate: true, profile: serialized, store: serialized, message: '该文件已存在，已更新你的别名和备注' });
   }
-  const unknownRequired = parsed.manifest.unknown_required_tokens || [];
   const sensitiveSheets = parsed.manifest.sensitive_sheets || [];
-  const versionStatus = unknownRequired.length ? 'pending_mapping' : (sensitiveSheets.length ? 'pending_review' : 'ready');
+  const versionStatus = 'ready';
   const versionId = uuid(20);
   const r2Key = `ews/shopee-template-library/${profileId}/${versionId}.xlsx`;
   try {
@@ -612,8 +635,8 @@ async function handleUploadShopeeTemplate(request, env) {
       store_context_id: storeContextId,
       profile_code: profileCode,
       system_name: profile?.system_name || profileCode,
-      status: versionStatus === 'ready' ? 'active' : versionStatus,
-      created_by: request.auth.username,
+      status: 'active',
+      created_by: profile.created_by,
     }, {
       id: versionId,
       uploaded_by: request.auth.username,
@@ -630,8 +653,8 @@ async function handleUploadShopeeTemplate(request, env) {
       status: versionStatus,
       has_sensitive_data: sensitiveSheets.length > 0,
       sensitive_summary: JSON.stringify(sensitiveSheets),
-      approved_by: versionStatus === 'ready' ? request.auth.username : null,
-      approved_at: versionStatus === 'ready' ? new Date().toISOString() : null,
+      approved_by: request.auth.username,
+      approved_at: new Date().toISOString(),
     }, parsed.manifest.fields, parsed.categories, userMeta);
   } catch (err) {
     await env.DB.batch([
@@ -646,13 +669,9 @@ async function handleUploadShopeeTemplate(request, env) {
   }
   const savedProfile = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
   const savedVersion = await shopeeGetTemplateVersion(env, versionId);
-  const serialized = serializeShopeeTemplateProfile(savedProfile, savedVersion);
-  const message = versionStatus === 'ready'
-    ? '模板已通过结构推理并成为当前版本'
-    : versionStatus === 'pending_mapping'
-      ? `发现 ${unknownRequired.length} 个未知必填 token，已进入管理员映射队列`
-      : '检测到店铺私有隐藏数据，已进入管理员审核队列';
-  return json({ success: true, profile: serialized, store: serialized, review_required: versionStatus !== 'ready', message }, 201);
+  const serialized = serializeShopeeTemplateProfile({ ...savedProfile, request_user_id: request.auth.username }, savedVersion);
+  const warnings = sensitiveSheets.length ? [`检测到非空隐藏表：${sensitiveSheets.join('、')}，已记录风险标记`] : [];
+  return json({ success: true, profile: serialized, store: serialized, review_required: false, warnings, message: '模板已通过结构推理并立即成为当前版本' }, 201);
 }
 
 async function handleUpdateShopeeTemplateMeta(request, env, path) {
@@ -664,7 +683,7 @@ async function handleUpdateShopeeTemplateMeta(request, env, path) {
   catch (err) { return error(err.message, 400); }
   await shopeeUpdateTemplateUserMeta(env, profileId, request.auth.username, meta);
   const refreshed = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
-  return json({ success: true, profile: serializeShopeeTemplateProfile(refreshed), message: '个人别名和备注已更新' });
+  return json({ success: true, profile: serializeShopeeTemplateProfile({ ...refreshed, request_user_id: request.auth.username }), message: '个人别名和备注已更新' });
 }
 
 async function handleMapShopeeTemplateField(request, env, path) {

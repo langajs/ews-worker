@@ -2,14 +2,14 @@
 
 ## 运行原则
 
-系统不内置固定 Shopee 导出模板，也不按文件名、工作表名称、日期或固定行列定位字段。用户上传对应店铺从 Seller Centre 下载的最新 `Basic Template`，Worker 通过“结构推理 + token 注册表”保存并共享已批准版本。
+系统不内置固定 Shopee 导出模板，也不按文件名、工作表名称、日期或固定行列定位字段。用户上传对应店铺从 Seller Centre 下载的最新 `Basic Template`，Worker 通过“结构推理 + token 注册表”保存并立即共享结构有效的版本。
 
 高级模板不作为当前运行时导出载体。如果未来需要类目专属属性，应单独增加高级属性模板或 Open API 适配，不向基础模板伪造不存在的列。
 
 ## 全局档案
 
 - `ews_shopee_template_profiles`：按 `UNIQUE(market, store_context_id)` 保存全局档案，默认编码为 `SHP-VN-{store_context_id}`。
-- `ews_shopee_template_versions`：保存历史版本、R2 Key、SHA256、Schema Hash 和审核状态。
+- `ews_shopee_template_versions`：保存历史版本、上传用户、R2 Key、SHA256、Schema Hash、启用状态和风险标记。
 - `ews_shopee_template_user_meta`：保存每个用户自己的别名、备注和收藏，不修改全局辨识信息。
 - `ews_shopee_template_fields`：保存 token、数据类型、必填性、语义映射和映射状态。
 
@@ -25,13 +25,20 @@ Worker 使用 `fflate` 解压并通过 `fast-xml-parser` 完成以下步骤：
 4. 识别 `channel_id.*`、`ps_item_image_*` 等字段族，并从 token 注册表获得系统语义。
 5. 从各工作表的数值密度和相邻文本推断 Category ID、分类路径和 DTS 范围。
 6. 计算 Schema Hash；SHA256 相同视为重复文件，Schema Hash 相同但文件不同视为同结构新版本。
-7. 未知可选 token 留空并警告；未知必填 token 进入 `pending_mapping`，管理员映射前不能成为当前版本。
+7. 未知可选 token 留空并警告；未知必填 token 直接拒绝上传，避免保存无法安全导出的版本。
 
 缺少官方隐藏 token、结构损坏、宏、外部链接、嵌入对象或非 `basic` 类型的文件直接拒绝，不能按可见列名猜测导出。
 
 ## 私有数据
 
-解析器检查 `HiddenShopBrand` 和 `HiddenTax`。任一工作表存在非空单元格时，版本进入 `pending_review`；管理员必须确认不会造成品牌或税务配置串店，才能全局共享。原始 XLSX 不提供公共下载端点，只能由任务导出流程在 Worker 内部读取。
+解析器检查 `HiddenShopBrand` 和 `HiddenTax`。任一工作表存在非空单元格时，版本记录 `has_sensitive_data` 和工作表风险摘要，但不阻塞自动启用；管理员可在独立模板管理页查看风险标记。原始 XLSX 不提供公共下载端点，只能由任务导出流程在 Worker 内部读取。
+
+## 权限与归属
+
+- 所有已启用档案都可被登录用户选择，接口返回档案 `created_by` 和版本 `uploaded_by`。
+- 普通用户可以创建新上下文档案，只能向自己创建的档案追加版本；管理员可以向任意档案追加版本。
+- 创建档案前先用 `INSERT OR IGNORE` 占位并复查所有者，防止两个并发上传请求绕过归属校验。
+- 用户私有别名、备注和收藏仍按用户隔离，不视为修改全局模板。
 
 ## 导出流程
 
@@ -48,5 +55,6 @@ Worker 使用 `fflate` 解压并通过 `fast-xml-parser` 完成以下步骤：
 - 使用多个店铺模板验证工作表名称、字段数和物流数变化时仍能定位结构。
 - 比较原始与导出文件的 ZIP 条目、`dataValidations`、`sheetProtection` 和隐藏工作表。
 - 验证同一 `store_context_id` 全局唯一、SHA256 去重、版本切换和用户备注隔离。
-- 验证未知必填 token 与私有隐藏数据在审核前不会替换当前可用版本。
+- 验证未知必填 token 被拒绝，私有隐藏数据只产生风险标记且有效版本立即启用。
+- 验证普通用户不能向其他用户创建的档案追加版本，并发上传同一上下文只产生一个所有者。
 - 使用当前店铺实际模板上传 Shopee，验证物流渠道、分类和图片 URL。

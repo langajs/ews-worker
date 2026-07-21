@@ -191,7 +191,7 @@ async function shopeeListTemplateProfiles(env, userId, includeInactive = false) 
   return await query(env, `SELECT p.*, COALESCE(m.alias,'') AS user_alias, COALESCE(m.note,'') AS user_note,
     COALESCE(m.is_favorite,0) AS is_favorite, v.id AS version_id, v.filename, v.sha256, v.schema_hash,
     v.signature, v.template_type, v.field_count, v.logistics_count, v.category_count,
-    v.manifest_json, v.status AS version_status, v.has_sensitive_data,
+    v.manifest_json, v.status AS version_status, v.uploaded_by AS version_uploaded_by, v.has_sensitive_data,
     v.sensitive_summary, v.created_at AS version_created_at
     FROM ews_shopee_template_profiles p
     LEFT JOIN ews_shopee_template_user_meta m ON m.profile_id=p.id AND m.user_id=?
@@ -203,7 +203,7 @@ async function shopeeGetTemplateProfile(env, profileId, userId = '') {
   return await getOne(env, `SELECT p.*, COALESCE(m.alias,'') AS user_alias, COALESCE(m.note,'') AS user_note,
     COALESCE(m.is_favorite,0) AS is_favorite, v.id AS version_id, v.filename, v.sha256, v.schema_hash,
     v.signature, v.template_type, v.field_count, v.logistics_count, v.category_count,
-    v.manifest_json, v.status AS version_status, v.has_sensitive_data,
+    v.manifest_json, v.status AS version_status, v.uploaded_by AS version_uploaded_by, v.has_sensitive_data,
     v.sensitive_summary, v.created_at AS version_created_at
     FROM ews_shopee_template_profiles p
     LEFT JOIN ews_shopee_template_user_meta m ON m.profile_id=p.id AND m.user_id=?
@@ -212,6 +212,13 @@ async function shopeeGetTemplateProfile(env, profileId, userId = '') {
 }
 async function shopeeGetTemplateProfileByContext(env, market, storeContextId) {
   return await getOne(env, "SELECT * FROM ews_shopee_template_profiles WHERE market=? AND store_context_id=?", [market, storeContextId]);
+}
+async function shopeeClaimTemplateProfile(env, profile) {
+  await env.DB.prepare(`INSERT OR IGNORE INTO ews_shopee_template_profiles
+    (id,market,store_context_id,profile_code,system_name,status,created_by,created_at,updated_at)
+    VALUES (?,?,?,?,?,'pending_upload',?,datetime('now'),datetime('now'))`)
+    .bind(profile.id, profile.market, profile.store_context_id, profile.profile_code, profile.system_name, profile.created_by).run();
+  return await shopeeGetTemplateProfileByContext(env, profile.market, profile.store_context_id);
 }
 async function shopeeGetTemplateVersion(env, versionId) {
   return await getOne(env, "SELECT * FROM ews_shopee_template_versions WHERE id=?", [versionId]);
@@ -445,7 +452,7 @@ export {
   jstCreatePushPlans, jstGetPushPlans, jstGetPendingPlans, jstUpdatePlanStatus, jstGetPlanStats,
   jstRefundCredits,
   shopeeCreateProduct, shopeeGetProduct, shopeeDeleteProduct,
-  shopeeListTemplateProfiles, shopeeGetTemplateProfile, shopeeGetTemplateProfileByContext,
+  shopeeListTemplateProfiles, shopeeGetTemplateProfile, shopeeGetTemplateProfileByContext, shopeeClaimTemplateProfile,
   shopeeGetTemplateVersion, shopeeGetCurrentTemplateVersion, shopeeGetLatestTemplateVersion, shopeeGetTemplateVersionByHash,
   shopeeGetTemplateCategories, shopeeGetTemplateCategory, shopeeGetTemplateFields, shopeeSaveTemplateVersion,
   shopeeUpdateTemplateUserMeta, shopeeUpdateTemplateProfile, shopeeMapTemplateField, shopeeCountUnmappedRequiredFields,
