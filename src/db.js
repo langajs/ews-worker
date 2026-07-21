@@ -33,11 +33,27 @@ function normalizeUserImageConcurrencyLimit(value) {
   if (!Number.isInteger(limit) || limit < 1) return DEFAULT_USER_IMAGE_CONCURRENCY;
   return Math.min(limit, MAX_USER_IMAGE_CONCURRENCY);
 }
-async function createUser(env, user) { await env.DB.prepare("INSERT INTO ews_users (id, username, password_hash, role, display_name, platform_access, image_concurrency_limit, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(user.id, user.username, user.password_hash, user.role || 'user', user.display_name || '', normalizePlatformAccess(user.platform_access), normalizeUserImageConcurrencyLimit(user.image_concurrency_limit), user.created_by || '').run(); }
-async function getUserByUsername(env, username) { return await getOne(env, "SELECT * FROM ews_users WHERE username = ?", [username]); }
-async function getUserList(env) { return await query(env, "SELECT id, username, role, display_name, platform_access, image_concurrency_limit, is_active, credits, created_at FROM ews_users ORDER BY created_at ASC"); }
+async function getGroupList(env) {
+  return await query(env, `SELECT g.*,
+    (SELECT COUNT(*) FROM ews_users u WHERE u.group_id=g.id) AS user_count,
+    (SELECT COUNT(*) FROM ews_shopee_template_groups tg WHERE tg.group_id=g.id) AS template_count
+    FROM ews_groups g
+    ORDER BY CASE WHEN g.id='default' THEN 0 ELSE 1 END, g.status ASC, g.name COLLATE NOCASE ASC`);
+}
+async function getGroupById(env, groupId) { return await getOne(env, "SELECT * FROM ews_groups WHERE id = ?", [groupId]); }
+async function createGroup(env, group) {
+  await env.DB.prepare("INSERT INTO ews_groups (id,name,status,created_by,created_at,updated_at) VALUES (?,?,'active',?,datetime('now'),datetime('now'))")
+    .bind(group.id, group.name, group.created_by || '').run();
+}
+async function updateGroup(env, groupId, name, status) {
+  await env.DB.prepare("UPDATE ews_groups SET name=?,status=?,updated_at=datetime('now') WHERE id=?").bind(name, status, groupId).run();
+}
+async function createUser(env, user) { await env.DB.prepare("INSERT INTO ews_users (id, username, password_hash, role, display_name, platform_access, group_id, image_concurrency_limit, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(user.id, user.username, user.password_hash, user.role || 'user', user.display_name || '', normalizePlatformAccess(user.platform_access), user.group_id || 'default', normalizeUserImageConcurrencyLimit(user.image_concurrency_limit), user.created_by || '').run(); }
+async function getUserByUsername(env, username) { return await getOne(env, "SELECT u.*,g.name AS group_name,g.status AS group_status FROM ews_users u LEFT JOIN ews_groups g ON g.id=u.group_id WHERE u.username = ?", [username]); }
+async function getUserList(env) { return await query(env, "SELECT u.id,u.username,u.role,u.display_name,u.platform_access,u.group_id,g.name AS group_name,g.status AS group_status,u.image_concurrency_limit,u.is_active,u.credits,u.created_at FROM ews_users u LEFT JOIN ews_groups g ON g.id=u.group_id ORDER BY u.created_at ASC"); }
 async function updateUserPassword(env, userId, pw) { await env.DB.prepare("UPDATE ews_users SET password_hash = ? WHERE id = ?").bind(pw, userId).run(); }
 async function toggleUserActive(env, userId, a) { await env.DB.prepare("UPDATE ews_users SET is_active = ? WHERE id = ?").bind(a ? 1 : 0, userId).run(); }
+async function updateUserGroup(env, userId, groupId) { await env.DB.prepare("UPDATE ews_users SET group_id = ? WHERE id = ?").bind(groupId, userId).run(); }
 async function deleteUser(env, userId) {
   await env.DB.batch([
     env.DB.prepare("DELETE FROM ews_shopee_template_user_meta WHERE user_id = ?").bind(userId),
@@ -186,29 +202,41 @@ async function jstGetPlanStats(env, tid) { var r = await query(env, "SELECT stat
 async function jstRefundCredits(env, tid) { var t = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id = ?", [tid]); if (t?.user_id) await env.DB.prepare("UPDATE ews_users SET credits = credits + 1 WHERE id = ?").bind(t.user_id).run(); }
 
 // ==================== Shopee 模块 ====================
-async function shopeeListTemplateProfiles(env, userId, includeInactive = false) {
-  const where = includeInactive ? '' : "WHERE p.status='active' AND p.deleted_at IS NULL AND v.status='ready'";
+async function shopeeListTemplateProfiles(env, userId, includeInactive = false, groupId = '') {
+  const filters = [];
+  if (!includeInactive) filters.push("p.status='active' AND p.deleted_at IS NULL AND v.status='ready'");
+  if (groupId) filters.push("EXISTS (SELECT 1 FROM ews_shopee_template_groups access_group WHERE access_group.profile_id=p.id AND access_group.group_id=?)");
+  const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+  const params = [userId];
+  if (groupId) params.push(groupId);
   return await query(env, `SELECT p.*, COALESCE(m.alias,'') AS user_alias, COALESCE(m.note,'') AS user_note,
     COALESCE(m.is_favorite,0) AS is_favorite, v.id AS version_id, v.filename, v.sha256, v.schema_hash,
     v.signature, v.template_type, v.field_count, v.logistics_count, v.category_count,
     v.manifest_json, v.status AS version_status, v.uploaded_by AS version_uploaded_by, v.has_sensitive_data,
-    v.sensitive_summary, v.created_at AS version_created_at
+    v.sensitive_summary, v.created_at AS version_created_at,
+    COALESCE((SELECT json_group_array(tg.group_id) FROM ews_shopee_template_groups tg WHERE tg.profile_id=p.id),'[]') AS group_ids_json
     FROM ews_shopee_template_profiles p
     LEFT JOIN ews_shopee_template_user_meta m ON m.profile_id=p.id AND m.user_id=?
     LEFT JOIN ews_shopee_template_versions v ON v.id=p.current_version_id
     ${where}
-    ORDER BY COALESCE(m.is_favorite,0) DESC, p.updated_at DESC`, [userId]);
+    ORDER BY COALESCE(m.is_favorite,0) DESC, p.updated_at DESC`, params);
 }
-async function shopeeGetTemplateProfile(env, profileId, userId = '') {
+async function shopeeGetTemplateProfile(env, profileId, userId = '', groupId = '') {
+  const accessFilter = groupId
+    ? "AND EXISTS (SELECT 1 FROM ews_shopee_template_groups access_group WHERE access_group.profile_id=p.id AND access_group.group_id=?)"
+    : '';
+  const params = [userId, profileId];
+  if (groupId) params.push(groupId);
   return await getOne(env, `SELECT p.*, COALESCE(m.alias,'') AS user_alias, COALESCE(m.note,'') AS user_note,
     COALESCE(m.is_favorite,0) AS is_favorite, v.id AS version_id, v.filename, v.sha256, v.schema_hash,
     v.signature, v.template_type, v.field_count, v.logistics_count, v.category_count,
     v.manifest_json, v.status AS version_status, v.uploaded_by AS version_uploaded_by, v.has_sensitive_data,
-    v.sensitive_summary, v.created_at AS version_created_at
+    v.sensitive_summary, v.created_at AS version_created_at,
+    COALESCE((SELECT json_group_array(tg.group_id) FROM ews_shopee_template_groups tg WHERE tg.profile_id=p.id),'[]') AS group_ids_json
     FROM ews_shopee_template_profiles p
     LEFT JOIN ews_shopee_template_user_meta m ON m.profile_id=p.id AND m.user_id=?
     LEFT JOIN ews_shopee_template_versions v ON v.id=p.current_version_id
-    WHERE p.id=?`, [userId, profileId]);
+    WHERE p.id=? ${accessFilter}`, params);
 }
 async function shopeeGetTemplateProfileByContext(env, market, storeContextId) {
   return await getOne(env, "SELECT * FROM ews_shopee_template_profiles WHERE market=? AND store_context_id=?", [market, storeContextId]);
@@ -219,6 +247,30 @@ async function shopeeClaimTemplateProfile(env, profile) {
     VALUES (?,?,?,?,?,'pending_upload',?,datetime('now'),datetime('now'))`)
     .bind(profile.id, profile.market, profile.store_context_id, profile.profile_code, profile.system_name, profile.created_by).run();
   return await shopeeGetTemplateProfileByContext(env, profile.market, profile.store_context_id);
+}
+async function shopeeAssignTemplateGroup(env, profileId, groupId, assignedBy) {
+  await env.DB.prepare("INSERT OR IGNORE INTO ews_shopee_template_groups (profile_id,group_id,assigned_by,created_at) VALUES (?,?,?,datetime('now'))")
+    .bind(profileId, groupId, assignedBy || '').run();
+}
+async function shopeeReplaceTemplateGroups(env, profileId, groupIds, assignedBy) {
+  const statements = [env.DB.prepare("DELETE FROM ews_shopee_template_groups WHERE profile_id=?").bind(profileId)];
+  for (let offset = 0; offset < groupIds.length; offset += 30) {
+    const chunk = groupIds.slice(offset, offset + 30);
+    const values = chunk.map(() => "(?,?,?,datetime('now'))").join(',');
+    const params = chunk.flatMap(groupId => [profileId, groupId, assignedBy || '']);
+    statements.push(env.DB.prepare(`INSERT INTO ews_shopee_template_groups (profile_id,group_id,assigned_by,created_at) VALUES ${values}`).bind(...params));
+  }
+  await env.DB.batch(statements);
+}
+async function shopeeReplaceGroupTemplates(env, groupId, profileIds, assignedBy) {
+  const statements = [env.DB.prepare("DELETE FROM ews_shopee_template_groups WHERE group_id=?").bind(groupId)];
+  for (let offset = 0; offset < profileIds.length; offset += 30) {
+    const chunk = profileIds.slice(offset, offset + 30);
+    const values = chunk.map(() => "(?,?,?,datetime('now'))").join(',');
+    const params = chunk.flatMap(profileId => [profileId, groupId, assignedBy || '']);
+    statements.push(env.DB.prepare(`INSERT INTO ews_shopee_template_groups (profile_id,group_id,assigned_by,created_at) VALUES ${values}`).bind(...params));
+  }
+  await env.DB.batch(statements);
 }
 async function shopeeGetTemplateVersion(env, versionId) {
   return await getOne(env, "SELECT * FROM ews_shopee_template_versions WHERE id=?", [versionId]);
@@ -348,6 +400,7 @@ async function shopeePurgeTemplateProfile(env, profileId) {
     env.DB.prepare("DELETE FROM ews_shopee_template_version_categories WHERE version_id IN (SELECT id FROM ews_shopee_template_versions WHERE profile_id=?)").bind(profileId),
     env.DB.prepare("DELETE FROM ews_shopee_template_fields WHERE version_id IN (SELECT id FROM ews_shopee_template_versions WHERE profile_id=?)").bind(profileId),
     env.DB.prepare("DELETE FROM ews_shopee_template_user_meta WHERE profile_id=?").bind(profileId),
+    env.DB.prepare("DELETE FROM ews_shopee_template_groups WHERE profile_id=?").bind(profileId),
     env.DB.prepare("DELETE FROM ews_shopee_template_versions WHERE profile_id=?").bind(profileId),
     env.DB.prepare("DELETE FROM ews_shopee_template_profiles WHERE id=?").bind(profileId),
   ]);
@@ -464,7 +517,8 @@ async function shopeeCreateExportRecord(env, r) { await env.DB.prepare("INSERT I
 export {
   query, getOne,
   getConfig, updateConfig, getPlatformConfig,
-  createUser, getUserByUsername, getUserList, updateUserPassword, toggleUserActive, deleteUser, updateUserPlatformAccess, updateUserImageConcurrencyLimit, updateUserWebhook,
+  getGroupList, getGroupById, createGroup, updateGroup,
+  createUser, getUserByUsername, getUserList, updateUserPassword, toggleUserActive, updateUserGroup, deleteUser, updateUserPlatformAccess, updateUserImageConcurrencyLimit, updateUserWebhook,
   normalizeUserImageConcurrencyLimit,
   getUserCredits, updateUserCredits, consumeUserCredit,
   createTaskIndex, updateTaskIndexStatus, getTaskIndex, getTaskList, getTaskCount, deleteTaskIndex,
@@ -477,6 +531,7 @@ export {
   jstRefundCredits,
   shopeeCreateProduct, shopeeGetProduct, shopeeUpdateProductTemplate, shopeeDeleteProduct,
   shopeeListTemplateProfiles, shopeeGetTemplateProfile, shopeeGetTemplateProfileByContext, shopeeClaimTemplateProfile,
+  shopeeAssignTemplateGroup, shopeeReplaceTemplateGroups, shopeeReplaceGroupTemplates,
   shopeeGetTemplateVersion, shopeeGetCurrentTemplateVersion, shopeeGetLatestTemplateVersion, shopeeGetTemplateVersionByHash,
   shopeeGetTemplateCategories, shopeeGetTemplateCategory, shopeeGetTemplateFields, shopeeSaveTemplateVersion,
   shopeeUpdateTemplateUserMeta, shopeeUpdateTemplateProfile, shopeeMapTemplateField, shopeeCountUnmappedRequiredFields,

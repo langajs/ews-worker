@@ -97,11 +97,18 @@ async function authenticateRequest(request, env) {
     // 从 ews_users 验证用户仍有效
     let user;
     try {
-      user = await env.DB.prepare("SELECT * FROM ews_users WHERE username = ?").bind(payload.sub).first();
+      user = await env.DB.prepare("SELECT u.*,g.name AS group_name,g.status AS group_status FROM ews_users u LEFT JOIN ews_groups g ON g.id=u.group_id WHERE u.username = ?").bind(payload.sub).first();
     } catch (_) {}
-    if (!user || user.is_active === 0) return { valid: false };
+    if (!user || user.is_active === 0 || (user.role !== 'admin' && user.group_status !== 'active')) return { valid: false };
 
-    return { valid: true, username: payload.sub, role: payload.role || 'user', platform_access: user.platform_access || 'allow' };
+    return {
+      valid: true,
+      username: payload.sub,
+      role: user.role || payload.role || 'user',
+      platform_access: user.platform_access || 'allow',
+      group_id: user.group_id || '',
+      group_name: user.group_name || '',
+    };
   } catch {
     return { valid: false };
   }

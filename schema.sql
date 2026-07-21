@@ -38,6 +38,18 @@ INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_image_w
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_title_enabled', 'true', 'shopee');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('n8n_sku_image_enabled', 'true', 'shopee');
 
+-- 用户与模板权限分组
+CREATE TABLE IF NOT EXISTS ews_groups (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+  created_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT OR IGNORE INTO ews_groups (id, name, status, created_by)
+  VALUES ('default', '默认分组', 'active', 'system');
+
 -- 共享用户表
 CREATE TABLE IF NOT EXISTS ews_users (
   id TEXT PRIMARY KEY,
@@ -46,6 +58,7 @@ CREATE TABLE IF NOT EXISTS ews_users (
   role TEXT NOT NULL DEFAULT 'user',      -- admin / user
   display_name TEXT DEFAULT '',
   platform_access TEXT NOT NULL DEFAULT 'allow', -- allow / jst / shopee
+  group_id TEXT NOT NULL DEFAULT 'default',
   image_concurrency_limit INTEGER NOT NULL DEFAULT 20,
   webhook_config TEXT DEFAULT '{}',       -- JSON: {"jst":{...}, "shopee":{...}}
   is_active INTEGER NOT NULL DEFAULT 1,
@@ -53,6 +66,7 @@ CREATE TABLE IF NOT EXISTS ews_users (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   created_by TEXT DEFAULT ''
 );
+CREATE INDEX IF NOT EXISTS idx_ews_users_group ON ews_users(group_id, role, is_active);
 INSERT OR IGNORE INTO ews_users (id, username, password_hash, role, created_by)
   VALUES ('admin', 'admin', '$2a$10$EWS_DEFAULT_HASH', 'admin', 'system');
 
@@ -320,6 +334,17 @@ CREATE TABLE IF NOT EXISTS ews_shopee_template_profiles (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_shopee_template_profiles_context ON ews_shopee_template_profiles(market, store_context_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_shopee_template_profiles_code ON ews_shopee_template_profiles(profile_code);
 CREATE INDEX IF NOT EXISTS idx_shopee_template_profiles_status ON ews_shopee_template_profiles(status, updated_at);
+
+CREATE TABLE IF NOT EXISTS ews_shopee_template_groups (
+  profile_id TEXT NOT NULL,
+  group_id TEXT NOT NULL,
+  assigned_by TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (profile_id, group_id),
+  FOREIGN KEY (profile_id) REFERENCES ews_shopee_template_profiles(id) ON DELETE CASCADE,
+  FOREIGN KEY (group_id) REFERENCES ews_groups(id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_shopee_template_groups_group ON ews_shopee_template_groups(group_id, profile_id);
 
 CREATE TABLE IF NOT EXISTS ews_shopee_template_versions (
   id TEXT PRIMARY KEY,

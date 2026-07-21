@@ -3,8 +3,9 @@
 import { AwsClient } from 'aws4fetch';
 import {
   query, getOne, getConfig, updateConfig, getPlatformConfig,
+  getGroupList, getGroupById, createGroup, updateGroup,
   createUser, getUserByUsername, getUserList, updateUserPassword,
-  toggleUserActive, deleteUser, updateUserPlatformAccess, updateUserImageConcurrencyLimit, updateUserWebhook, getUserCredits, updateUserCredits, consumeUserCredit,
+  toggleUserActive, updateUserGroup, deleteUser, updateUserPlatformAccess, updateUserImageConcurrencyLimit, updateUserWebhook, getUserCredits, updateUserCredits, consumeUserCredit,
   normalizeUserImageConcurrencyLimit,
   createTaskIndex, updateTaskIndexStatus, getTaskIndex, getTaskList, getTaskCount, deleteTaskIndex,
   jstCreateTask, jstUpdateTask, jstGetTask, jstUpdateTaskStatus,
@@ -16,6 +17,7 @@ import {
   jstRefundCredits,
   shopeeCreateProduct, shopeeGetProduct, shopeeUpdateProductTemplate, shopeeDeleteProduct,
   shopeeListTemplateProfiles, shopeeGetTemplateProfile, shopeeGetTemplateProfileByContext, shopeeClaimTemplateProfile,
+  shopeeAssignTemplateGroup, shopeeReplaceTemplateGroups, shopeeReplaceGroupTemplates,
   shopeeGetTemplateVersion, shopeeGetCurrentTemplateVersion, shopeeGetLatestTemplateVersion, shopeeGetTemplateVersionByHash,
   shopeeGetTemplateCategories, shopeeGetTemplateCategory, shopeeGetTemplateFields, shopeeSaveTemplateVersion,
   shopeeUpdateTemplateUserMeta, shopeeUpdateTemplateProfile, shopeeMapTemplateField, shopeeCountUnmappedRequiredFields,
@@ -143,6 +145,10 @@ function canUsePlatform(auth, platform) {
   return access === 'allow' || access === platform;
 }
 
+function templateAccessGroup(auth) {
+  return auth?.role === 'admin' ? '' : String(auth?.group_id || '');
+}
+
 function normalizeVariantPricing(variant, requiredPrice) {
   const enabled = isEnabled(variant?.price_float_enabled);
   const precision = clampPricePrecision(variant?.price_precision);
@@ -256,6 +262,16 @@ export default {
       if (path === '/api/config' && method === 'PUT')
         return requireAuth(request, env, () => handleUpdateConfig(request, env));
 
+      // --- 用户与模板分组 ---
+      if (path === '/api/groups' && method === 'GET')
+        return requireAuth(request, env, () => handleGetGroups(request, env));
+      if (path === '/api/groups' && method === 'POST')
+        return requireAuth(request, env, () => handleCreateGroup(request, env));
+      if (path.match(/^\/api\/groups\/[^\/]+$/) && method === 'PUT')
+        return requireAuth(request, env, () => handleUpdateGroup(request, env, path));
+      if (path.match(/^\/api\/groups\/[^\/]+\/templates$/) && method === 'PUT')
+        return requireAuth(request, env, () => handleUpdateGroupTemplates(request, env, path));
+
       // --- Shopee 全局模板库（/stores 保留为旧客户端兼容别名） ---
       if ((path === '/api/shopee/template-profiles' || path === '/api/shopee/stores') && method === 'GET')
         return requireAuth(request, env, () => handleGetShopeeTemplateProfiles(request, env));
@@ -263,6 +279,8 @@ export default {
         return requireAuth(request, env, () => handleUploadShopeeTemplate(request, env));
       if (path.match(/^\/api\/shopee\/template-profiles\/[^\/]+\/meta$/) && method === 'PUT')
         return requireAuth(request, env, () => handleUpdateShopeeTemplateMeta(request, env, path));
+      if (path.match(/^\/api\/shopee\/template-profiles\/[^\/]+\/groups$/) && method === 'PUT')
+        return requireAuth(request, env, () => handleUpdateShopeeTemplateGroups(request, env, path));
       if (path.match(/^\/api\/shopee\/template-profiles\/[^\/]+\/versions\/[^\/]+\/fields\/[^\/]+$/) && method === 'PUT')
         return requireAuth(request, env, () => handleMapShopeeTemplateField(request, env, path));
       if ((path.match(/^\/api\/shopee\/template-profiles\/[^\/]+$/) || path.match(/^\/api\/shopee\/stores\/[^\/]+$/)) && method === 'GET')
@@ -317,6 +335,8 @@ export default {
         return requireAuth(request, env, () => handleUpdateUserPlatform(request, env, path));
       if (path.match(/^\/api\/users\/[^\/]+\/concurrency$/) && method === 'PUT')
         return requireAuth(request, env, () => handleUpdateUserConcurrency(request, env, path));
+      if (path.match(/^\/api\/users\/[^\/]+\/group$/) && method === 'PUT')
+        return requireAuth(request, env, () => handleUpdateUserGroup(request, env, path));
       if (path === '/api/users/me/credits' && method === 'GET')
         return requireAuth(request, env, () => handleGetMyCredits(request, env));
       if (path.match(/^\/api\/users\/[^\/]+\/webhook$/) && method === 'GET')
@@ -365,7 +385,7 @@ async function handleLogin(request, env) {
       }
     }
   }
-  if (!user || user.is_active === 0) return recordFail(loginAttempts, record, ip, now);
+  if (!user || user.is_active === 0 || (user.role !== 'admin' && user.group_status !== 'active')) return recordFail(loginAttempts, record, ip, now);
   const valid = await verifyPassword(password, user.password_hash);
   if (!valid) return recordFail(loginAttempts, record, ip, now);
 
@@ -373,7 +393,7 @@ async function handleLogin(request, env) {
   const token = await generateToken(env, user.username, user.role);
   return json({
     success: true, token,
-    user: { username: user.username, role: user.role, display_name: user.display_name, platform_access: user.role === 'admin' ? 'allow' : normalizePlatformAccess(user.platform_access) },
+    user: { username: user.username, role: user.role, display_name: user.display_name, platform_access: user.role === 'admin' ? 'allow' : normalizePlatformAccess(user.platform_access), group_id: user.group_id || '', group_name: user.group_name || '' },
     is_default_password: password === DEFAULT_PASSWORD,
     message: password === DEFAULT_PASSWORD ? '请及时修改默认密码' : '登录成功',
   });
@@ -391,7 +411,7 @@ async function handleLogin(request, env) {
 
 async function handleVerify(request, env) {
   const auth = await authenticateRequest(request, env);
-  return json({ success: auth.valid, username: auth.username || null, role: auth.role || null, platform_access: auth.role === 'admin' ? 'allow' : normalizePlatformAccess(auth.platform_access) });
+  return json({ success: auth.valid, username: auth.username || null, role: auth.role || null, platform_access: auth.role === 'admin' ? 'allow' : normalizePlatformAccess(auth.platform_access), group_id: auth.group_id || '', group_name: auth.group_name || '' });
 }
 
 async function handleChangePassword(request, env) {
@@ -450,6 +470,81 @@ async function handleUpdateConfig(request, env) {
     }
   }
   return json({ success: true, message: '配置更新成功', platform });
+}
+
+// ========== 用户与模板分组 ===========
+
+function normalizeGroupName(value) {
+  const name = String(value || '').trim();
+  if (!name) throw new Error('分组名称不能为空');
+  if (name.length > 40) throw new Error('分组名称不能超过40字符');
+  return name;
+}
+
+function serializeGroup(group) {
+  return {
+    id: group.id,
+    name: group.name,
+    status: group.status,
+    user_count: Number(group.user_count || 0),
+    template_count: Number(group.template_count || 0),
+    created_by: group.created_by || '',
+    created_at: group.created_at,
+    updated_at: group.updated_at,
+  };
+}
+
+async function handleGetGroups(request, env) {
+  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  const result = await getGroupList(env);
+  return json({ success: true, groups: (result?.results || []).map(serializeGroup) });
+}
+
+async function handleCreateGroup(request, env) {
+  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  const body = await parseBody(request) || {};
+  let name;
+  try { name = normalizeGroupName(body.name); }
+  catch (err) { return error(err.message, 400); }
+  const duplicate = await getOne(env, "SELECT id FROM ews_groups WHERE name=? COLLATE NOCASE", [name]);
+  if (duplicate) return error('分组名称已存在', 409);
+  const id = `grp_${uuid(12)}`;
+  await createGroup(env, { id, name, created_by: request.auth.username });
+  return json({ success: true, group: serializeGroup(await getGroupById(env, id)), message: '分组已创建' }, 201);
+}
+
+async function handleUpdateGroup(request, env, path) {
+  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  const groupId = decodeURIComponent(path.split('/')[3] || '');
+  const group = await getGroupById(env, groupId);
+  if (!group) return error('分组不存在', 404);
+  const body = await parseBody(request) || {};
+  let name;
+  try { name = normalizeGroupName(body.name ?? group.name); }
+  catch (err) { return error(err.message, 400); }
+  const status = String(body.status ?? group.status);
+  if (!['active', 'disabled'].includes(status)) return error('分组状态仅支持 active 或 disabled', 400);
+  const duplicate = await getOne(env, "SELECT id FROM ews_groups WHERE name=? COLLATE NOCASE AND id<>?", [name, groupId]);
+  if (duplicate) return error('分组名称已存在', 409);
+  await updateGroup(env, groupId, name, status);
+  const refreshed = await getGroupById(env, groupId);
+  return json({ success: true, group: serializeGroup(refreshed), message: status === 'disabled' ? '分组已停用，组内普通用户将无法登录' : '分组设置已更新' });
+}
+
+async function handleUpdateGroupTemplates(request, env, path) {
+  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  const groupId = decodeURIComponent(path.split('/')[3] || '');
+  if (!await getGroupById(env, groupId)) return error('分组不存在', 404);
+  const body = await parseBody(request) || {};
+  if (!Array.isArray(body.template_profile_ids)) return error('template_profile_ids 必须为数组', 400);
+  const profileIds = [...new Set(body.template_profile_ids.map(value => String(value || '').trim()).filter(Boolean))];
+  if (profileIds.length > 1000) return error('单个分组最多关联1000个模板', 400);
+  const profiles = (await shopeeListTemplateProfiles(env, request.auth.username, true))?.results || [];
+  const validIds = new Set(profiles.map(profile => profile.id));
+  const missing = profileIds.filter(profileId => !validIds.has(profileId));
+  if (missing.length) return error(`模板档案不存在：${missing.join('、')}`, 400);
+  await shopeeReplaceGroupTemplates(env, groupId, profileIds, request.auth.username);
+  return json({ success: true, group_id: groupId, template_count: profileIds.length, message: '分组模板范围已更新' });
 }
 
 // ========== Shopee 全局模板库 ===========
@@ -515,6 +610,7 @@ function serializeShopeeTemplateProfile(profile, version = profile) {
     user_alias: profile.user_alias || '',
     user_note: profile.user_note || '',
     is_favorite: Number(profile.is_favorite || 0) === 1,
+    group_ids: parseJson(profile.group_ids_json, []),
     current_version_id: profile.current_version_id || null,
     updated_at: profile.updated_at,
     template,
@@ -552,14 +648,14 @@ function shopeeTemplateProfileIdFromPath(path) {
 }
 
 async function handleGetShopeeTemplateProfiles(request, env) {
-  const result = await shopeeListTemplateProfiles(env, request.auth.username, request.auth.role === 'admin');
+  const result = await shopeeListTemplateProfiles(env, request.auth.username, request.auth.role === 'admin', templateAccessGroup(request.auth));
   const profiles = (result?.results || []).map(row => serializeShopeeTemplateProfile(row));
   return json({ success: true, profiles, stores: profiles });
 }
 
 async function handleGetShopeeTemplateProfile(request, env, path) {
   const profileId = shopeeTemplateProfileIdFromPath(path);
-  const profile = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
+  const profile = await shopeeGetTemplateProfile(env, profileId, request.auth.username, templateAccessGroup(request.auth));
   if (!profile || (request.auth.role !== 'admin' && (profile.status !== 'active' || profile.deleted_at))) return error('模板档案不存在或不可用', 404);
   const currentVersion = profile.current_version_id ? await shopeeGetCurrentTemplateVersion(env, profileId) : null;
   const latestVersion = request.auth.role === 'admin' ? await shopeeGetLatestTemplateVersion(env, profileId) : currentVersion;
@@ -614,6 +710,13 @@ function normalizeShopeeTemplateUserMeta(input, fallback = {}) {
   if (alias.length > 60) throw new Error('用户别名不能超过60字符');
   if (note.length > 500) throw new Error('用户备注不能超过500字符');
   return { alias, note, is_favorite: isFavorite };
+}
+
+async function assignShopeeTemplateUploadGroup(env, profileId, auth) {
+  const groupId = String(auth?.group_id || 'default');
+  const group = await getGroupById(env, groupId);
+  if (!group) throw new Error('当前账号尚未配置有效分组');
+  await shopeeAssignTemplateGroup(env, profileId, groupId, auth.username);
 }
 
 async function handleUploadShopeeTemplate(request, env) {
@@ -674,6 +777,8 @@ async function handleUploadShopeeTemplate(request, env) {
   const currentVersion = existingVersions.find(version => version.id === profile.current_version_id)
     || (profile.current_version_id ? await shopeeGetCurrentTemplateVersion(env, profileId) : null);
   if (await matchesShopeeTemplateVersion(env, currentVersion, sha256, schemaHash)) {
+    try { await assignShopeeTemplateUploadGroup(env, profileId, request.auth); }
+    catch (err) { return error(err.message || '模板分组关联失败', 503); }
     await shopeeUpdateTemplateUserMeta(env, profileId, request.auth.username, userMeta);
     const refreshed = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
     const serialized = serializeShopeeTemplateProfile(refreshed, currentVersion);
@@ -744,6 +849,8 @@ async function handleUploadShopeeTemplate(request, env) {
     const concurrentVersion = await shopeeGetTemplateVersionByHash(env, profileId, sha256).catch(() => null);
     const concurrentProfile = concurrentVersion ? await shopeeGetTemplateProfile(env, profileId, request.auth.username).catch(() => null) : null;
     if (concurrentVersion && concurrentProfile?.current_version_id === concurrentVersion.id) {
+      try { await assignShopeeTemplateUploadGroup(env, profileId, request.auth); }
+      catch (assignError) { return error(assignError.message || '模板分组关联失败', 503); }
       await shopeeUpdateTemplateUserMeta(env, profileId, request.auth.username, userMeta);
       const serializedConcurrent = serializeShopeeTemplateProfile(concurrentProfile, concurrentVersion);
       return json({
@@ -758,6 +865,8 @@ async function handleUploadShopeeTemplate(request, env) {
     console.error('Shopee template save failed:', err.message);
     return error('模板保存失败，请稍后重试', 503);
   }
+  try { await assignShopeeTemplateUploadGroup(env, profileId, request.auth); }
+  catch (err) { return error(err.message || '模板分组关联失败', 503); }
   const savedProfile = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
   const savedVersion = await shopeeGetTemplateVersion(env, versionId);
   const serialized = serializeShopeeTemplateProfile(savedProfile, savedVersion);
@@ -784,7 +893,7 @@ async function handleUploadShopeeTemplate(request, env) {
 
 async function handleUpdateShopeeTemplateMeta(request, env, path) {
   const profileId = shopeeTemplateProfileIdFromPath(path);
-  const profile = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
+  const profile = await shopeeGetTemplateProfile(env, profileId, request.auth.username, templateAccessGroup(request.auth));
   if (!profile || profile.status === 'deleted') return error('模板档案不存在', 404);
   let meta;
   try { meta = normalizeShopeeTemplateUserMeta(await parseBody(request) || {}, profile); }
@@ -792,6 +901,24 @@ async function handleUpdateShopeeTemplateMeta(request, env, path) {
   await shopeeUpdateTemplateUserMeta(env, profileId, request.auth.username, meta);
   const refreshed = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
   return json({ success: true, profile: serializeShopeeTemplateProfile(refreshed), message: '个人别名和备注已更新' });
+}
+
+async function handleUpdateShopeeTemplateGroups(request, env, path) {
+  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  const profileId = shopeeTemplateProfileIdFromPath(path);
+  const profile = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
+  if (!profile) return error('模板档案不存在', 404);
+  const body = await parseBody(request) || {};
+  if (!Array.isArray(body.group_ids)) return error('group_ids 必须为数组', 400);
+  const groupIds = [...new Set(body.group_ids.map(value => String(value || '').trim()).filter(Boolean))];
+  if (groupIds.length > 100) return error('单个模板最多关联100个分组', 400);
+  const groups = (await getGroupList(env))?.results || [];
+  const validIds = new Set(groups.map(group => group.id));
+  const missing = groupIds.filter(groupId => !validIds.has(groupId));
+  if (missing.length) return error(`分组不存在：${missing.join('、')}`, 400);
+  await shopeeReplaceTemplateGroups(env, profileId, groupIds, request.auth.username);
+  const refreshed = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
+  return json({ success: true, profile: serializeShopeeTemplateProfile(refreshed), message: '模板分组已更新' });
 }
 
 async function handleMapShopeeTemplateField(request, env, path) {
@@ -865,8 +992,10 @@ async function handleGetUsers(request, env) {
   return json({ success: true, users: (result?.results || []).map(u => ({
     id: u.id, username: u.username, role: u.role, display_name: u.display_name,
     platform_access: u.role === 'admin' ? 'allow' : normalizePlatformAccess(u.platform_access),
+    group_id: u.group_id || '', group_name: u.group_name || '', group_status: u.group_status || 'disabled',
     image_concurrency_limit: normalizeUserImageConcurrencyLimit(u.image_concurrency_limit),
-    is_active: u.is_active, credits: u.credits ?? 0, created_at: u.created_at
+    is_active: u.is_active, login_enabled: u.role === 'admin' ? Number(u.is_active) === 1 : Number(u.is_active) === 1 && u.group_status === 'active',
+    credits: u.credits ?? 0, created_at: u.created_at
   })) });
 }
 
@@ -879,9 +1008,11 @@ async function handleCreateUser(request, env) {
   const existing = await getUserByUsername(env, username);
   if (existing) return error('用户名已存在', 400);
   const pwdHash = await hashPassword(password);
+  const groupId = String(body?.group_id || 'default');
+  if (!await getGroupById(env, groupId)) return error('所选分组不存在', 400);
   const requestedConcurrency = body?.image_concurrency_limit;
   if (requestedConcurrency !== undefined && (!Number.isInteger(Number(requestedConcurrency)) || Number(requestedConcurrency) < 1 || Number(requestedConcurrency) > 20)) return error('图片并发上限必须为1~20', 400);
-  await createUser(env, { id: username, username, password_hash: pwdHash, role: role === 'admin' ? 'admin' : 'user', platform_access: normalizePlatformAccess(body?.platform_access), image_concurrency_limit: requestedConcurrency, created_by: request.auth.username });
+  await createUser(env, { id: username, username, password_hash: pwdHash, role: role === 'admin' ? 'admin' : 'user', platform_access: normalizePlatformAccess(body?.platform_access), group_id: groupId, image_concurrency_limit: requestedConcurrency, created_by: request.auth.username });
   return json({ success: true, message: '用户创建成功' }, 201);
 }
 
@@ -916,6 +1047,19 @@ async function handleUpdateUserConcurrency(request, env, path) {
   if (!user) return error('用户不存在', 404);
   await updateUserImageConcurrencyLimit(env, user.id, limit);
   return json({ success: true, image_concurrency_limit: limit, message: '用户图片并发上限已更新' });
+}
+
+async function handleUpdateUserGroup(request, env, path) {
+  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  const userId = path.split('/')[3];
+  const body = await parseBody(request) || {};
+  const groupId = String(body.group_id || '').trim();
+  if (!groupId) return error('请选择分组', 400);
+  const [user, group] = await Promise.all([getUserByUsername(env, userId), getGroupById(env, groupId)]);
+  if (!user) return error('用户不存在', 404);
+  if (!group) return error('分组不存在', 404);
+  await updateUserGroup(env, user.id, groupId);
+  return json({ success: true, group_id: groupId, group_name: group.name, group_status: group.status, message: '用户分组已更新' });
 }
 
 async function handleGetUserWebhook(request, env, path) {
@@ -1186,7 +1330,7 @@ async function handleGetTaskDetail(request, env, ctx, path, idx) {
   } else if (idx.platform === 'shopee') {
     const [sp, profileRows] = await Promise.all([
       shopeeGetProduct(env, taskId),
-      shopeeListTemplateProfiles(env, request.auth.username, false),
+      shopeeListTemplateProfiles(env, request.auth.username, false, templateAccessGroup(request.auth)),
     ]);
     if (sp) {
       const templateProfiles = (profileRows?.results || []).map(profile => serializeShopeeTemplateProfile(profile));
@@ -1209,7 +1353,7 @@ async function handleSwitchShopeeTaskTemplate(request, env, path, idx) {
   if (!profileId) return error('请选择 Shopee 模板档案', 400);
   const [product, profile, version] = await Promise.all([
     shopeeGetProduct(env, taskId),
-    shopeeGetTemplateProfile(env, profileId, request.auth.username),
+    shopeeGetTemplateProfile(env, profileId, request.auth.username, templateAccessGroup(request.auth)),
     shopeeGetCurrentTemplateVersion(env, profileId),
   ]);
   if (!product) return error('Shopee 任务数据不存在', 404);
@@ -1272,7 +1416,7 @@ async function handleUpdateTask(request, env, path, idx) {
     if (taskName.length > 30) return error('任务名称不能超过30字符', 400);
     const templateProfileId = String(template_profile_id || store_id || '').trim();
     if (!templateProfileId) return error('请选择 Shopee 全局模板档案', 400);
-    const templateProfile = await shopeeGetTemplateProfile(env, templateProfileId, idx.user_id);
+    const templateProfile = await shopeeGetTemplateProfile(env, templateProfileId, idx.user_id, templateAccessGroup(request.auth));
     if (!templateProfile || templateProfile.status !== 'active' || templateProfile.deleted_at) return error('所选 Shopee 模板档案不存在或不可用', 400);
     const templateVersion = await shopeeGetCurrentTemplateVersion(env, templateProfileId);
     if (!templateVersion || templateVersion.status !== 'ready') return error('所选模板档案没有已批准版本', 400);
