@@ -544,6 +544,13 @@ const JST_USER_SKU_MAX_LENGTH = JST_SKU_MAX_LENGTH - SKU_PREFIX_LENGTH;
 const SHOPEE_USER_SKU_MAX_LENGTH = SHOPEE_SKU_MAX_LENGTH - SKU_PREFIX_LENGTH;
 const SHOPEE_DESCRIPTION_MIN_LENGTH = 100;
 const SHOPEE_DESCRIPTION_MAX_LENGTH = 3000;
+const SHOPEE_TEMPLATE_VERSION = '2026-07-21';
+const SHOPEE_TEMPLATE_FILE = 'Shopee_mass_upload_current.xlsx';
+const SHOPEE_TEMPLATE_COLUMNS = Object.freeze([
+  'Category','Product Name','Product Description','Parent SKU','Variation Integration No.','Variation Name1','Option for Variation 1','Image per Variation','Variation Name2','Option for Variation 2','Price','Stock','SKU','Size Chart Template','Size Chart Image','GTIN','Cover image','Item Image 1','Item Image 2','Item Image 3','Item Image 4','Item Image 5','Item Image 6','Item Image 7','Item Image 8','Weight','Length','Width','Height','Nhanh','Trong Ngày','Tủ nhận hàng - Viettel Smartbox','Tủ nhận hàng - SPX','Pre-order DTS','Fail Reason',
+]);
+const SHOPEE_SHIPPING_CHANNEL_IDS = Object.freeze(['5001','5012','50039','50052']);
+const SHOPEE_SHIPPING_PRICE_LIMITS = Object.freeze({ '5001': 100000000 });
 const JST_TEMPLATE_COLUMNS = Object.freeze([
   '款式编码','商品编码','颜色','规格','商品主图','商品详情图','图片地址','商品名称','推荐文案','商品描述','宝贝链接',
   '库存','重量(kg)','基本售价','市场|吊牌价','最低分销控价','最高分销控价','供应商名','3:4主图','长图','透明素材图','白底图',
@@ -564,7 +571,7 @@ function normalizeShopeeShippingChannels(value) {
   if (typeof channels === 'string') {
     try { channels = JSON.parse(channels); } catch (_) { channels = []; }
   }
-  const allowed = new Set(['5000','5001','5004','5012','50039','50052','50053']);
+  const allowed = new Set(SHOPEE_SHIPPING_CHANNEL_IDS);
   return [...new Set((Array.isArray(channels) ? channels : []).map(String).filter(channel => allowed.has(channel)))];
 }
 
@@ -831,9 +838,8 @@ async function handleUpdateTask(request, env, path) {
     if (dimensions.some(value => value !== null && (value <= 0 || value > 10000000))) return error('长、宽、高必须大于0且不超过10000000', 400);
     const channels = normalizeShopeeShippingChannels(shipping_channels);
     if (!channels.length) return error('至少选择一个物流渠道', 400);
-    const channelPriceLimits = { '5000': 10000000, '5001': 100000000, '5004': 100000000, '50053': 3000000 };
     for (const channel of channels) {
-      if (channelPriceLimits[channel] && highestPrice > channelPriceLimits[channel]) return error(`物流渠道${channel}允许的最高价格为${channelPriceLimits[channel]}`, 400);
+      if (SHOPEE_SHIPPING_PRICE_LIMITS[channel] && highestPrice > SHOPEE_SHIPPING_PRICE_LIMITS[channel]) return error(`物流渠道${channel}允许的最高价格为${SHOPEE_SHIPPING_PRICE_LIMITS[channel]}`, 400);
     }
     const sizeChartTemplate = String(size_chart_template_id || '').trim();
     const sizeChartImage = String(size_chart_image || '').trim();
@@ -2780,9 +2786,8 @@ function validateShopeeRow(product, variations) {
   if (dimensionCount !== 0 && dimensionCount !== 3) errors.push('长、宽、高必须同时填写或全部留空');
   var shippingChannels = normalizeShopeeShippingChannels(product.shipping_channels);
   if (!shippingChannels.length) errors.push('至少需要开启一个物流渠道');
-  var shippingPriceLimits = { '5000': 10000000, '5001': 100000000, '5004': 100000000, '50053': 3000000 };
   for (var ci = 0; ci < shippingChannels.length; ci++) {
-    var channelLimit = shippingPriceLimits[shippingChannels[ci]];
+    var channelLimit = SHOPEE_SHIPPING_PRICE_LIMITS[shippingChannels[ci]];
     if (channelLimit && highest > channelLimit) errors.push('物流渠道' + shippingChannels[ci] + '允许的最高价格为' + channelLimit);
   }
   if (product.size_chart_template_id && product.size_chart_image) errors.push('尺码表模板和尺码表图片只能填写一个');
@@ -2934,7 +2939,7 @@ async function shopeeHandleExport(env, taskId) {
     return json({ success: false, error: 'Shopee资源未生成完成，已阻止导出', errors: exportErrors, warnings: validation.warnings }, 400);
   }
 
-  // 列顺序必须匹配 Shopee 2026-07-20 basic template (A~AL)
+  // 列顺序必须匹配 Shopee 2026-07-21 basic template (A~AI)
   function makeRow(subTask, setIdx, variationsIdx) {
     var v = variations[variationsIdx];
     var images = productImages(setIdx, subTask.id || '');
@@ -2969,10 +2974,10 @@ async function shopeeHandleExport(env, taskId) {
       product.length_cm ?? '',                            // AA Length
       product.width_cm ?? '',                             // AB Width
       product.height_cm ?? '',                            // AC Height
-      shipping('5000'), shipping('5001'), shipping('5004'), // AD-AF Shipping
-      shipping('5012'), shipping('50039'), shipping('50052'), shipping('50053'), // AG-AJ Shipping
-      product.pre_order_dts ?? '',                        // AK Pre-order DTS
-      '',                                                 // AL Fail Reason
+      shipping('5001'), shipping('5012'),                 // AD-AE Shipping
+      shipping('50039'), shipping('50052'),               // AF-AG Shipping
+      product.pre_order_dts ?? '',                        // AH Pre-order DTS
+      '',                                                 // AI Fail Reason
     ];
   }
 
@@ -2982,10 +2987,9 @@ async function shopeeHandleExport(env, taskId) {
     for (let vi = 0; vi < variations.length; vi++) rows.push(makeRow(subTask, setIdx, vi));
   }
 
-  var shopeeColumns = ['Category','Product Name','Product Description','Parent SKU','Variation Integration No.','Variation Name1','Option for Variation 1','Image per Variation','Variation Name2','Option for Variation 2','Price','Stock','SKU','Size Chart Template','Size Chart Image','GTIN','Cover image','Item Image 1','Item Image 2','Item Image 3','Item Image 4','Item Image 5','Item Image 6','Item Image 7','Item Image 8','Weight','Length','Width','Height','Hỏa Tốc','Nhanh','Hàng Cồng Kềnh','Trong Ngày','Tủ nhận hàng - Viettel Smartbox','Tủ nhận hàng - SPX','Điểm nhận hàng','Pre-order DTS','Fail Reason'];
-  if (rows.some(row => row.length !== shopeeColumns.length)) return error('Shopee模板列映射异常', 500);
-  return json({ success: true, rows, columns: shopeeColumns, task_title: product.name, export_format: 'shopee',
-    template_file: 'Shopee_mass_upload_2026-07-20_basic_template.xlsx', template_sheet: 'Template', template_start_row: 7, template_column_count: shopeeColumns.length,
+  if (rows.some(row => row.length !== SHOPEE_TEMPLATE_COLUMNS.length)) return error('Shopee模板列映射异常', 500);
+  return json({ success: true, rows, columns: SHOPEE_TEMPLATE_COLUMNS, task_title: product.name, export_format: 'shopee',
+    template_file: SHOPEE_TEMPLATE_FILE, template_version: SHOPEE_TEMPLATE_VERSION, template_sheet: 'Template', template_start_row: 7, template_column_count: SHOPEE_TEMPLATE_COLUMNS.length,
     validation: { warnings: validation.warnings } });
 }
 
