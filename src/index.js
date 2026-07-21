@@ -15,8 +15,12 @@ import {
   jstCreatePushPlans, jstGetPushPlans, jstGetPendingPlans, jstGetPlanStats,
   jstRefundCredits,
   shopeeCreateProduct, shopeeGetProduct, shopeeDeleteProduct,
-  shopeeListStores, shopeeGetStore, shopeeGetStoreByContext, shopeeGetActiveStoreTemplate, shopeeGetStoreTemplateByHash,
-  shopeeGetTemplateCategories, shopeeGetTemplateCategory, shopeeSaveStoreTemplate, shopeeRenameStore, shopeeDisableStore,
+  shopeeListTemplateProfiles, shopeeGetTemplateProfile, shopeeGetTemplateProfileByContext,
+  shopeeGetTemplateVersion, shopeeGetCurrentTemplateVersion, shopeeGetLatestTemplateVersion, shopeeGetTemplateVersionByHash,
+  shopeeGetTemplateCategories, shopeeGetTemplateCategory, shopeeGetTemplateFields, shopeeSaveTemplateVersion,
+  shopeeUpdateTemplateUserMeta, shopeeUpdateTemplateProfile, shopeeMapTemplateField, shopeeCountUnmappedRequiredFields,
+  shopeeApproveTemplateVersion, shopeeSoftDeleteTemplateProfile, shopeeGetTemplateProfileVersions,
+  shopeeGetTemplateProfileTaskCount, shopeePurgeTemplateProfile,
   shopeeReplaceVariations,
   shopeeCreatePushPlans, shopeeGetPushPlans, shopeeGetPendingPlans, shopeeGetPlanStats,
   shopeeCreateExportRecord,
@@ -26,7 +30,7 @@ import {
 } from './db.js';
 import { generateToken, hashPassword, verifyPassword, authenticateRequest, DEFAULT_PASSWORD } from './auth.js';
 import { processSkuUploadImage } from './sku-upload-image.js';
-import { buildShopeeWorkbook, parseShopeeTemplate, sha256Hex } from './shopee-template.js';
+import { buildShopeeWorkbook, parseShopeeTemplate, sha256Hex, SHOPEE_TEMPLATE_SEMANTIC_KEYS } from './shopee-template.js';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -248,17 +252,21 @@ export default {
       if (path === '/api/config' && method === 'PUT')
         return requireAuth(request, env, () => handleUpdateConfig(request, env));
 
-      // --- Shopee 店铺模板 ---
-      if (path === '/api/shopee/stores' && method === 'GET')
-        return requireAuth(request, env, () => handleGetShopeeStores(request, env));
-      if (path === '/api/shopee/stores' && method === 'POST')
-        return requireAuth(request, env, () => handleUploadShopeeStoreTemplate(request, env));
-      if (path.match(/^\/api\/shopee\/stores\/[^\/]+$/) && method === 'GET')
-        return requireAuth(request, env, () => handleGetShopeeStore(request, env, path));
-      if (path.match(/^\/api\/shopee\/stores\/[^\/]+$/) && method === 'PUT')
-        return requireAuth(request, env, () => handleRenameShopeeStore(request, env, path));
-      if (path.match(/^\/api\/shopee\/stores\/[^\/]+$/) && method === 'DELETE')
-        return requireAuth(request, env, () => handleDisableShopeeStore(request, env, path));
+      // --- Shopee 全局模板库（/stores 保留为旧客户端兼容别名） ---
+      if ((path === '/api/shopee/template-profiles' || path === '/api/shopee/stores') && method === 'GET')
+        return requireAuth(request, env, () => handleGetShopeeTemplateProfiles(request, env));
+      if ((path === '/api/shopee/template-profiles' || path === '/api/shopee/stores') && method === 'POST')
+        return requireAuth(request, env, () => handleUploadShopeeTemplate(request, env));
+      if (path.match(/^\/api\/shopee\/template-profiles\/[^\/]+\/meta$/) && method === 'PUT')
+        return requireAuth(request, env, () => handleUpdateShopeeTemplateMeta(request, env, path));
+      if (path.match(/^\/api\/shopee\/template-profiles\/[^\/]+\/versions\/[^\/]+\/fields\/[^\/]+$/) && method === 'PUT')
+        return requireAuth(request, env, () => handleMapShopeeTemplateField(request, env, path));
+      if ((path.match(/^\/api\/shopee\/template-profiles\/[^\/]+$/) || path.match(/^\/api\/shopee\/stores\/[^\/]+$/)) && method === 'GET')
+        return requireAuth(request, env, () => handleGetShopeeTemplateProfile(request, env, path));
+      if ((path.match(/^\/api\/shopee\/template-profiles\/[^\/]+$/) || path.match(/^\/api\/shopee\/stores\/[^\/]+$/)) && method === 'PUT')
+        return requireAuth(request, env, () => path.includes('/stores/') ? handleUpdateShopeeTemplateMeta(request, env, path) : handleAdminUpdateShopeeTemplateProfile(request, env, path));
+      if ((path.match(/^\/api\/shopee\/template-profiles\/[^\/]+$/) || path.match(/^\/api\/shopee\/stores\/[^\/]+$/)) && method === 'DELETE')
+        return requireAuth(request, env, () => handleDeleteShopeeTemplateProfile(request, env, path, url));
 
       // --- 统一任务 ---
       if (path === '/api/tasks/init' && method === 'POST')
@@ -438,53 +446,118 @@ async function handleUpdateConfig(request, env) {
   return json({ success: true, message: '配置更新成功', platform });
 }
 
-// ========== Shopee 店铺模板 ===========
+// ========== Shopee 全局模板库 ===========
 
 function parseJson(value, fallback) {
   try { return JSON.parse(value); } catch (_) { return fallback; }
 }
 
-function serializeShopeeStore(store, template) {
-  const manifest = parseJson(template?.manifest_json, {});
+function shopeeTemplateVersionLabel(version, manifest) {
+  if (!version) return '';
+  const date = String(version.version_created_at || version.created_at || '').slice(0, 10) || 'unknown';
+  const fields = Number(version.field_count || 0);
+  const logistics = Number(version.logistics_count ?? manifest?.shipping_channels?.length ?? 0);
+  return `${date} · ${fields}F · ${logistics}L · ${String(version.sha256 || '').slice(0, 8)}`;
+}
+
+function serializeShopeeTemplateVersion(version) {
+  if (!version) return null;
+  const manifest = parseJson(version.manifest_json, {});
+  const id = version.version_id || version.id;
+  if (!id) return null;
   return {
-    id: store.id,
-    name: store.name,
-    template_context_id: store.template_context_id,
-    updated_at: store.updated_at,
-    template: template ? {
-      id: template.template_id || template.id,
-      filename: template.filename,
-      sha256: template.sha256,
-      signature: template.signature,
-      template_type: template.template_type,
-      field_count: template.field_count,
-      category_count: template.category_count,
-      created_at: template.template_created_at || template.created_at,
-      shipping_channels: manifest.shipping_channels || [],
-    } : null,
+    id,
+    filename: version.filename,
+    sha256: version.sha256,
+    schema_hash: version.schema_hash,
+    signature: version.signature,
+    template_type: version.template_type,
+    field_count: Number(version.field_count || 0),
+    logistics_count: Number(version.logistics_count ?? manifest.shipping_channels?.length ?? 0),
+    category_count: Number(version.category_count || 0),
+    status: version.version_status || version.status,
+    has_sensitive_data: Number(version.has_sensitive_data || 0) === 1,
+    sensitive_sheets: parseJson(version.sensitive_summary, manifest.sensitive_sheets || []),
+    warnings: manifest.unknown_optional_tokens || [],
+    unknown_required_tokens: manifest.unknown_required_tokens || [],
+    created_at: version.version_created_at || version.created_at,
+    label: shopeeTemplateVersionLabel(version, manifest),
+    shipping_channels: manifest.shipping_channels || [],
   };
 }
 
-function shopeeStoreIdFromPath(path) { return decodeURIComponent(path.split('/')[4] || ''); }
-
-async function handleGetShopeeStores(request, env) {
-  const result = await shopeeListStores(env, request.auth.username);
-  const stores = (result?.results || []).map(row => serializeShopeeStore(row, row));
-  return json({ success: true, stores });
+function serializeShopeeTemplateProfile(profile, version = profile) {
+  const template = serializeShopeeTemplateVersion(version);
+  const displayName = profile.user_alias || profile.system_name || profile.profile_code;
+  return {
+    id: profile.id,
+    market: profile.market,
+    store_context_id: profile.store_context_id,
+    template_context_id: profile.store_context_id,
+    profile_code: profile.profile_code,
+    system_name: profile.system_name,
+    display_name: displayName,
+    name: displayName,
+    status: profile.status,
+    user_alias: profile.user_alias || '',
+    user_note: profile.user_note || '',
+    is_favorite: Number(profile.is_favorite || 0) === 1,
+    current_version_id: profile.current_version_id || null,
+    updated_at: profile.updated_at,
+    template,
+  };
 }
 
-async function handleGetShopeeStore(request, env, path) {
-  const storeId = shopeeStoreIdFromPath(path);
-  const store = await shopeeGetStore(env, storeId, request.auth.username);
-  if (!store) return error('店铺不存在', 404);
-  const template = await shopeeGetActiveStoreTemplate(env, storeId);
-  if (!template) return error('店铺尚未配置可用模板', 409);
-  const categories = (await shopeeGetTemplateCategories(env, template.id))?.results || [];
-  const manifest = parseJson(template.manifest_json, {});
-  return json({ success: true, store: serializeShopeeStore(store, template), categories, shipping_channels: manifest.shipping_channels || [] });
+function shopeeTemplateProfileIdFromPath(path) {
+  const parts = path.split('/');
+  const marker = parts.indexOf('template-profiles');
+  return decodeURIComponent(parts[marker >= 0 ? marker + 1 : 4] || '');
 }
 
-async function handleUploadShopeeStoreTemplate(request, env) {
+async function handleGetShopeeTemplateProfiles(request, env) {
+  const result = await shopeeListTemplateProfiles(env, request.auth.username, request.auth.role === 'admin');
+  const profiles = (result?.results || []).map(row => serializeShopeeTemplateProfile(row));
+  return json({ success: true, profiles, stores: profiles });
+}
+
+async function handleGetShopeeTemplateProfile(request, env, path) {
+  const profileId = shopeeTemplateProfileIdFromPath(path);
+  const profile = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
+  if (!profile || (request.auth.role !== 'admin' && (profile.status !== 'active' || profile.deleted_at))) return error('模板档案不存在或不可用', 404);
+  const currentVersion = profile.current_version_id ? await shopeeGetCurrentTemplateVersion(env, profileId) : null;
+  const latestVersion = request.auth.role === 'admin' ? await shopeeGetLatestTemplateVersion(env, profileId) : currentVersion;
+  const dataVersion = currentVersion || latestVersion;
+  const categories = dataVersion ? (await shopeeGetTemplateCategories(env, dataVersion.id))?.results || [] : [];
+  const manifest = parseJson(dataVersion?.manifest_json, {});
+  const serialized = serializeShopeeTemplateProfile(profile, currentVersion || latestVersion);
+  const response = {
+    success: true,
+    profile: serialized,
+    store: serialized,
+    categories,
+    shipping_channels: manifest.shipping_channels || [],
+  };
+  if (request.auth.role === 'admin') {
+    const versions = (await shopeeGetTemplateProfileVersions(env, profileId))?.results || [];
+    const fields = latestVersion ? (await shopeeGetTemplateFields(env, latestVersion.id))?.results || [] : [];
+    response.versions = versions.map(serializeShopeeTemplateVersion);
+    response.review_version = latestVersion && latestVersion.status !== 'ready' ? serializeShopeeTemplateVersion(latestVersion) : null;
+    response.fields = fields;
+    response.semantic_registry = [...new Set([...SHOPEE_TEMPLATE_SEMANTIC_KEYS, ...fields.map(field => field.semantic_key).filter(Boolean)])].sort();
+  }
+  return json(response);
+}
+
+function normalizeShopeeTemplateUserMeta(input, fallback = {}) {
+  const alias = String(input.alias ?? input.name ?? fallback.user_alias ?? '').trim();
+  const note = String(input.note ?? fallback.user_note ?? '').trim();
+  const isFavorite = input.is_favorite === undefined ? Number(fallback.is_favorite || 0) === 1 : isEnabled(input.is_favorite);
+  if (alias.length > 60) throw new Error('用户别名不能超过60字符');
+  if (note.length > 500) throw new Error('用户备注不能超过500字符');
+  return { alias, note, is_favorite: isFavorite };
+}
+
+async function handleUploadShopeeTemplate(request, env) {
   const formData = await parseBody(request);
   if (!(formData instanceof FormData)) return error('请使用 multipart/form-data 上传店铺模板', 400);
   const file = formData.get('file');
@@ -492,8 +565,12 @@ async function handleUploadShopeeStoreTemplate(request, env) {
   const filename = String(file.name || '').trim();
   if (!/\.xlsx$/i.test(filename)) return error('仅支持 Shopee 下载的 .xlsx 基础模板', 400);
   if (file.size < 1 || file.size > 5 * 1024 * 1024) return error('模板文件大小必须在 1B 到 5MB 之间', 400);
-  const storeNameInput = String(formData.get('name') || '').trim();
-  if (storeNameInput.length > 60) return error('店铺名称不能超过60字符', 400);
+  let userMeta;
+  try {
+    userMeta = normalizeShopeeTemplateUserMeta({ alias: formData.get('alias') ?? formData.get('name'), note: formData.get('note'), is_favorite: formData.get('is_favorite') });
+  } catch (err) {
+    return error(err.message, 400);
+  }
   const buffer = await file.arrayBuffer();
   let parsed;
   try {
@@ -501,75 +578,156 @@ async function handleUploadShopeeStoreTemplate(request, env) {
   } catch (err) {
     return error(err.message || '模板解析失败', 400);
   }
-  const contextId = parsed.manifest.context_id;
-  const requestedStoreId = String(formData.get('store_id') || '').trim();
-  let store = requestedStoreId ? await shopeeGetStore(env, requestedStoreId, request.auth.username) : await shopeeGetStoreByContext(env, request.auth.username, contextId);
-  if (requestedStoreId && !store) return error('店铺不存在或无权更新', 404);
-  if (store && store.template_context_id !== contextId) return error('该模板属于另一店铺，D2 店铺上下文不匹配', 400);
-  const storeId = store?.id || uuid(16);
-  const storeName = storeNameInput || store?.name || `Shopee 店铺 ${contextId}`;
-  if (!storeName) return error('请填写店铺名称', 400);
+  const market = 'VN';
+  const storeContextId = parsed.manifest.store_context_id;
+  const requestedProfileId = String(formData.get('profile_id') || formData.get('store_id') || '').trim();
+  let profile = requestedProfileId
+    ? await shopeeGetTemplateProfile(env, requestedProfileId, request.auth.username)
+    : await shopeeGetTemplateProfileByContext(env, market, storeContextId);
+  if (requestedProfileId && !profile) return error('模板档案不存在', 404);
+  if (profile && profile.store_context_id !== storeContextId) return error('该文件属于另一店铺上下文，store_context_id 不匹配', 400);
+  if (profile?.status === 'deleted') return error('该模板档案已删除，请由管理员恢复后再上传', 409);
+  const profileId = profile?.id || `shp-vn-${storeContextId}`;
+  const profileCode = `SHP-VN-${storeContextId}`;
   const sha256 = await sha256Hex(buffer);
-  const duplicate = await shopeeGetStoreTemplateByHash(env, storeId, sha256);
+  const schemaHash = await sha256Hex(new TextEncoder().encode(parsed.schema_source));
+  const duplicate = await shopeeGetTemplateVersionByHash(env, profileId, sha256);
   if (duplicate) {
-    await env.DB.batch([
-      env.DB.prepare("UPDATE ews_shopee_stores SET name=?, is_active=1, updated_at=datetime('now') WHERE id=? AND user_id=?").bind(storeName, storeId, request.auth.username),
-      env.DB.prepare("UPDATE ews_shopee_store_templates SET is_active=0 WHERE store_id=?").bind(storeId),
-      env.DB.prepare("UPDATE ews_shopee_store_templates SET is_active=1 WHERE id=?").bind(duplicate.id),
-    ]);
-    const refreshed = await shopeeGetStore(env, storeId, request.auth.username);
-    return json({ success: true, duplicate: true, store: serializeShopeeStore(refreshed, duplicate), message: '该模板已存在，已恢复为当前版本' });
+    await shopeeUpdateTemplateUserMeta(env, profileId, request.auth.username, userMeta);
+    if (duplicate.status === 'ready' && !['disabled', 'deleted'].includes(profile.status)) await shopeeApproveTemplateVersion(env, profileId, duplicate.id, request.auth.username);
+    const refreshed = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
+    const serialized = serializeShopeeTemplateProfile(refreshed, duplicate);
+    return json({ success: true, duplicate: true, profile: serialized, store: serialized, message: '该文件已存在，已更新你的别名和备注' });
   }
-  const templateId = uuid(20);
-  const r2Key = `ews/shopee-templates/${storeId}/${templateId}.xlsx`;
+  const unknownRequired = parsed.manifest.unknown_required_tokens || [];
+  const sensitiveSheets = parsed.manifest.sensitive_sheets || [];
+  const versionStatus = unknownRequired.length ? 'pending_mapping' : (sensitiveSheets.length ? 'pending_review' : 'ready');
+  const versionId = uuid(20);
+  const r2Key = `ews/shopee-template-library/${profileId}/${versionId}.xlsx`;
   try {
     await env.R2.put(r2Key, buffer, { httpMetadata: { contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' } });
-    await shopeeSaveStoreTemplate(env, {
-      id: storeId,
-      user_id: request.auth.username,
-      name: storeName,
-      template_context_id: contextId,
+    await shopeeSaveTemplateVersion(env, {
+      id: profileId,
+      market,
+      store_context_id: storeContextId,
+      profile_code: profileCode,
+      system_name: profile?.system_name || profileCode,
+      status: versionStatus === 'ready' ? 'active' : versionStatus,
+      created_by: request.auth.username,
     }, {
-      id: templateId,
+      id: versionId,
+      uploaded_by: request.auth.username,
       filename,
       r2_key: r2Key,
       sha256,
+      schema_hash: schemaHash,
       signature: parsed.manifest.signature,
       template_type: parsed.manifest.template_type,
       field_count: parsed.manifest.field_count,
+      logistics_count: parsed.manifest.shipping_channels.length,
       category_count: parsed.manifest.category_count,
       manifest_json: JSON.stringify(parsed.manifest),
-    }, parsed.categories);
+      status: versionStatus,
+      has_sensitive_data: sensitiveSheets.length > 0,
+      sensitive_summary: JSON.stringify(sensitiveSheets),
+      approved_by: versionStatus === 'ready' ? request.auth.username : null,
+      approved_at: versionStatus === 'ready' ? new Date().toISOString() : null,
+    }, parsed.manifest.fields, parsed.categories, userMeta);
   } catch (err) {
     await env.DB.batch([
-      env.DB.prepare("DELETE FROM ews_shopee_template_categories WHERE template_id=?").bind(templateId),
-      env.DB.prepare("DELETE FROM ews_shopee_store_templates WHERE id=? AND is_active=0").bind(templateId),
+      env.DB.prepare("DELETE FROM ews_shopee_template_version_categories WHERE version_id=?").bind(versionId),
+      env.DB.prepare("DELETE FROM ews_shopee_template_fields WHERE version_id=?").bind(versionId),
+      env.DB.prepare("DELETE FROM ews_shopee_template_versions WHERE id=?").bind(versionId),
+      env.DB.prepare("DELETE FROM ews_shopee_template_profiles WHERE id=? AND current_version_id IS NULL AND NOT EXISTS (SELECT 1 FROM ews_shopee_template_versions WHERE profile_id=?)").bind(profileId, profileId),
     ]).catch(() => {});
     await env.R2.delete(r2Key).catch(() => {});
     console.error('Shopee template save failed:', err.message);
     return error('模板保存失败，请稍后重试', 503);
   }
-  const savedStore = await shopeeGetStore(env, storeId, request.auth.username);
-  const savedTemplate = await shopeeGetActiveStoreTemplate(env, storeId);
-  return json({ success: true, store: serializeShopeeStore(savedStore, savedTemplate), message: '店铺模板已解析并启用' }, 201);
+  const savedProfile = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
+  const savedVersion = await shopeeGetTemplateVersion(env, versionId);
+  const serialized = serializeShopeeTemplateProfile(savedProfile, savedVersion);
+  const message = versionStatus === 'ready'
+    ? '模板已通过结构推理并成为当前版本'
+    : versionStatus === 'pending_mapping'
+      ? `发现 ${unknownRequired.length} 个未知必填 token，已进入管理员映射队列`
+      : '检测到店铺私有隐藏数据，已进入管理员审核队列';
+  return json({ success: true, profile: serialized, store: serialized, review_required: versionStatus !== 'ready', message }, 201);
 }
 
-async function handleRenameShopeeStore(request, env, path) {
-  const storeId = shopeeStoreIdFromPath(path);
-  const name = String((await parseBody(request))?.name || '').trim();
-  if (!name || name.length > 60) return error('店铺名称必须为1~60个字符', 400);
-  const store = await shopeeGetStore(env, storeId, request.auth.username);
-  if (!store) return error('店铺不存在', 404);
-  await shopeeRenameStore(env, storeId, request.auth.username, name);
-  return json({ success: true, message: '店铺名称已更新' });
+async function handleUpdateShopeeTemplateMeta(request, env, path) {
+  const profileId = shopeeTemplateProfileIdFromPath(path);
+  const profile = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
+  if (!profile || profile.status === 'deleted') return error('模板档案不存在', 404);
+  let meta;
+  try { meta = normalizeShopeeTemplateUserMeta(await parseBody(request) || {}, profile); }
+  catch (err) { return error(err.message, 400); }
+  await shopeeUpdateTemplateUserMeta(env, profileId, request.auth.username, meta);
+  const refreshed = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
+  return json({ success: true, profile: serializeShopeeTemplateProfile(refreshed), message: '个人别名和备注已更新' });
 }
 
-async function handleDisableShopeeStore(request, env, path) {
-  const storeId = shopeeStoreIdFromPath(path);
-  const store = await shopeeGetStore(env, storeId, request.auth.username);
-  if (!store) return error('店铺不存在', 404);
-  await shopeeDisableStore(env, storeId, request.auth.username);
-  return json({ success: true, message: '店铺已停用，历史任务和原模板仍保留' });
+async function handleMapShopeeTemplateField(request, env, path) {
+  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  const parts = path.split('/');
+  const profileId = decodeURIComponent(parts[4] || '');
+  const versionId = decodeURIComponent(parts[6] || '');
+  const token = decodeURIComponent(parts[8] || '');
+  const semanticKey = String((await parseBody(request))?.semantic_key || '').trim();
+  if (!SHOPEE_TEMPLATE_SEMANTIC_KEYS.includes(semanticKey) && !/^channel_id\.\d+$/.test(semanticKey)) return error('语义字段不在系统 token 注册表中', 400);
+  const version = await shopeeGetTemplateVersion(env, versionId);
+  if (!version || version.profile_id !== profileId) return error('模板版本不存在', 404);
+  const fields = (await shopeeGetTemplateFields(env, versionId))?.results || [];
+  if (!fields.some(field => field.token === token)) return error('模板字段不存在', 404);
+  if (fields.some(field => field.token !== token && field.semantic_key === semanticKey)) return error('该语义字段已映射到当前版本的另一 token', 409);
+  await shopeeMapTemplateField(env, versionId, token, semanticKey, request.auth.username);
+  return json({ success: true, message: 'token 语义映射已保存' });
+}
+
+async function handleAdminUpdateShopeeTemplateProfile(request, env, path) {
+  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  const profileId = shopeeTemplateProfileIdFromPath(path);
+  const profile = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
+  if (!profile) return error('模板档案不存在', 404);
+  const body = await parseBody(request) || {};
+  const systemName = String(body.system_name ?? profile.system_name).trim();
+  if (!systemName || systemName.length > 80) return error('系统名称必须为1~80字符', 400);
+  const status = String(body.status || (profile.status === 'disabled' ? 'disabled' : 'active'));
+  if (!['active', 'disabled'].includes(status)) return error('档案状态仅支持 active 或 disabled', 400);
+  const approveVersionId = String(body.approve_version_id || '').trim();
+  if (approveVersionId) {
+    const version = await shopeeGetTemplateVersion(env, approveVersionId);
+    if (!version || version.profile_id !== profileId || version.deleted_at) return error('待审核版本不存在', 404);
+    const unmappedCount = await shopeeCountUnmappedRequiredFields(env, approveVersionId);
+    if (unmappedCount) return error(`仍有 ${unmappedCount} 个未知必填 token 未映射`, 409);
+    if (Number(version.has_sensitive_data || 0) === 1 && !isEnabled(body.confirm_sensitive)) return error('该版本含店铺私有隐藏数据，必须明确确认后才能共享', 409);
+    await shopeeApproveTemplateVersion(env, profileId, approveVersionId, request.auth.username);
+  }
+  const current = await shopeeGetCurrentTemplateVersion(env, profileId);
+  if (status === 'active' && !current) return error('档案没有已批准版本，不能启用', 409);
+  await shopeeUpdateTemplateProfile(env, profileId, systemName, status);
+  const refreshed = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
+  return json({ success: true, profile: serializeShopeeTemplateProfile(refreshed), message: approveVersionId ? '模板版本已审核并启用' : '模板档案已更新' });
+}
+
+async function handleDeleteShopeeTemplateProfile(request, env, path, url) {
+  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  const profileId = shopeeTemplateProfileIdFromPath(path);
+  const profile = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
+  if (!profile) return error('模板档案不存在', 404);
+  if (url.searchParams.get('purge') !== '1') {
+    await shopeeSoftDeleteTemplateProfile(env, profileId);
+    return json({ success: true, message: '模板档案已软删除，历史任务仍可使用保留版本导出' });
+  }
+  if (profile.status !== 'deleted' || !profile.deleted_at) return error('只能彻底清理已软删除的模板档案', 409);
+  const deletedAt = new Date(`${String(profile.deleted_at).replace(' ', 'T')}Z`).getTime();
+  if (!Number.isFinite(deletedAt) || Date.now() - deletedAt < 30 * 86400000) return error('模板档案软删除后需保留30天', 409);
+  if (await shopeeGetTemplateProfileTaskCount(env, profileId)) return error('仍有任务引用该模板档案，禁止彻底清理', 409);
+  const versions = (await shopeeGetTemplateProfileVersions(env, profileId))?.results || [];
+  try { await Promise.all(versions.map(version => env.R2.delete(version.r2_key))); }
+  catch (err) { return error('R2 原始模板清理失败，D1 记录已保留', 503); }
+  await shopeePurgeTemplateProfile(env, profileId);
+  return json({ success: true, message: '模板档案、历史版本和 R2 原始文件已清理' });
 }
 
 // ========== 用户管理 ==========
@@ -910,17 +1068,17 @@ async function handleUpdateTask(request, env, path, idx) {
   const body = await parseBody(request);
 
   if (idx.platform === 'shopee') {
-    const { store_id, name, source_brief, product_type, main_description, reference_title, reference_image, auxiliary_images, generate_count, mode, category_id, cover_image, images, length_cm, width_cm, height_cm, gtin, variation_name1, variation_name2, variation_image_mode, size_chart_template_id, size_chart_image, pre_order_dts, shipping_channels, variations } = body || {};
+    const { template_profile_id, store_id, name, source_brief, product_type, main_description, reference_title, reference_image, auxiliary_images, generate_count, mode, category_id, cover_image, images, length_cm, width_cm, height_cm, gtin, variation_name1, variation_name2, variation_image_mode, size_chart_template_id, size_chart_image, pre_order_dts, shipping_channels, variations } = body || {};
     const taskName = String(name || '').trim();
     if (!taskName) return error('任务名称不能为空', 400);
     if (taskName.length > 30) return error('任务名称不能超过30字符', 400);
-    const storeId = String(store_id || '').trim();
-    if (!storeId) return error('请选择 Shopee 店铺模板', 400);
-    const store = await shopeeGetStore(env, storeId, idx.user_id);
-    if (!store || store.is_active === 0) return error('所选 Shopee 店铺不存在或已停用', 400);
-    const storeTemplate = await shopeeGetActiveStoreTemplate(env, storeId);
-    if (!storeTemplate) return error('所选店铺没有可用模板', 400);
-    const templateManifest = parseJson(storeTemplate.manifest_json, {});
+    const templateProfileId = String(template_profile_id || store_id || '').trim();
+    if (!templateProfileId) return error('请选择 Shopee 全局模板档案', 400);
+    const templateProfile = await shopeeGetTemplateProfile(env, templateProfileId, idx.user_id);
+    if (!templateProfile || templateProfile.status !== 'active' || templateProfile.deleted_at) return error('所选 Shopee 模板档案不存在或不可用', 400);
+    const templateVersion = await shopeeGetCurrentTemplateVersion(env, templateProfileId);
+    if (!templateVersion || templateVersion.status !== 'ready') return error('所选模板档案没有已批准版本', 400);
+    const templateManifest = parseJson(templateVersion.manifest_json, {});
     const templateShipping = Array.isArray(templateManifest.shipping_channels) ? templateManifest.shipping_channels : [];
     const allowedShippingIds = templateShipping.map(channel => String(channel.id));
     if (!allowedShippingIds.length) return error('店铺模板没有可用物流渠道，请重新上传模板', 400);
@@ -1022,8 +1180,8 @@ async function handleUpdateTask(request, env, path, idx) {
     if (preOrderDts !== null && (!Number.isInteger(preOrderDts) || preOrderDts < 5 || preOrderDts > 30)) return error('预售DTS必须为5~30天', 400);
     const categoryId = String(category_id || '').trim();
     if (categoryId && !/^\d+$/.test(categoryId)) return error('Category ID 必须为数字', 400);
-    const templateCategory = categoryId ? await shopeeGetTemplateCategory(env, storeTemplate.id, categoryId) : null;
-    if (categoryId && !templateCategory) return error('所选 Category ID 不在当前店铺模板中', 400);
+    const templateCategory = categoryId ? await shopeeGetTemplateCategory(env, templateVersion.id, categoryId) : null;
+    if (categoryId && !templateCategory) return error('所选 Category ID 不在当前模板版本中', 400);
     if (preOrderDts !== null && templateCategory?.dts_min !== null && templateCategory?.dts_min !== undefined) {
       if (preOrderDts < Number(templateCategory.dts_min) || preOrderDts > Number(templateCategory.dts_max)) {
         return error(`该分类的 Pre-order DTS 范围为 ${templateCategory.dts_range}`, 400);
@@ -1031,7 +1189,7 @@ async function handleUpdateTask(request, env, path, idx) {
     }
     await env.DB.prepare("UPDATE ews_tasks SET name=?, status='pending', updated_at=datetime('now') WHERE id=?").bind(taskName, taskId).run();
     await shopeeCreateProduct(env, {
-      id: taskId, task_id: taskId, store_id: storeId, name: taskName, category_id: categoryId,
+      id: taskId, task_id: taskId, template_profile_id: templateProfileId, template_version_id: templateVersion.id, name: taskName, category_id: categoryId,
       source_brief: sourceBrief, product_type: productType,
       main_description: main_description || '',
       reference_title: String(reference_title || '').trim(),
@@ -2881,16 +3039,6 @@ async function jstHandleExport(env, taskId) {
 }
 
 // ========== Shopee 模板校验 ==========
-const SHOPEE_EXPORT_TOKEN_KEYS = new Set([
-  'ps_category', 'ps_product_name', 'ps_product_description', 'ps_sku_parent_short',
-  'et_title_variation_integration_no', 'et_title_variation_1', 'et_title_option_for_variation_1',
-  'et_title_image_per_variation', 'et_title_variation_2', 'et_title_option_for_variation_2',
-  'ps_price', 'ps_stock', 'ps_sku_short', 'ps_new_size_chart', 'et_title_size_chart', 'ps_gtin_code',
-  'ps_item_cover_image', 'ps_item_image_1', 'ps_item_image_2', 'ps_item_image_3', 'ps_item_image_4',
-  'ps_item_image_5', 'ps_item_image_6', 'ps_item_image_7', 'ps_item_image_8',
-  'ps_weight', 'ps_length', 'ps_width', 'ps_height', 'ps_product_pre_order_dts', 'et_title_reason',
-]);
-
 function validateShopeeRow(product, variations, templateManifest, templateCategory) {
   var warnings = []; var errors = [];
   var n = product.name || '';
@@ -3010,18 +3158,28 @@ function validateShopeeRow(product, variations, templateManifest, templateCatego
 async function shopeeHandleExport(env, taskId) {
   const product = await shopeeGetProduct(env, taskId);
   if (!product) return error('商品不存在', 404);
-  if (!product.store_id) return error('任务未关联 Shopee 店铺模板，请在任务中重新选择店铺', 409);
-  const storeTemplate = await shopeeGetActiveStoreTemplate(env, product.store_id);
-  if (!storeTemplate) return error('任务关联的店铺没有可用模板，请先上传最新模板', 409);
-  const templateManifest = parseJson(storeTemplate.manifest_json, {});
-  const unknownMandatoryFields = (templateManifest.fields || []).filter(field =>
-    String(field.requirement || '').trim().toLowerCase() === 'mandatory' &&
-    !SHOPEE_EXPORT_TOKEN_KEYS.has(field.key) && !/^channel_id\.\d+$/.test(field.key)
-  );
+  if (!product.template_profile_id) return error('任务未关联 Shopee 全局模板档案，请重新保存任务', 409);
+  const templateProfile = await shopeeGetTemplateProfile(env, product.template_profile_id);
+  if (!templateProfile) return error('任务关联的模板档案不存在', 409);
+  const currentVersion = await shopeeGetCurrentTemplateVersion(env, product.template_profile_id);
+  const templateVersion = currentVersion || (product.template_version_id ? await shopeeGetTemplateVersion(env, product.template_version_id) : null);
+  if (!templateVersion) return error('模板档案没有可用于导出的版本', 409);
+  const templateManifest = parseJson(templateVersion.manifest_json, {});
+  const registeredFields = (await shopeeGetTemplateFields(env, templateVersion.id))?.results || [];
+  const fieldMappings = new Map(registeredFields.map(field => [field.token, field]));
+  templateManifest.fields = (templateManifest.fields || []).map(field => {
+    const registered = fieldMappings.get(field.token);
+    return { ...field, semantic_key: registered?.semantic_key || field.semantic_key || '' };
+  });
+  const unknownMandatoryFields = templateManifest.fields.filter(field => {
+    const registered = fieldMappings.get(field.token);
+    const required = registered ? Number(registered.is_required || 0) === 1 : /mandatory|required/i.test(String(field.requirement || ''));
+    return required && !(registered?.semantic_key || field.semantic_key);
+  });
   if (unknownMandatoryFields.length) {
-    return json({ success: false, error: '店铺模板出现系统尚未适配的必填字段', errors: unknownMandatoryFields.map(field => `${field.label || field.key} (${field.key})`) }, 409);
+    return json({ success: false, error: '模板版本仍有未映射的必填 token', errors: unknownMandatoryFields.map(field => `${field.label || field.key} (${field.token || field.key})`) }, 409);
   }
-  const templateCategory = product.category_id ? await shopeeGetTemplateCategory(env, storeTemplate.id, product.category_id) : null;
+  const templateCategory = product.category_id ? await shopeeGetTemplateCategory(env, templateVersion.id, product.category_id) : null;
   const skuImagePlan = await getOne(env, "SELECT 1 AS present FROM ews_shopee_push_plans WHERE task_id=? AND webhook_type GLOB 'sku_[0-9]*' LIMIT 1", [taskId]);
   const skuImagePlanned = !!skuImagePlan?.present;
   const variations = product.variations || [];
@@ -3198,8 +3356,8 @@ async function shopeeHandleExport(env, taskId) {
     for (let vi = 0; vi < variations.length; vi++) rows.push(makeRow(subTask, setIdx, vi));
   }
 
-  const templateObject = await env.R2.get(storeTemplate.r2_key);
-  if (!templateObject) return error('店铺原始模板文件不存在，请重新上传模板', 409);
+  const templateObject = await env.R2.get(templateVersion.r2_key);
+  if (!templateObject) return error('模板原始文件不存在，请重新上传该模板版本', 409);
   try {
     const workbook = buildShopeeWorkbook(await templateObject.arrayBuffer(), templateManifest, rows);
     const safeName = String(product.name || taskId.slice(0, 8)).replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').slice(0, 60) || taskId.slice(0, 8);

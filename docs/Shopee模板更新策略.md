@@ -1,37 +1,52 @@
-# Shopee 店铺模板适配策略
+# Shopee 全局模板库适配策略
 
 ## 运行原则
 
-系统不再内置一份全局 Shopee 导出模板，也不按文件名或日期硬编码列号。每个用户先上传从对应店铺 Seller Centre 下载的最新 `Basic Template`，系统保存原始 `.xlsx` 并提取模板契约。
+系统不内置固定 Shopee 导出模板，也不按文件名、工作表名称、日期或固定行列定位字段。用户上传对应店铺从 Seller Centre 下载的最新 `Basic Template`，Worker 通过“结构推理 + token 注册表”保存并共享已批准版本。
 
-高级模板不作为当前运行时导出载体。当前创建页只支持基础模板；如果未来需要类目专属属性，应单独增加高级属性模板或 Open API 适配，不向基础模板伪造不存在的列。
+高级模板不作为当前运行时导出载体。如果未来需要类目专属属性，应单独增加高级属性模板或 Open API 适配，不向基础模板伪造不存在的列。
 
-## 模板解析
+## 全局档案
 
-Worker 使用 `fflate` 解压和 `fast-xml-parser` 解析以下信息：
+- `ews_shopee_template_profiles`：按 `UNIQUE(market, store_context_id)` 保存全局档案，默认编码为 `SHP-VN-{store_context_id}`。
+- `ews_shopee_template_versions`：保存历史版本、R2 Key、SHA256、Schema Hash 和审核状态。
+- `ews_shopee_template_user_meta`：保存每个用户自己的别名、备注和收藏，不修改全局辨识信息。
+- `ews_shopee_template_fields`：保存 token、数据类型、必填性、语义映射和映射状态。
 
-- `Template!A2:D2`：模板类型、签名、分类范围和店铺上下文 `D2`。
-- `Template` 第 1 行：隐藏 token，是唯一的运行时字段定位依据。
-- 第 3、4、5、6 行：显示名称、必填规则、说明和填写限制。
-- `channel_id.*`：当前店铺的物流渠道及价格限制。
-- `Pre-order DTS Range`：分类 ID、分类路径和有效 DTS 范围。
+模板元数据中的 D2 仅命名为 `store_context_id`。现有证据只能确认它是店铺模板上下文，不能宣称为 Shopee 官方 Shop ID。
 
-模板文件和 `sha256` 保存到 R2；字段 manifest 与分类目录保存到 D1。`D2` 只作为店铺模板上下文标识，不当作官方 API 店铺 ID 使用。相同用户和相同 `D2` 的新模板会替换当前版本，旧版本仍保留在数据库和 R2 中。
+## 结构推理
+
+Worker 使用 `fflate` 解压并通过 `fast-xml-parser` 完成以下步骤：
+
+1. 扫描全部工作表，寻找同时包含 `ps_product_name`、`ps_price`、`ps_weight` 的隐藏 token 锚点。
+2. 依据店铺上下文元数据完整度区分正式商品页和 Upload sample，不固定依赖 `Template` 名称。
+3. 推导元数据、显示名称、必填规则、说明、限制和数据起始行。
+4. 识别 `channel_id.*`、`ps_item_image_*` 等字段族，并从 token 注册表获得系统语义。
+5. 从各工作表的数值密度和相邻文本推断 Category ID、分类路径和 DTS 范围。
+6. 计算 Schema Hash；SHA256 相同视为重复文件，Schema Hash 相同但文件不同视为同结构新版本。
+7. 未知可选 token 留空并警告；未知必填 token 进入 `pending_mapping`，管理员映射前不能成为当前版本。
+
+缺少官方隐藏 token、结构损坏、宏、外部链接、嵌入对象或非 `basic` 类型的文件直接拒绝，不能按可见列名猜测导出。
+
+## 私有数据
+
+解析器检查 `HiddenShopBrand` 和 `HiddenTax`。任一工作表存在非空单元格时，版本进入 `pending_review`；管理员必须确认不会造成品牌或税务配置串店，才能全局共享。原始 XLSX 不提供公共下载端点，只能由任务导出流程在 Worker 内部读取。
 
 ## 导出流程
 
-1. 任务创建时必须选择一个用户自己的店铺模板。
+1. 任务关联 `template_profile_id`，并记录创建时 `template_version_id` 供审计。
 2. 任务只保存商品、SKU、图片和物流等语义数据，不保存 Excel 列号。
-3. 导出时读取该店铺当前模板的 token manifest。
-4. Worker 按 token 构造数据行，并对原始 XLSX 的 `Template` 工作表只注入第 7 行开始的数据。
-5. 其他 ZIP/XML 文件原样保留，包括 `dataValidations`、工作表保护、隐藏字段和隐藏工作表。
+3. 导出默认读取档案当前最新版；当前版本不可用时，历史任务才回退到创建时版本。
+4. Worker 将数据库中的 token 映射合并到 manifest，再按语义字段向推导出的数据起始行写入。
+5. 其他 ZIP/XML 内容原样保留，包括 `dataValidations`、工作表保护和隐藏工作表。
 
-如果模板出现系统未适配的新增必填 token，导出会阻断并列出字段；未知可选字段保持空白。物流列新增、删除或调序不需要修改业务代码。
+管理员删除采用软删除，历史任务仍可导出。只有软删除超过 30 天且无任何任务引用时，才允许同时清理 D1 记录和 R2 原始版本。
 
 ## 更新验收
 
-- 检查模板类型必须为 `basic`，拒绝 `advanced`、宏文件、外部链接和嵌入对象。
-- 检查 `Template`、`Pre-order DTS Range`、签名、`D2`、隐藏 token 和分类目录。
-- 比较原始与导出文件的 ZIP 条目数、`dataValidations` 数量、`sheetProtection` 和隐藏工作表。
+- 使用多个店铺模板验证工作表名称、字段数和物流数变化时仍能定位结构。
+- 比较原始与导出文件的 ZIP 条目、`dataValidations`、`sheetProtection` 和隐藏工作表。
+- 验证同一 `store_context_id` 全局唯一、SHA256 去重、版本切换和用户备注隔离。
+- 验证未知必填 token 与私有隐藏数据在审核前不会替换当前可用版本。
 - 使用当前店铺实际模板上传 Shopee，验证物流渠道、分类和图片 URL。
-- 官方更新后只要求用户重新上传店铺模板，不再发布前端模板文件或修改固定列数组。

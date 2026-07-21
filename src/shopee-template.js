@@ -4,7 +4,6 @@ import { XMLParser } from 'fast-xml-parser';
 const MAX_TEMPLATE_BYTES = 5 * 1024 * 1024;
 const MAX_TEMPLATE_ENTRIES = 100;
 const MAX_TEMPLATE_UNCOMPRESSED_BYTES = 24 * 1024 * 1024;
-const TEMPLATE_START_ROW = 7;
 const FORBIDDEN_ENTRY_PARTS = ['/vbaproject.', '/externallinks/', '/embeddings/', '/activex/'];
 const NUMBER_TOKENS = new Set([
   'ps_category',
@@ -16,6 +15,20 @@ const NUMBER_TOKENS = new Set([
   'ps_height',
   'ps_product_pre_order_dts',
 ]);
+const TOKEN_SEMANTICS = new Set([
+  'ps_category', 'ps_product_name', 'ps_product_description', 'ps_sku_parent_short',
+  'et_title_variation_integration_no', 'et_title_variation_1', 'et_title_option_for_variation_1',
+  'et_title_image_per_variation', 'et_title_variation_2', 'et_title_option_for_variation_2',
+  'ps_price', 'ps_stock', 'ps_sku_short', 'ps_new_size_chart', 'et_title_size_chart', 'ps_gtin_code',
+  'ps_item_cover_image', 'ps_item_image_1', 'ps_item_image_2', 'ps_item_image_3', 'ps_item_image_4',
+  'ps_item_image_5', 'ps_item_image_6', 'ps_item_image_7', 'ps_item_image_8',
+  'ps_weight', 'ps_length', 'ps_width', 'ps_height', 'ps_product_pre_order_dts', 'et_title_reason',
+]);
+const CORE_TEMPLATE_TOKENS = ['ps_product_name', 'ps_price', 'ps_weight'];
+const REQUIRED_TEMPLATE_TOKENS = ['ps_product_name', 'ps_product_description', 'ps_price', 'ps_weight'];
+const SENSITIVE_SHEET_NAMES = new Set(['hiddenshopbrand', 'hiddentax']);
+
+export const SHOPEE_TEMPLATE_SEMANTIC_KEYS = Object.freeze([...TOKEN_SEMANTICS].sort());
 
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -108,11 +121,11 @@ function workbookSheets(files) {
   const workbook = parser.parse(decodeXml(workbookBytes));
   const relationships = parser.parse(decodeXml(relsBytes));
   const targets = new Map(asArray(relationships?.Relationships?.Relationship).map(rel => [String(rel?.['@_Id'] || ''), normalizeZipPath(workbookPath, rel?.['@_Target'])]));
-  const sheets = new Map();
+  const sheets = [];
   for (const sheet of asArray(workbook?.workbook?.sheets?.sheet)) {
     const name = String(sheet?.['@_name'] || '');
     const path = targets.get(String(sheet?.['@_id'] || '')) || '';
-    if (name && path) sheets.set(name, path);
+    if (name && path) sheets.push({ name, path, state: String(sheet?.['@_state'] || 'visible') });
   }
   return sheets;
 }
@@ -168,6 +181,118 @@ function tokenKey(token) {
   return String(token || '').split('|', 1)[0];
 }
 
+function tokenDefinition(token) {
+  const key = tokenKey(token);
+  const dynamic = /^channel_id\.\d+$/.test(key);
+  const semanticKey = TOKEN_SEMANTICS.has(key) || dynamic ? key : '';
+  return {
+    key,
+    semantic_key: semanticKey,
+    data_type: NUMBER_TOKENS.has(semanticKey) ? 'number' : 'string',
+  };
+}
+
+function isRequiredRequirement(value) {
+  return /mandatory|required|bắt buộc/i.test(String(value || ''));
+}
+
+function countPopulatedColumns(rows, rowNumber, columns) {
+  return columns.reduce((count, index) => count + (cell(rows, rowNumber, index) ? 1 : 0), 0);
+}
+
+function locateProductSheet(sheets, rowsForSheet) {
+  const candidates = [];
+  for (const sheet of sheets) {
+    const rows = rowsForSheet(sheet);
+    for (const [rowNumber, values] of rows) {
+      const keys = new Set([...values.values()].map(tokenKey).filter(Boolean));
+      if (!CORE_TEMPLATE_TOKENS.every(key => keys.has(key))) continue;
+      const tokenCount = [...keys].filter(key => key.startsWith('ps_') || key.startsWith('et_title_') || key.startsWith('channel_id.')).length;
+      const hasStoreContext = [...rows.keys()].some(candidateRow =>
+        candidateRow !== rowNumber && Math.abs(candidateRow - rowNumber) <= 12
+        && cell(rows, candidateRow, 0).toLowerCase() === 'basic'
+        && cell(rows, candidateRow, 1) && cell(rows, candidateRow, 3));
+      candidates.push({ sheet, rows, token_row: rowNumber, score: tokenCount + (hasStoreContext ? 1000 : 0) });
+    }
+  }
+  candidates.sort((left, right) => right.score - left.score);
+  if (!candidates.length) throw new Error('模板缺少 Shopee 官方隐藏 token，无法识别商品工作表');
+  if (candidates.length > 1 && candidates[0].score === candidates[1].score) throw new Error('模板包含多个无法区分的商品工作表');
+  return candidates[0];
+}
+
+function locateMetadataRow(rows, tokenRow) {
+  const candidates = [...rows.keys()].filter(rowNumber => rowNumber !== tokenRow && Math.abs(rowNumber - tokenRow) <= 12);
+  for (const rowNumber of candidates.sort((left, right) => Math.abs(left - tokenRow) - Math.abs(right - tokenRow))) {
+    const templateType = cell(rows, rowNumber, 0).toLowerCase();
+    if (templateType && cell(rows, rowNumber, 1) && cell(rows, rowNumber, 3)) return rowNumber;
+  }
+  throw new Error('模板缺少店铺上下文元数据，请重新从 Seller Centre 下载');
+}
+
+function inferLayoutRows(rows, tokenRow, metadataRow, columns) {
+  const nearby = [...rows.keys()].filter(rowNumber => rowNumber > tokenRow && rowNumber <= tokenRow + 16 && rowNumber !== metadataRow);
+  const requirementCandidates = nearby.map(rowNumber => ({
+    row: rowNumber,
+    score: columns.reduce((count, index) => count + (/mandatory|optional|required|bắt buộc/i.test(cell(rows, rowNumber, index)) ? 1 : 0), 0),
+  })).sort((left, right) => right.score - left.score);
+  const requirementRow = requirementCandidates[0]?.score >= 2 ? requirementCandidates[0].row : null;
+  if (!requirementRow) throw new Error('模板缺少字段必填规则行，工作簿结构可能已被修改');
+  const labelCandidates = nearby.filter(rowNumber => rowNumber < requirementRow).map(rowNumber => ({
+    row: rowNumber,
+    score: countPopulatedColumns(rows, rowNumber, columns),
+  })).sort((left, right) => right.score - left.score);
+  const labelRow = labelCandidates[0]?.score ? labelCandidates[0].row : null;
+  if (!labelRow) throw new Error('模板缺少字段表头行，工作簿结构可能已被修改');
+  return {
+    label_row: labelRow,
+    requirement_row: requirementRow,
+    description_row: requirementRow + 1,
+    rule_row: requirementRow + 2,
+    start_row: requirementRow + 3,
+  };
+}
+
+function locateCategorySheet(sheets, rowsForSheet, productPath) {
+  const candidates = [];
+  for (const sheet of sheets) {
+    if (sheet.path === productPath || SENSITIVE_SHEET_NAMES.has(sheet.name.toLowerCase())) continue;
+    const rows = rowsForSheet(sheet);
+    const columns = new Set();
+    for (const values of rows.values()) for (const index of values.keys()) columns.add(index);
+    for (const idColumn of columns) {
+      const matchingRows = [...rows.entries()].filter(([, values]) => /^\d+$/.test(String(values.get(idColumn) || '').trim()));
+      const uniqueIds = new Set(matchingRows.map(([, values]) => String(values.get(idColumn)).trim()));
+      if (uniqueIds.size < 10) continue;
+      const otherColumns = [...columns].filter(index => index !== idColumn);
+      const nameColumn = otherColumns.map(index => ({
+        index,
+        score: matchingRows.reduce((count, [, values]) => count + (/\D/.test(String(values.get(index) || '')) ? 1 : 0), 0),
+      })).sort((left, right) => right.score - left.score)[0];
+      if (!nameColumn || nameColumn.score < Math.min(10, uniqueIds.size)) continue;
+      const dtsColumn = otherColumns.map(index => ({
+        index,
+        score: matchingRows.reduce((count, [, values]) => count + (/\d+\s*-\s*\d+/.test(String(values.get(index) || '')) ? 1 : 0), 0),
+      })).sort((left, right) => right.score - left.score)[0];
+      candidates.push({ sheet, rows, id_column: idColumn, name_column: nameColumn.index, dts_column: dtsColumn?.score ? dtsColumn.index : null, score: uniqueIds.size });
+    }
+  }
+  candidates.sort((left, right) => right.score - left.score);
+  if (!candidates.length) throw new Error('模板缺少可识别的 Category ID / DTS 工作表');
+  return candidates[0];
+}
+
+function sensitiveSheetSummary(sheets, rowsForSheet) {
+  const summary = [];
+  for (const sheet of sheets) {
+    if (!SENSITIVE_SHEET_NAMES.has(sheet.name.toLowerCase())) continue;
+    const nonemptyCells = [...rowsForSheet(sheet).values()].reduce((total, values) =>
+      total + [...values.values()].filter(value => String(value || '').trim()).length, 0);
+    if (nonemptyCells) summary.push({ name: sheet.name, nonempty_cells: nonemptyCells });
+  }
+  return summary;
+}
+
 function parsePriceLimit(text) {
   const matches = String(text || '').match(/(?:VND\s*)?[0-9][0-9,]*(?:\.[0-9]+)?/gi) || [];
   const values = matches.map(value => Number(value.replace(/VND\s*/i, '').replace(/,/g, ''))).filter(value => Number.isFinite(value) && value >= 1000);
@@ -193,82 +318,114 @@ export function parseShopeeTemplate(buffer) {
   } catch (_) {
     throw new Error('无法解压 XLSX 模板');
   }
-  const sheets = workbookSheets(files);
-  const templatePath = sheets.get('Template');
-  const categoryPath = sheets.get('Pre-order DTS Range');
-  if (!templatePath || !categoryPath) throw new Error('模板缺少 Template 或 Pre-order DTS Range 工作表');
   const strings = sharedStrings(files);
-  const templateRows = worksheetRows(files, templatePath, strings);
-  const templateType = cell(templateRows, 2, 0).toLowerCase();
+  const sheets = workbookSheets(files);
+  const rowsCache = new Map();
+  const rowsForSheet = sheet => {
+    if (!rowsCache.has(sheet.path)) rowsCache.set(sheet.path, worksheetRows(files, sheet.path, strings));
+    return rowsCache.get(sheet.path);
+  };
+  const productSheet = locateProductSheet(sheets, rowsForSheet);
+  const templateRows = productSheet.rows;
+  const tokenRowNumber = productSheet.token_row;
+  const metadataRow = locateMetadataRow(templateRows, tokenRowNumber);
+  const templateType = cell(templateRows, metadataRow, 0).toLowerCase();
   if (templateType !== 'basic') throw new Error('当前仅支持 Shopee Basic Template，请上传店铺基础模板');
-  const signature = cell(templateRows, 2, 1);
-  const categoryScope = cell(templateRows, 2, 2);
-  const contextId = cell(templateRows, 2, 3);
+  const signature = cell(templateRows, metadataRow, 1);
+  const categoryScope = cell(templateRows, metadataRow, 2);
+  const contextId = cell(templateRows, metadataRow, 3);
   if (!signature || !contextId) throw new Error('模板缺少店铺上下文标识，请重新从 Seller Centre 下载');
 
-  const tokenRow = templateRows.get(1) || new Map();
+  const tokenRow = templateRows.get(tokenRowNumber) || new Map();
   const maxColumn = Math.max(...tokenRow.keys(), -1);
   if (maxColumn < 10) throw new Error('模板字段数量异常');
+  const tokenColumns = [...tokenRow.keys()].filter(index => cell(templateRows, tokenRowNumber, index));
+  const layout = inferLayoutRows(templateRows, tokenRowNumber, metadataRow, tokenColumns);
   const fields = [];
   const seenTokens = new Set();
   for (let index = 0; index <= maxColumn; index++) {
-    const token = cell(templateRows, 1, index);
+    const token = cell(templateRows, tokenRowNumber, index);
     if (!token) continue;
     if (seenTokens.has(token)) throw new Error(`模板隐藏字段重复: ${token}`);
     seenTokens.add(token);
+    const definition = tokenDefinition(token);
+    const requirement = cell(templateRows, layout.requirement_row, index);
+    const required = isRequiredRequirement(requirement);
     fields.push({
       token,
-      key: tokenKey(token),
+      key: definition.key,
+      semantic_key: definition.semantic_key,
+      data_type: definition.data_type,
+      mapping_status: definition.semantic_key ? 'mapped' : (required ? 'unmapped_required' : 'unmapped_optional'),
+      is_required: required,
       column: index,
       column_name: columnName(index),
-      label: cell(templateRows, 3, index),
-      requirement: cell(templateRows, 4, index),
-      description: cell(templateRows, 5, index),
-      rule: cell(templateRows, 6, index),
+      label: cell(templateRows, layout.label_row, index),
+      requirement,
+      description: cell(templateRows, layout.description_row, index),
+      rule: cell(templateRows, layout.rule_row, index),
     });
   }
-  const requiredKeys = ['ps_product_name', 'ps_product_description', 'ps_price', 'ps_weight'];
-  for (const key of requiredKeys) {
+  for (const key of REQUIRED_TEMPLATE_TOKENS) {
     if (!fields.some(field => field.key === key)) throw new Error(`模板缺少必要字段: ${key}`);
   }
-  const shippingChannels = fields.filter(field => /^channel_id\.\d+$/.test(field.key)).map(field => ({
-    id: field.key.slice('channel_id.'.length),
+  const shippingChannels = fields.filter(field => /^channel_id\.\d+$/.test(field.semantic_key)).map(field => ({
+    id: field.semantic_key.slice('channel_id.'.length),
     label: field.label || field.key,
     price_limit: parsePriceLimit(`${field.description} ${field.rule}`),
-    supports_preorder: field.key !== 'channel_id.5012',
+    supports_preorder: field.semantic_key !== 'channel_id.5012',
   }));
   if (!shippingChannels.length) throw new Error('模板未包含可用物流渠道');
 
-  const categoryRows = worksheetRows(files, categoryPath, strings);
+  const categorySheet = locateCategorySheet(sheets, rowsForSheet, productSheet.sheet.path);
   const categories = [];
   const categoryIds = new Set();
-  for (const [rowNumber, values] of categoryRows) {
-    if (rowNumber < 2) continue;
-    const id = String(values.get(1) || '').trim();
+  for (const values of categorySheet.rows.values()) {
+    const id = String(values.get(categorySheet.id_column) || '').trim();
     if (!/^\d+$/.test(id) || categoryIds.has(id)) continue;
     categoryIds.add(id);
-    const sourceName = String(values.get(0) || '').trim();
+    const sourceName = String(values.get(categorySheet.name_column) || '').trim();
     const name = sourceName.replace(new RegExp(`^${id}-?`), '').trim() || sourceName;
-    const dtsRange = String(values.get(2) || '').trim();
+    const dtsRange = categorySheet.dts_column === null ? '' : String(values.get(categorySheet.dts_column) || '').trim();
     const parsedRange = parseDtsRange(dtsRange);
     categories.push({ id, name, dts_range: dtsRange, dts_min: parsedRange.min, dts_max: parsedRange.max });
   }
   if (!categories.length) throw new Error('模板分类目录为空');
+  const sensitiveSheets = sensitiveSheetSummary(sheets, rowsForSheet);
+  const unknownRequiredTokens = fields.filter(field => field.mapping_status === 'unmapped_required').map(field => field.token);
+  const unknownOptionalTokens = fields.filter(field => field.mapping_status === 'unmapped_optional').map(field => field.token);
 
   return {
     manifest: {
-      format_version: 1,
+      format_version: 2,
       template_type: templateType,
       signature,
       category_scope: categoryScope,
+      store_context_id: contextId,
       context_id: contextId,
-      sheet_path: templatePath,
-      start_row: TEMPLATE_START_ROW,
+      sheet_name: productSheet.sheet.name,
+      sheet_path: productSheet.sheet.path,
+      token_row: tokenRowNumber,
+      metadata_row: metadataRow,
+      label_row: layout.label_row,
+      requirement_row: layout.requirement_row,
+      start_row: layout.start_row,
       field_count: fields.length,
       fields,
       shipping_channels: shippingChannels,
       category_count: categories.length,
+      category_sheet_name: categorySheet.sheet.name,
+      category_sheet_path: categorySheet.sheet.path,
+      unknown_required_tokens: unknownRequiredTokens,
+      unknown_optional_tokens: unknownOptionalTokens,
+      sensitive_sheets: sensitiveSheets,
     },
+    schema_source: JSON.stringify({
+      template_type: templateType,
+      token_row: tokenRowNumber,
+      start_row: layout.start_row,
+      fields: fields.map(field => [field.token, field.column, field.requirement]),
+    }),
     categories,
   };
 }
@@ -298,7 +455,10 @@ function injectRows(sheetXml, manifest, rows) {
   }
   const dataRows = rows.map((values, rowIndex) => {
     const rowNumber = manifest.start_row + rowIndex;
-    const cells = manifest.fields.map(field => cellXml(field.column_name, rowNumber, field.key, values[field.key])).join('');
+    const cells = manifest.fields.map(field => {
+      const semanticKey = field.semantic_key || field.key;
+      return cellXml(field.column_name, rowNumber, semanticKey, values[semanticKey]);
+    }).join('');
     return `<row r="${rowNumber}">${cells}</row>`;
   }).join('');
   let updated = sheetXml.replace(sheetDataMatch[0], `${opening}${preservedRows.join('')}${dataRows}</sheetData>`);

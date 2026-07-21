@@ -38,7 +38,12 @@ async function getUserByUsername(env, username) { return await getOne(env, "SELE
 async function getUserList(env) { return await query(env, "SELECT id, username, role, display_name, platform_access, image_concurrency_limit, is_active, credits, created_at FROM ews_users ORDER BY created_at ASC"); }
 async function updateUserPassword(env, userId, pw) { await env.DB.prepare("UPDATE ews_users SET password_hash = ? WHERE id = ?").bind(pw, userId).run(); }
 async function toggleUserActive(env, userId, a) { await env.DB.prepare("UPDATE ews_users SET is_active = ? WHERE id = ?").bind(a ? 1 : 0, userId).run(); }
-async function deleteUser(env, userId) { await env.DB.prepare("DELETE FROM ews_users WHERE id = ?").bind(userId).run(); }
+async function deleteUser(env, userId) {
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM ews_shopee_template_user_meta WHERE user_id = ?").bind(userId),
+    env.DB.prepare("DELETE FROM ews_users WHERE id = ?").bind(userId),
+  ]);
+}
 async function updateUserPlatformAccess(env, userId, access) { await env.DB.prepare("UPDATE ews_users SET platform_access = ? WHERE id = ?").bind(normalizePlatformAccess(access), userId).run(); }
 async function updateUserImageConcurrencyLimit(env, userId, limit) { await env.DB.prepare("UPDATE ews_users SET image_concurrency_limit = ? WHERE id = ?").bind(normalizeUserImageConcurrencyLimit(limit), userId).run(); }
 async function updateUserWebhook(env, userId, cfg) { await env.DB.prepare("UPDATE ews_users SET webhook_config = ? WHERE id = ?").bind(cfg, userId).run(); }
@@ -181,59 +186,144 @@ async function jstGetPlanStats(env, tid) { var r = await query(env, "SELECT stat
 async function jstRefundCredits(env, tid) { var t = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id = ?", [tid]); if (t?.user_id) await env.DB.prepare("UPDATE ews_users SET credits = credits + 1 WHERE id = ?").bind(t.user_id).run(); }
 
 // ==================== Shopee 模块 ====================
-async function shopeeListStores(env, userId) {
-  return await query(env, `SELECT s.*, t.id AS template_id, t.filename, t.sha256, t.signature,
-    t.field_count, t.category_count, t.manifest_json, t.created_at AS template_created_at
-    FROM ews_shopee_stores s
-    JOIN ews_shopee_store_templates t ON t.store_id=s.id AND t.is_active=1
-    WHERE s.user_id=? AND s.is_active=1 ORDER BY s.updated_at DESC`, [userId]);
+async function shopeeListTemplateProfiles(env, userId, includeInactive = false) {
+  const where = includeInactive ? '' : "WHERE p.status='active' AND p.deleted_at IS NULL AND v.status='ready'";
+  return await query(env, `SELECT p.*, COALESCE(m.alias,'') AS user_alias, COALESCE(m.note,'') AS user_note,
+    COALESCE(m.is_favorite,0) AS is_favorite, v.id AS version_id, v.filename, v.sha256, v.schema_hash,
+    v.signature, v.template_type, v.field_count, v.logistics_count, v.category_count,
+    v.manifest_json, v.status AS version_status, v.has_sensitive_data,
+    v.sensitive_summary, v.created_at AS version_created_at
+    FROM ews_shopee_template_profiles p
+    LEFT JOIN ews_shopee_template_user_meta m ON m.profile_id=p.id AND m.user_id=?
+    LEFT JOIN ews_shopee_template_versions v ON v.id=p.current_version_id
+    ${where}
+    ORDER BY COALESCE(m.is_favorite,0) DESC, p.updated_at DESC`, [userId]);
 }
-async function shopeeGetStore(env, storeId, userId) {
-  return await getOne(env, "SELECT * FROM ews_shopee_stores WHERE id=? AND user_id=?", [storeId, userId]);
+async function shopeeGetTemplateProfile(env, profileId, userId = '') {
+  return await getOne(env, `SELECT p.*, COALESCE(m.alias,'') AS user_alias, COALESCE(m.note,'') AS user_note,
+    COALESCE(m.is_favorite,0) AS is_favorite, v.id AS version_id, v.filename, v.sha256, v.schema_hash,
+    v.signature, v.template_type, v.field_count, v.logistics_count, v.category_count,
+    v.manifest_json, v.status AS version_status, v.has_sensitive_data,
+    v.sensitive_summary, v.created_at AS version_created_at
+    FROM ews_shopee_template_profiles p
+    LEFT JOIN ews_shopee_template_user_meta m ON m.profile_id=p.id AND m.user_id=?
+    LEFT JOIN ews_shopee_template_versions v ON v.id=p.current_version_id
+    WHERE p.id=?`, [userId, profileId]);
 }
-async function shopeeGetStoreByContext(env, userId, contextId) {
-  return await getOne(env, "SELECT * FROM ews_shopee_stores WHERE user_id=? AND template_context_id=?", [userId, contextId]);
+async function shopeeGetTemplateProfileByContext(env, market, storeContextId) {
+  return await getOne(env, "SELECT * FROM ews_shopee_template_profiles WHERE market=? AND store_context_id=?", [market, storeContextId]);
 }
-async function shopeeGetActiveStoreTemplate(env, storeId) {
-  return await getOne(env, "SELECT * FROM ews_shopee_store_templates WHERE store_id=? AND is_active=1 ORDER BY created_at DESC LIMIT 1", [storeId]);
+async function shopeeGetTemplateVersion(env, versionId) {
+  return await getOne(env, "SELECT * FROM ews_shopee_template_versions WHERE id=?", [versionId]);
 }
-async function shopeeGetStoreTemplateByHash(env, storeId, sha256) {
-  return await getOne(env, "SELECT * FROM ews_shopee_store_templates WHERE store_id=? AND sha256=?", [storeId, sha256]);
+async function shopeeGetCurrentTemplateVersion(env, profileId) {
+  return await getOne(env, `SELECT v.* FROM ews_shopee_template_profiles p
+    JOIN ews_shopee_template_versions v ON v.id=p.current_version_id
+    WHERE p.id=?`, [profileId]);
 }
-async function shopeeGetTemplateCategories(env, templateId) {
-  return await query(env, "SELECT category_id AS id, category_name AS name, dts_range, dts_min, dts_max FROM ews_shopee_template_categories WHERE template_id=? ORDER BY category_name", [templateId]);
+async function shopeeGetLatestTemplateVersion(env, profileId) {
+  return await getOne(env, "SELECT * FROM ews_shopee_template_versions WHERE profile_id=? AND deleted_at IS NULL ORDER BY datetime(created_at) DESC, id DESC LIMIT 1", [profileId]);
 }
-async function shopeeGetTemplateCategory(env, templateId, categoryId) {
-  return await getOne(env, "SELECT category_id AS id, category_name AS name, dts_range, dts_min, dts_max FROM ews_shopee_template_categories WHERE template_id=? AND category_id=?", [templateId, categoryId]);
+async function shopeeGetTemplateVersionByHash(env, profileId, sha256) {
+  return await getOne(env, "SELECT * FROM ews_shopee_template_versions WHERE profile_id=? AND sha256=?", [profileId, sha256]);
 }
-async function shopeeSaveStoreTemplate(env, store, template, categories) {
-  await env.DB.prepare(`INSERT INTO ews_shopee_stores (id,user_id,name,template_context_id,is_active,created_at,updated_at)
-    VALUES (?,?,?,?,1,datetime('now'),datetime('now'))
-    ON CONFLICT(id) DO UPDATE SET name=excluded.name, template_context_id=excluded.template_context_id, is_active=1, updated_at=datetime('now')`)
-    .bind(store.id, store.user_id, store.name, store.template_context_id).run();
-  await env.DB.prepare(`INSERT INTO ews_shopee_store_templates
-    (id,store_id,user_id,filename,r2_key,sha256,signature,template_type,field_count,category_count,manifest_json,is_active,created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,0,datetime('now'))`)
-    .bind(template.id, store.id, store.user_id, template.filename, template.r2_key, template.sha256, template.signature,
-      template.template_type, template.field_count, template.category_count, template.manifest_json).run();
-  const insert = "INSERT INTO ews_shopee_template_categories (template_id,category_id,category_name,dts_range,dts_min,dts_max) VALUES (?,?,?,?,?,?)";
-  for (let offset = 0; offset < categories.length; offset += 75) {
-    const statements = categories.slice(offset, offset + 75).map(category => env.DB.prepare(insert).bind(
-      template.id, category.id, category.name, category.dts_range || '', category.dts_min ?? null, category.dts_max ?? null
-    ));
-    await env.DB.batch(statements);
+async function shopeeGetTemplateCategories(env, versionId) {
+  return await query(env, "SELECT category_id AS id, category_name AS name, dts_range, dts_min, dts_max FROM ews_shopee_template_version_categories WHERE version_id=? ORDER BY category_name", [versionId]);
+}
+async function shopeeGetTemplateCategory(env, versionId, categoryId) {
+  return await getOne(env, "SELECT category_id AS id, category_name AS name, dts_range, dts_min, dts_max FROM ews_shopee_template_version_categories WHERE version_id=? AND category_id=?", [versionId, categoryId]);
+}
+async function shopeeGetTemplateFields(env, versionId) {
+  return await query(env, "SELECT * FROM ews_shopee_template_fields WHERE version_id=? ORDER BY column_index", [versionId]);
+}
+async function shopeeSaveTemplateVersion(env, profile, version, fields, categories, userMeta) {
+  await env.DB.prepare(`INSERT INTO ews_shopee_template_profiles
+    (id,market,store_context_id,profile_code,system_name,status,created_by,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,datetime('now'),datetime('now'))
+    ON CONFLICT(market,store_context_id) DO NOTHING`)
+    .bind(profile.id, profile.market, profile.store_context_id, profile.profile_code, profile.system_name, profile.status, profile.created_by).run();
+  await env.DB.prepare(`INSERT INTO ews_shopee_template_versions
+    (id,profile_id,uploaded_by,filename,r2_key,sha256,schema_hash,signature,template_type,field_count,
+     logistics_count,category_count,manifest_json,status,has_sensitive_data,sensitive_summary,approved_by,approved_at,created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`)
+    .bind(version.id, profile.id, version.uploaded_by, version.filename, version.r2_key, version.sha256,
+      version.schema_hash, version.signature, version.template_type, version.field_count, version.logistics_count,
+      version.category_count, version.manifest_json, version.status, version.has_sensitive_data ? 1 : 0,
+      version.sensitive_summary, version.approved_by || null, version.approved_at || null).run();
+  const fieldInsert = `INSERT INTO ews_shopee_template_fields
+    (version_id,token,column_index,column_name,label,requirement,data_type,semantic_key,mapping_status,is_required)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`;
+  for (let offset = 0; offset < fields.length; offset += 75) {
+    await env.DB.batch(fields.slice(offset, offset + 75).map(field => env.DB.prepare(fieldInsert).bind(
+      version.id, field.token, field.column, field.column_name, field.label || '', field.requirement || '',
+      field.data_type || 'string', field.semantic_key || '', field.mapping_status, field.is_required ? 1 : 0
+    )));
   }
+  const categoryInsert = "INSERT INTO ews_shopee_template_version_categories (version_id,category_id,category_name,dts_range,dts_min,dts_max) VALUES (?,?,?,?,?,?)";
+  for (let offset = 0; offset < categories.length; offset += 75) {
+    await env.DB.batch(categories.slice(offset, offset + 75).map(category => env.DB.prepare(categoryInsert).bind(
+      version.id, category.id, category.name, category.dts_range || '', category.dts_min ?? null, category.dts_max ?? null
+    )));
+  }
+  await env.DB.prepare(`INSERT INTO ews_shopee_template_user_meta
+    (profile_id,user_id,alias,note,is_favorite,created_at,updated_at) VALUES (?,?,?,?,?,datetime('now'),datetime('now'))
+    ON CONFLICT(profile_id,user_id) DO UPDATE SET alias=excluded.alias,note=excluded.note,
+      is_favorite=excluded.is_favorite,updated_at=datetime('now')`)
+    .bind(profile.id, version.uploaded_by, userMeta.alias, userMeta.note, userMeta.is_favorite ? 1 : 0).run();
+  if (version.status === 'ready') {
+    await env.DB.prepare(`UPDATE ews_shopee_template_profiles SET current_version_id=?,
+      status=CASE WHEN status IN ('disabled','deleted') THEN status ELSE 'active' END,
+      updated_at=datetime('now') WHERE id=?`).bind(version.id, profile.id).run();
+  } else {
+    await env.DB.prepare(`UPDATE ews_shopee_template_profiles SET
+      status=CASE WHEN current_version_id IS NULL THEN ? ELSE status END,
+      updated_at=datetime('now') WHERE id=?`).bind(version.status, profile.id).run();
+  }
+}
+async function shopeeUpdateTemplateUserMeta(env, profileId, userId, meta) {
+  await env.DB.prepare(`INSERT INTO ews_shopee_template_user_meta
+    (profile_id,user_id,alias,note,is_favorite,created_at,updated_at) VALUES (?,?,?,?,?,datetime('now'),datetime('now'))
+    ON CONFLICT(profile_id,user_id) DO UPDATE SET alias=excluded.alias,note=excluded.note,
+      is_favorite=excluded.is_favorite,updated_at=datetime('now')`)
+    .bind(profileId, userId, meta.alias, meta.note, meta.is_favorite ? 1 : 0).run();
+}
+async function shopeeUpdateTemplateProfile(env, profileId, systemName, status) {
+  await env.DB.prepare("UPDATE ews_shopee_template_profiles SET system_name=?,status=?,deleted_at=NULL,updated_at=datetime('now') WHERE id=?")
+    .bind(systemName, status, profileId).run();
+}
+async function shopeeMapTemplateField(env, versionId, token, semanticKey, adminId) {
+  return await env.DB.prepare(`UPDATE ews_shopee_template_fields SET semantic_key=?,mapping_status='mapped',
+    mapped_by=?,mapped_at=datetime('now') WHERE version_id=? AND token=?`)
+    .bind(semanticKey, adminId, versionId, token).run();
+}
+async function shopeeCountUnmappedRequiredFields(env, versionId) {
+  const row = await getOne(env, "SELECT COUNT(*) AS count FROM ews_shopee_template_fields WHERE version_id=? AND mapping_status='unmapped_required'", [versionId]);
+  return Number(row?.count || 0);
+}
+async function shopeeApproveTemplateVersion(env, profileId, versionId, adminId) {
   await env.DB.batch([
-    env.DB.prepare("UPDATE ews_shopee_store_templates SET is_active=0 WHERE store_id=?").bind(store.id),
-    env.DB.prepare("UPDATE ews_shopee_store_templates SET is_active=1 WHERE id=?").bind(template.id),
-    env.DB.prepare("UPDATE ews_shopee_stores SET is_active=1, updated_at=datetime('now') WHERE id=?").bind(store.id),
+    env.DB.prepare("UPDATE ews_shopee_template_versions SET status='ready',approved_by=?,approved_at=datetime('now') WHERE id=? AND profile_id=?").bind(adminId, versionId, profileId),
+    env.DB.prepare("UPDATE ews_shopee_template_profiles SET current_version_id=?,status='active',deleted_at=NULL,updated_at=datetime('now') WHERE id=?").bind(versionId, profileId),
   ]);
 }
-async function shopeeRenameStore(env, storeId, userId, name) {
-  await env.DB.prepare("UPDATE ews_shopee_stores SET name=?, updated_at=datetime('now') WHERE id=? AND user_id=?").bind(name, storeId, userId).run();
+async function shopeeSoftDeleteTemplateProfile(env, profileId) {
+  await env.DB.prepare("UPDATE ews_shopee_template_profiles SET status='deleted',deleted_at=datetime('now'),updated_at=datetime('now') WHERE id=?").bind(profileId).run();
 }
-async function shopeeDisableStore(env, storeId, userId) {
-  await env.DB.prepare("UPDATE ews_shopee_stores SET is_active=0, updated_at=datetime('now') WHERE id=? AND user_id=?").bind(storeId, userId).run();
+async function shopeeGetTemplateProfileVersions(env, profileId) {
+  return await query(env, "SELECT * FROM ews_shopee_template_versions WHERE profile_id=? ORDER BY datetime(created_at) DESC, id DESC", [profileId]);
+}
+async function shopeeGetTemplateProfileTaskCount(env, profileId) {
+  const row = await getOne(env, "SELECT COUNT(*) AS count FROM ews_shopee_products WHERE template_profile_id=?", [profileId]);
+  return Number(row?.count || 0);
+}
+async function shopeePurgeTemplateProfile(env, profileId) {
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM ews_shopee_template_version_categories WHERE version_id IN (SELECT id FROM ews_shopee_template_versions WHERE profile_id=?)").bind(profileId),
+    env.DB.prepare("DELETE FROM ews_shopee_template_fields WHERE version_id IN (SELECT id FROM ews_shopee_template_versions WHERE profile_id=?)").bind(profileId),
+    env.DB.prepare("DELETE FROM ews_shopee_template_user_meta WHERE profile_id=?").bind(profileId),
+    env.DB.prepare("DELETE FROM ews_shopee_template_versions WHERE profile_id=?").bind(profileId),
+    env.DB.prepare("DELETE FROM ews_shopee_template_profiles WHERE id=?").bind(profileId),
+  ]);
 }
 async function shopeeCreateProduct(env, p) {
   await env.DB.prepare(`INSERT INTO ews_shopee_products
@@ -267,7 +357,9 @@ async function shopeeCreateProduct(env, p) {
       p.product_type || 'one', p.variation_name1_export || '', p.variation_name2_export || '',
       p.max_purchase_start_date || '', p.max_purchase_period_days ?? null, p.max_purchase_end_date || ''
     ).run();
-  await env.DB.prepare("UPDATE ews_shopee_products SET store_id=? WHERE id=?").bind(p.store_id || '', p.id).run();
+  await env.DB.prepare(`UPDATE ews_shopee_products
+    SET store_id='',template_profile_id=?,template_version_id=? WHERE id=?`)
+    .bind(p.template_profile_id || '', p.template_version_id || '', p.id).run();
 }
 async function shopeeGetProduct(env, pid) {
   const results = await env.DB.batch([
@@ -353,8 +445,12 @@ export {
   jstCreatePushPlans, jstGetPushPlans, jstGetPendingPlans, jstUpdatePlanStatus, jstGetPlanStats,
   jstRefundCredits,
   shopeeCreateProduct, shopeeGetProduct, shopeeDeleteProduct,
-  shopeeListStores, shopeeGetStore, shopeeGetStoreByContext, shopeeGetActiveStoreTemplate, shopeeGetStoreTemplateByHash,
-  shopeeGetTemplateCategories, shopeeGetTemplateCategory, shopeeSaveStoreTemplate, shopeeRenameStore, shopeeDisableStore,
+  shopeeListTemplateProfiles, shopeeGetTemplateProfile, shopeeGetTemplateProfileByContext,
+  shopeeGetTemplateVersion, shopeeGetCurrentTemplateVersion, shopeeGetLatestTemplateVersion, shopeeGetTemplateVersionByHash,
+  shopeeGetTemplateCategories, shopeeGetTemplateCategory, shopeeGetTemplateFields, shopeeSaveTemplateVersion,
+  shopeeUpdateTemplateUserMeta, shopeeUpdateTemplateProfile, shopeeMapTemplateField, shopeeCountUnmappedRequiredFields,
+  shopeeApproveTemplateVersion, shopeeSoftDeleteTemplateProfile, shopeeGetTemplateProfileVersions,
+  shopeeGetTemplateProfileTaskCount, shopeePurgeTemplateProfile,
   shopeeCreateVariations, shopeeClearVariations, shopeeReplaceVariations,
   shopeeCreatePushPlans, shopeeGetPushPlans, shopeeGetPendingPlans, shopeeUpdatePlanStatus, shopeeGetPlanStats,
   shopeeCreateExportRecord,

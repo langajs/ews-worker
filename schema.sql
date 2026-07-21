@@ -303,11 +303,100 @@ CREATE TABLE IF NOT EXISTS ews_shopee_template_categories (
 );
 CREATE INDEX IF NOT EXISTS idx_shopee_template_categories_lookup ON ews_shopee_template_categories(template_id, category_name);
 
+-- Shopee 全局模板库（ews_shopee_stores / ews_shopee_store_templates 仅保留迁移兼容）
+CREATE TABLE IF NOT EXISTS ews_shopee_template_profiles (
+  id TEXT PRIMARY KEY,
+  market TEXT NOT NULL DEFAULT 'VN',
+  store_context_id TEXT NOT NULL,
+  profile_code TEXT NOT NULL,
+  system_name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending_review',
+  current_version_id TEXT,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  deleted_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_shopee_template_profiles_context ON ews_shopee_template_profiles(market, store_context_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_shopee_template_profiles_code ON ews_shopee_template_profiles(profile_code);
+CREATE INDEX IF NOT EXISTS idx_shopee_template_profiles_status ON ews_shopee_template_profiles(status, updated_at);
+
+CREATE TABLE IF NOT EXISTS ews_shopee_template_versions (
+  id TEXT PRIMARY KEY,
+  profile_id TEXT NOT NULL,
+  uploaded_by TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  r2_key TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  schema_hash TEXT NOT NULL,
+  signature TEXT NOT NULL,
+  template_type TEXT NOT NULL DEFAULT 'basic',
+  field_count INTEGER NOT NULL DEFAULT 0,
+  logistics_count INTEGER NOT NULL DEFAULT 0,
+  category_count INTEGER NOT NULL DEFAULT 0,
+  manifest_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending_review',
+  has_sensitive_data INTEGER NOT NULL DEFAULT 0,
+  sensitive_summary TEXT NOT NULL DEFAULT '[]',
+  approved_by TEXT,
+  approved_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  deleted_at TEXT,
+  FOREIGN KEY (profile_id) REFERENCES ews_shopee_template_profiles(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_shopee_template_versions_hash ON ews_shopee_template_versions(profile_id, sha256);
+CREATE INDEX IF NOT EXISTS idx_shopee_template_versions_profile_status ON ews_shopee_template_versions(profile_id, status, created_at);
+
+CREATE TABLE IF NOT EXISTS ews_shopee_template_user_meta (
+  profile_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  alias TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  is_favorite INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (profile_id, user_id),
+  FOREIGN KEY (profile_id) REFERENCES ews_shopee_template_profiles(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_shopee_template_user_meta_user ON ews_shopee_template_user_meta(user_id, is_favorite, updated_at);
+
+CREATE TABLE IF NOT EXISTS ews_shopee_template_fields (
+  version_id TEXT NOT NULL,
+  token TEXT NOT NULL,
+  column_index INTEGER NOT NULL,
+  column_name TEXT NOT NULL,
+  label TEXT NOT NULL DEFAULT '',
+  requirement TEXT NOT NULL DEFAULT '',
+  data_type TEXT NOT NULL DEFAULT 'string',
+  semantic_key TEXT NOT NULL DEFAULT '',
+  mapping_status TEXT NOT NULL DEFAULT 'unmapped_optional',
+  is_required INTEGER NOT NULL DEFAULT 0,
+  mapped_by TEXT,
+  mapped_at TEXT,
+  PRIMARY KEY (version_id, token),
+  FOREIGN KEY (version_id) REFERENCES ews_shopee_template_versions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_shopee_template_fields_mapping ON ews_shopee_template_fields(version_id, mapping_status);
+
+CREATE TABLE IF NOT EXISTS ews_shopee_template_version_categories (
+  version_id TEXT NOT NULL,
+  category_id TEXT NOT NULL,
+  category_name TEXT NOT NULL,
+  dts_range TEXT NOT NULL DEFAULT '',
+  dts_min INTEGER,
+  dts_max INTEGER,
+  PRIMARY KEY (version_id, category_id),
+  FOREIGN KEY (version_id) REFERENCES ews_shopee_template_versions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_shopee_template_version_categories_lookup ON ews_shopee_template_version_categories(version_id, category_name);
+
 -- Shopee 商品
 CREATE TABLE IF NOT EXISTS ews_shopee_products (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL,
   store_id TEXT NOT NULL DEFAULT '',
+  template_profile_id TEXT NOT NULL DEFAULT '',
+  template_version_id TEXT NOT NULL DEFAULT '',
   category_id TEXT NOT NULL DEFAULT '',
   name TEXT NOT NULL,
   main_description TEXT NOT NULL DEFAULT '',
@@ -350,6 +439,8 @@ CREATE TABLE IF NOT EXISTS ews_shopee_products (
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   FOREIGN KEY (task_id) REFERENCES ews_tasks(id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_shopee_products_template_profile ON ews_shopee_products(template_profile_id);
+CREATE INDEX IF NOT EXISTS idx_shopee_products_template_version ON ews_shopee_products(template_version_id);
 
 -- Shopee 变体（二维规格）
 CREATE TABLE IF NOT EXISTS ews_shopee_variations (
