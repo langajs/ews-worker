@@ -516,6 +516,23 @@ function serializeShopeeTemplateProfile(profile, version = profile) {
   };
 }
 
+async function matchesShopeeTemplateVersion(env, version, sha256, schemaHash) {
+  if (!version) return false;
+  if (version.sha256 === sha256) return true;
+  const manifest = parseJson(version.manifest_json, {});
+  if (manifest.template_fingerprint_version === 2) return version.schema_hash === schemaHash;
+  try {
+    const object = await env.R2.get(version.r2_key);
+    if (!object) return false;
+    const parsed = parseShopeeTemplate(await object.arrayBuffer());
+    const contentHash = await sha256Hex(new TextEncoder().encode(parsed.comparison_source));
+    return contentHash === schemaHash;
+  } catch (err) {
+    console.warn(`Legacy Shopee template comparison failed for ${version.id}:`, err.message);
+    return false;
+  }
+}
+
 async function deleteShopeeTemplateVersionObjects(env, versions) {
   const results = await Promise.allSettled((versions || []).filter(version => version.r2_key).map(version => env.R2.delete(version.r2_key)));
   const failures = results.filter(result => result.status === 'rejected');
@@ -646,22 +663,12 @@ async function handleUploadShopeeTemplate(request, env) {
   }
   const sha256 = await sha256Hex(buffer);
   const schemaHash = await sha256Hex(new TextEncoder().encode(parsed.comparison_source));
-  const currentVersion = profile.current_version_id ? await shopeeGetCurrentTemplateVersion(env, profileId) : null;
-  let sameTemplateContent = currentVersion?.sha256 === sha256
-    || (currentVersion && currentVersion.schema_hash === schemaHash && parseJson(currentVersion.manifest_json, {}).template_fingerprint_version === 2);
-  if (currentVersion && !sameTemplateContent && !parseJson(currentVersion.manifest_json, {}).template_fingerprint_version) {
-    try {
-      const currentObject = await env.R2.get(currentVersion.r2_key);
-      if (currentObject) {
-        const currentParsed = parseShopeeTemplate(await currentObject.arrayBuffer());
-        const currentContentHash = await sha256Hex(new TextEncoder().encode(currentParsed.comparison_source));
-        sameTemplateContent = currentContentHash === schemaHash;
-      }
-    } catch (err) {
-      console.warn('Legacy Shopee template comparison failed:', err.message);
-    }
-  }
-  if (currentVersion && sameTemplateContent) {
+  const existingVersions = profile.current_version_id
+    ? (await shopeeGetTemplateProfileVersions(env, profileId))?.results || []
+    : [];
+  const currentVersion = existingVersions.find(version => version.id === profile.current_version_id)
+    || (profile.current_version_id ? await shopeeGetCurrentTemplateVersion(env, profileId) : null);
+  if (await matchesShopeeTemplateVersion(env, currentVersion, sha256, schemaHash)) {
     await shopeeUpdateTemplateUserMeta(env, profileId, request.auth.username, userMeta);
     const refreshed = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
     const serialized = serializeShopeeTemplateProfile(refreshed, currentVersion);
@@ -674,11 +681,19 @@ async function handleUploadShopeeTemplate(request, env) {
       message: '模板已是最新，无需更新',
     });
   }
-  const duplicate = await shopeeGetTemplateVersionByHash(env, profileId, sha256);
-  let duplicateCleanupFailures = 0;
-  if (duplicate && duplicate.id !== currentVersion?.id) {
-    const deleted = await shopeeDeleteTemplateVersions(env, profileId, [duplicate], currentVersion?.id || '');
-    duplicateCleanupFailures = await deleteShopeeTemplateVersionObjects(env, deleted);
+  for (const historicalVersion of existingVersions) {
+    if (historicalVersion.id === currentVersion?.id) continue;
+    if (await matchesShopeeTemplateVersion(env, historicalVersion, sha256, schemaHash)) {
+      return json({
+        success: false,
+        error: '上传的是已保留的上一版本，当前已有更新模板，已阻止版本回退',
+        code: 'SHOPEE_TEMPLATE_ROLLBACK_BLOCKED',
+        historical_version: true,
+        current_version_id: currentVersion?.id || null,
+        matched_version_id: historicalVersion.id,
+        latest_updated_by: currentVersion?.uploaded_by || '',
+      }, 409);
+    }
   }
   const sensitiveSheets = parsed.manifest.sensitive_sheets || [];
   const versionStatus = 'ready';
@@ -747,7 +762,7 @@ async function handleUploadShopeeTemplate(request, env) {
   const staleVersions = versions.filter(version => !retainedVersionIds.has(version.id));
   const deletedVersions = await shopeeDeleteTemplateVersions(env, profileId, staleVersions, versionId);
   const r2CleanupFailures = await deleteShopeeTemplateVersionObjects(env, deletedVersions);
-  const cleanupFailures = duplicateCleanupFailures + r2CleanupFailures;
+  const cleanupFailures = r2CleanupFailures;
   if (cleanupFailures) warnings.push(`${cleanupFailures} 个过期模板对象清理失败，已记录服务器日志`);
   if (sensitiveSheets.length) warnings.push(`检测到非空隐藏表：${sensitiveSheets.map(sheet => sheet.name).join('、')}，已记录风险标记`);
   if (parsed.manifest.unknown_optional_tokens?.length) warnings.push(`存在 ${parsed.manifest.unknown_optional_tokens.length} 个未知可选 token，导出时将留空`);
