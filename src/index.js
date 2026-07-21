@@ -23,6 +23,7 @@ import {
   shopeeSaveImage, shopeeCheckParentCompletion, shopeeRefundCredits, shopeeUpdateVariationExports,
 } from './db.js';
 import { generateToken, hashPassword, verifyPassword, authenticateRequest, DEFAULT_PASSWORD } from './auth.js';
+import { processSkuUploadImage } from './sku-upload-image.js';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -192,6 +193,16 @@ async function requireAuth(request, env, handler) {
   return await handler();
 }
 
+async function requireTaskAccess(request, env, path, handler) {
+  const taskId = getTaskId(path);
+  const task = await getTaskIndex(env, taskId);
+  if (!task) return error('任务不存在', 404);
+  if (request.auth?.role !== 'admin' && task.user_id !== request.auth?.username) {
+    return error('无权访问该任务', 403);
+  }
+  return handler(task);
+}
+
 // 登录速率限制
 const loginAttempts = new Map();
 const RATE_LIMIT_MAX = 5;
@@ -239,21 +250,21 @@ export default {
       if (path === '/api/tasks' && method === 'GET')
         return requireAuth(request, env, () => handleGetTasks(env, ctx, request.auth, url));
       if (path.match(/^\/api\/tasks\/[^\/]+$/) && method === 'GET')
-        return requireAuth(request, env, () => handleGetTaskDetail(env, ctx, path));
+        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleGetTaskDetail(env, ctx, path, task)));
       if (path.match(/^\/api\/tasks\/[^\/]+$/) && method === 'PUT')
-        return requireAuth(request, env, () => handleUpdateTask(request, env, path));
+        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleUpdateTask(request, env, path, task)));
       if (path.match(/^\/api\/tasks\/[^\/]+$/) && method === 'DELETE')
-        return requireAuth(request, env, () => handleDeleteTask(env, path));
+        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleDeleteTask(env, path, task)));
       if (path.match(/^\/api\/tasks\/[^\/]+\/status$/) && method === 'PUT')
-        return requireAuth(request, env, () => handleUpdateTaskStatus(request, env, path));
+        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleUpdateTaskStatus(request, env, path, task)));
       if (path.match(/^\/api\/tasks\/[^\/]+\/push$/) && method === 'POST')
-        return requireAuth(request, env, () => handlePushTask(env, ctx, path, request));
+        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handlePushTask(env, ctx, path, request, task)));
       if (path.match(/^\/api\/tasks\/[^\/]+\/plans$/) && method === 'GET')
-        return requireAuth(request, env, () => handleGetPlans(env, path));
+        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleGetPlans(env, path, task)));
       if (path.match(/^\/api\/tasks\/[^\/]+\/plans\/[^\/]+\/retry$/) && method === 'POST')
-        return requireAuth(request, env, () => handleRetryPlan(env, path, request, ctx));
+        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleRetryPlan(env, path, request, ctx, task)));
       if (path.match(/^\/api\/tasks\/[^\/]+\/export$/) && method === 'GET')
-        return requireAuth(request, env, () => handleExportTask(env, path));
+        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleExportTask(env, path, task)));
 
       // --- 回调 ---
       if (path === '/api/callback' && method === 'POST')
@@ -737,10 +748,8 @@ async function handleInitTask(request, env) {
   return json({ success: true, task_id: taskId, platform, message: '任务初始化成功' }, 201);
 }
 
-async function handleGetTaskDetail(env, ctx, path) {
+async function handleGetTaskDetail(env, ctx, path, idx) {
   const taskId = getTaskId(path);
-  const idx = await getTaskIndex(env, taskId);
-  if (!idx) return error('任务不存在', 404);
   let detail = idx;
   if (idx.platform === 'jst') {
     const jst = await jstGetTask(env, taskId);
@@ -753,11 +762,9 @@ async function handleGetTaskDetail(env, ctx, path) {
   return json({ success: true, task: detail });
 }
 
-async function handleUpdateTask(request, env, path) {
+async function handleUpdateTask(request, env, path, idx) {
   const taskId = getTaskId(path);
   const body = await parseBody(request);
-  const idx = await getTaskIndex(env, taskId);
-  if (!idx) return error('任务不存在', 404);
 
   if (idx.platform === 'shopee') {
     const { name, source_brief, product_type, main_description, reference_title, reference_image, auxiliary_images, generate_count, mode, category_id, cover_image, images, length_cm, width_cm, height_cm, gtin, variation_name1, variation_name2, variation_image_mode, size_chart_template_id, size_chart_image, pre_order_dts, shipping_channels, variations } = body || {};
@@ -990,10 +997,8 @@ async function handleUpdateTask(request, env, path) {
   return error('不支持的平台类型', 400);
 }
 
-async function handleDeleteTask(env, path) {
+async function handleDeleteTask(env, path, idx) {
   const taskId = getTaskId(path);
-  const idx = await getTaskIndex(env, taskId);
-  if (!idx) return error('任务不存在', 404);
   // 清理 R2
   const prefix = `ews/${taskId}/`;
   try {
@@ -1015,13 +1020,11 @@ async function handleDeleteTask(env, path) {
   return json({ success: true, message: '任务已删除' });
 }
 
-async function handleUpdateTaskStatus(request, env, path) {
+async function handleUpdateTaskStatus(request, env, path, idx) {
   const taskId = getTaskId(path);
   const body = await parseBody(request);
   const { status } = body || {};
   if (!['pending','processing','completed','failed','partial_failed'].includes(status)) return error('无效的状态值', 400);
-  const idx = await getTaskIndex(env, taskId);
-  if (!idx) return error('任务不存在', 404);
   if (idx.platform === 'jst') await jstUpdateTaskStatus(env, taskId, status);
   if (idx.platform === 'shopee') await env.DB.prepare("UPDATE ews_shopee_products SET status=?, updated_at=datetime('now') WHERE id=?").bind(status, taskId).run();
   await updateTaskIndexStatus(env, taskId, status);
@@ -1030,10 +1033,8 @@ async function handleUpdateTaskStatus(request, env, path) {
 
 // ========== JST 推送 ==========
 
-async function handlePushTask(env, ctx, path, request) {
+async function handlePushTask(env, ctx, path, request, idx) {
   const taskId = getTaskId(path);
-  const idx = await getTaskIndex(env, taskId);
-  if (!idx) return error('任务不存在', 404);
   if (idx.platform === 'jst') return jstHandlePush(env, taskId, ctx, request);
   if (idx.platform === 'shopee') return shopeeHandlePush(env, taskId, ctx, request);
   return error('不支持的平台', 400);
@@ -2512,10 +2513,8 @@ async function processOneImage(env, platform, task_id, sub_task_id, set_index, i
 
 // ========== 推送计划 ==========
 
-async function handleGetPlans(env, path) {
+async function handleGetPlans(env, path, idx) {
   const taskId = getTaskId(path);
-  const idx = await getTaskIndex(env, taskId);
-  if (!idx) return error('任务不存在', 404);
   const plansTable = idx.platform === 'jst' ? 'ews_jst_push_plans' : 'ews_shopee_push_plans';
   const imagesTable = idx.platform === 'jst' ? 'ews_jst_task_images' : 'ews_shopee_task_images';
   const [config, results] = await Promise.all([
@@ -2556,11 +2555,9 @@ async function handleGetPlans(env, path) {
   }), stats: s });
 }
 
-async function handleRetryPlan(env, path, request, ctx) {
+async function handleRetryPlan(env, path, request, ctx, idx) {
   const parts = path.split('/');
   const taskId = parts[3], planId = parts[5];
-  const idx = await getTaskIndex(env, taskId);
-  if (!idx) return error('任务不存在', 404);
   const plansTable = idx.platform === 'jst' ? 'ews_jst_push_plans' : 'ews_shopee_push_plans';
   const plan = await getOne(env, `SELECT * FROM ${plansTable} WHERE id=?`, [planId]);
   if (!plan || plan.task_id !== taskId) return error('计划不存在', 404);
@@ -2575,10 +2572,8 @@ async function handleRetryPlan(env, path, request, ctx) {
 
 // ========== 导出 ==========
 
-async function handleExportTask(env, path) {
+async function handleExportTask(env, path, idx) {
   const taskId = getTaskId(path);
-  const idx = await getTaskIndex(env, taskId);
-  if (!idx) return error('任务不存在', 404);
   if (idx.platform === 'jst') return jstHandleExport(env, taskId);
   if (idx.platform === 'shopee') return shopeeHandleExport(env, taskId);
   return error('不支持的平台', 400);
@@ -3014,18 +3009,47 @@ async function handleUpload(request, env) {
   const formData = await parseBody(request);
   if (!(formData instanceof FormData)) return error('请使用 multipart/form-data 格式上传', 400);
   const file = formData.get('file');
-  if (!file) return error('请选择文件', 400);
+  if (!file || typeof file.arrayBuffer !== 'function') return error('请选择有效文件', 400);
   const taskId = formData.get('task_id'); if (!taskId) return error('缺少 task_id', 400);
   const folder = String(formData.get('folder') || 'uploads');
+  const task = await getTaskIndex(env, taskId);
+  if (!task) return error('任务不存在', 404);
+  if (request.auth?.role !== 'admin' && task.user_id !== request.auth?.username) return error('无权访问该任务', 403);
   const imageTypes = ['image/jpeg','image/png','image/webp','image/gif'];
   const isSizeChartPdf = folder === 'size-chart' && file.type === 'application/pdf';
   if (!imageTypes.includes(file.type) && !isSizeChartPdf) return error('仅支持 JPG/PNG/WebP/GIF，尺码表可使用 PDF', 400);
+  if (folder === 'sku-upload' && !['image/jpeg','image/png'].includes(file.type)) return error('SKU成品图仅支持 JPG 或 PNG', 400);
   const maxSize = folder === 'size-chart' ? 2 * 1024 * 1024 : 10 * 1024 * 1024;
   if (file.size > maxSize) return error(folder === 'size-chart' ? '尺码表文件不能超过 2MB' : '文件大小不能超过 10MB', 400);
-  const buffer = await file.arrayBuffer();
-  const key = `ews/${taskId}/${folder}/${uuid()}.${isSizeChartPdf ? 'pdf' : 'jpg'}`;
-  await env.R2.put(key, buffer, { httpMetadata: { contentType: file.type } });
+  let buffer = await file.arrayBuffer();
+  let contentType = detectImageContentType(buffer, file.type);
+  let extension = isSizeChartPdf ? 'pdf' : ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' }[contentType] || 'bin');
+  let processing = null;
+  if (folder === 'sku-upload') {
+    try {
+      processing = await processSkuUploadImage(buffer, contentType);
+    } catch (err) {
+      return error(err.message || 'SKU图片处理失败', 400);
+    }
+    buffer = processing.buffer;
+    contentType = processing.contentType;
+    extension = processing.extension;
+  }
+  const key = `ews/${taskId}/${folder}/${uuid()}.${extension}`;
+  await env.R2.put(key, buffer, { httpMetadata: { contentType } });
   const config = await getConfig(env);
   const publicUrl = config.r2_public_url || '';
-  return json({ success: true, key, url: publicUrl ? `${publicUrl.replace(/\/+$/, '')}/${key}` : null, message: '上传成功' });
+  if (!publicUrl) {
+    await env.R2.delete(key);
+    return error('R2公开域名未配置，无法生成图片URL', 503);
+  }
+  return json({
+    success: true,
+    key,
+    url: `${publicUrl.replace(/\/+$/, '')}/${key}`,
+    content_type: contentType,
+    size_bytes: buffer.byteLength,
+    ...(processing ? { image_processing: { quality: processing.quality, resized: processing.resized, width: processing.width, height: processing.height } } : {}),
+    message: '上传成功',
+  });
 }
