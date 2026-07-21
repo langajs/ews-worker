@@ -15,6 +15,8 @@
 
 模板元数据中的 D2 仅命名为 `store_context_id`。现有证据只能确认它是店铺模板上下文，不能宣称为 Shopee 官方 Shop ID。
 
+模板显示名称优先级为“我的别名” > “全局别名” > `SHP-VN-{store_context_id}`。全局别名复用档案的 `system_name` 存储，由管理员维护；用户别名继续保存在 `ews_shopee_template_user_meta`，按登录用户隔离。
+
 ## 结构推理
 
 Worker 使用 `fflate` 解压并通过 `fast-xml-parser` 完成以下步骤：

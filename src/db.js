@@ -294,9 +294,9 @@ async function shopeeUpdateTemplateUserMeta(env, profileId, userId, meta) {
       is_favorite=excluded.is_favorite,updated_at=datetime('now')`)
     .bind(profileId, userId, meta.alias, meta.note, meta.is_favorite ? 1 : 0).run();
 }
-async function shopeeUpdateTemplateProfile(env, profileId, systemName, status) {
+async function shopeeUpdateTemplateProfile(env, profileId, globalAlias, status) {
   await env.DB.prepare("UPDATE ews_shopee_template_profiles SET system_name=?,status=?,deleted_at=NULL,updated_at=datetime('now') WHERE id=?")
-    .bind(systemName, status, profileId).run();
+    .bind(globalAlias, status, profileId).run();
 }
 async function shopeeMapTemplateField(env, versionId, token, semanticKey, adminId) {
   return await env.DB.prepare(`UPDATE ews_shopee_template_fields SET semantic_key=?,mapping_status='mapped',
@@ -402,6 +402,10 @@ async function shopeeGetProduct(env, pid) {
   product.images_rec = results[3]?.results || [];
   return product;
 }
+async function shopeeUpdateProductTemplate(env, productId, profileId, versionId) {
+  await env.DB.prepare("UPDATE ews_shopee_products SET template_profile_id=?,template_version_id=?,updated_at=datetime('now') WHERE id=?")
+    .bind(profileId, versionId, productId).run();
+}
 async function shopeeDeleteProduct(env, pid) { await env.DB.prepare("DELETE FROM ews_shopee_products WHERE id = ?").bind(pid).run(); }
 async function shopeeCreateVariations(env, vs) { var s = env.DB.prepare("INSERT INTO ews_shopee_variations (id, product_id, integration_no, option1, option1_export, image_per_variation, option2, option2_export, image_2, price, price_float_enabled, price_min, price_max, price_precision, stock, sku, sku_description, weight_kg, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))"); for (const v of vs) await s.bind(v.id, v.product_id, v.integration_no, v.option1, v.option1_export || '', v.image_per_variation || '', v.option2 || '', v.option2_export || '', v.image_2 || '', v.price, v.price_float_enabled ? 1 : 0, v.price_min ?? null, v.price_max ?? null, v.price_precision ?? 0, v.stock ?? 999, v.sku || '', v.sku_description || '', v.weight_kg ?? 0.2).run(); }
 async function shopeeClearVariations(env, pid) { await env.DB.prepare("DELETE FROM ews_shopee_variations WHERE product_id = ?").bind(pid).run(); }
@@ -471,7 +475,7 @@ export {
   jstCreateExpectedImages, jstCheckSubTaskImages, jstCheckParentCompletion, jstDeleteTaskRecord,
   jstCreatePushPlans, jstGetPushPlans, jstGetPendingPlans, jstUpdatePlanStatus, jstGetPlanStats,
   jstRefundCredits,
-  shopeeCreateProduct, shopeeGetProduct, shopeeDeleteProduct,
+  shopeeCreateProduct, shopeeGetProduct, shopeeUpdateProductTemplate, shopeeDeleteProduct,
   shopeeListTemplateProfiles, shopeeGetTemplateProfile, shopeeGetTemplateProfileByContext, shopeeClaimTemplateProfile,
   shopeeGetTemplateVersion, shopeeGetCurrentTemplateVersion, shopeeGetLatestTemplateVersion, shopeeGetTemplateVersionByHash,
   shopeeGetTemplateCategories, shopeeGetTemplateCategory, shopeeGetTemplateFields, shopeeSaveTemplateVersion,

@@ -14,7 +14,7 @@ import {
   jstCreateExpectedImages, jstCheckSubTaskImages, jstCheckParentCompletion, jstDeleteTaskRecord,
   jstCreatePushPlans, jstGetPushPlans, jstGetPendingPlans, jstGetPlanStats,
   jstRefundCredits,
-  shopeeCreateProduct, shopeeGetProduct, shopeeDeleteProduct,
+  shopeeCreateProduct, shopeeGetProduct, shopeeUpdateProductTemplate, shopeeDeleteProduct,
   shopeeListTemplateProfiles, shopeeGetTemplateProfile, shopeeGetTemplateProfileByContext, shopeeClaimTemplateProfile,
   shopeeGetTemplateVersion, shopeeGetCurrentTemplateVersion, shopeeGetLatestTemplateVersion, shopeeGetTemplateVersionByHash,
   shopeeGetTemplateCategories, shopeeGetTemplateCategory, shopeeGetTemplateFields, shopeeSaveTemplateVersion,
@@ -278,13 +278,15 @@ export default {
       if (path === '/api/tasks' && method === 'GET')
         return requireAuth(request, env, () => handleGetTasks(env, ctx, request.auth, url));
       if (path.match(/^\/api\/tasks\/[^\/]+$/) && method === 'GET')
-        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleGetTaskDetail(env, ctx, path, task)));
+        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleGetTaskDetail(request, env, ctx, path, task)));
       if (path.match(/^\/api\/tasks\/[^\/]+$/) && method === 'PUT')
         return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleUpdateTask(request, env, path, task)));
       if (path.match(/^\/api\/tasks\/[^\/]+$/) && method === 'DELETE')
         return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleDeleteTask(env, path, task)));
       if (path.match(/^\/api\/tasks\/[^\/]+\/status$/) && method === 'PUT')
         return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleUpdateTaskStatus(request, env, path, task)));
+      if (path.match(/^\/api\/tasks\/[^\/]+\/template$/) && method === 'PUT')
+        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleSwitchShopeeTaskTemplate(request, env, path, task)));
       if (path.match(/^\/api\/tasks\/[^\/]+\/push$/) && method === 'POST')
         return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handlePushTask(env, ctx, path, request, task)));
       if (path.match(/^\/api\/tasks\/[^\/]+\/plans$/) && method === 'GET')
@@ -493,7 +495,9 @@ function serializeShopeeTemplateVersion(version) {
 
 function serializeShopeeTemplateProfile(profile, version = profile) {
   const template = serializeShopeeTemplateVersion(version);
-  const displayName = profile.user_alias || profile.system_name || profile.profile_code;
+  const storedGlobalAlias = String(profile.system_name || '').trim();
+  const globalAlias = storedGlobalAlias === profile.profile_code ? '' : storedGlobalAlias;
+  const displayName = profile.user_alias || globalAlias || profile.profile_code;
   const latestUpdatedBy = template?.uploaded_by || '';
   return {
     id: profile.id,
@@ -501,7 +505,8 @@ function serializeShopeeTemplateProfile(profile, version = profile) {
     store_context_id: profile.store_context_id,
     template_context_id: profile.store_context_id,
     profile_code: profile.profile_code,
-    system_name: profile.system_name,
+    system_name: globalAlias,
+    global_alias: globalAlias,
     display_name: displayName,
     name: displayName,
     status: profile.status,
@@ -657,7 +662,7 @@ async function handleUploadShopeeTemplate(request, env) {
       market,
       store_context_id: storeContextId,
       profile_code: profileCode,
-      system_name: profileCode,
+      system_name: '',
       created_by: request.auth.username,
     });
   }
@@ -706,7 +711,7 @@ async function handleUploadShopeeTemplate(request, env) {
       market,
       store_context_id: storeContextId,
       profile_code: profileCode,
-      system_name: profile?.system_name || profileCode,
+      system_name: profile?.system_name || '',
       status: 'active',
       created_by: profile.created_by,
     }, {
@@ -812,8 +817,8 @@ async function handleAdminUpdateShopeeTemplateProfile(request, env, path) {
   const profile = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
   if (!profile) return error('模板档案不存在', 404);
   const body = await parseBody(request) || {};
-  const systemName = String(body.system_name ?? profile.system_name).trim();
-  if (!systemName || systemName.length > 80) return error('系统名称必须为1~80字符', 400);
+  const globalAlias = String(body.global_alias ?? body.system_name ?? profile.system_name).trim();
+  if (globalAlias.length > 80) return error('全局别名不能超过80字符', 400);
   const status = String(body.status || (profile.status === 'disabled' ? 'disabled' : 'active'));
   if (!['active', 'disabled'].includes(status)) return error('档案状态仅支持 active 或 disabled', 400);
   const approveVersionId = String(body.approve_version_id || '').trim();
@@ -827,7 +832,7 @@ async function handleAdminUpdateShopeeTemplateProfile(request, env, path) {
   }
   const current = await shopeeGetCurrentTemplateVersion(env, profileId);
   if (status === 'active' && !current) return error('档案没有已批准版本，不能启用', 409);
-  await shopeeUpdateTemplateProfile(env, profileId, systemName, status);
+  await shopeeUpdateTemplateProfile(env, profileId, globalAlias, status);
   const refreshed = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
   return json({ success: true, profile: serializeShopeeTemplateProfile(refreshed), message: approveVersionId ? '模板版本已审核并启用' : '模板档案已更新' });
 }
@@ -1171,7 +1176,7 @@ async function handleInitTask(request, env) {
   return json({ success: true, task_id: taskId, platform, message: '任务初始化成功' }, 201);
 }
 
-async function handleGetTaskDetail(env, ctx, path, idx) {
+async function handleGetTaskDetail(request, env, ctx, path, idx) {
   const taskId = getTaskId(path);
   let detail = idx;
   if (idx.platform === 'jst') {
@@ -1179,10 +1184,81 @@ async function handleGetTaskDetail(env, ctx, path, idx) {
     if (!jst) return error('任务数据不存在', 404);
     detail = { ...idx, ...jst };
   } else if (idx.platform === 'shopee') {
-    const sp = await shopeeGetProduct(env, taskId);
-    if (sp) detail = { ...idx, product: sp };
+    const [sp, profileRows] = await Promise.all([
+      shopeeGetProduct(env, taskId),
+      shopeeListTemplateProfiles(env, request.auth.username, false),
+    ]);
+    if (sp) {
+      const templateProfiles = (profileRows?.results || []).map(profile => serializeShopeeTemplateProfile(profile));
+      let templateProfile = templateProfiles.find(profile => profile.id === sp.template_profile_id) || null;
+      if (!templateProfile && sp.template_profile_id) {
+        const linkedProfile = await shopeeGetTemplateProfile(env, sp.template_profile_id, request.auth.username);
+        if (linkedProfile) templateProfile = serializeShopeeTemplateProfile(linkedProfile);
+      }
+      detail = { ...idx, product: sp, template_profile: templateProfile, template_profiles: templateProfiles };
+    }
   }
   return json({ success: true, task: detail });
+}
+
+async function handleSwitchShopeeTaskTemplate(request, env, path, idx) {
+  if (idx.platform !== 'shopee') return error('只有 Shopee 任务支持切换模板', 400);
+  const taskId = getTaskId(path);
+  const body = await parseBody(request) || {};
+  const profileId = String(body.template_profile_id || '').trim();
+  if (!profileId) return error('请选择 Shopee 模板档案', 400);
+  const [product, profile, version] = await Promise.all([
+    shopeeGetProduct(env, taskId),
+    shopeeGetTemplateProfile(env, profileId, request.auth.username),
+    shopeeGetCurrentTemplateVersion(env, profileId),
+  ]);
+  if (!product) return error('Shopee 任务数据不存在', 404);
+  if (!profile || profile.status !== 'active' || profile.deleted_at) return error('所选模板档案不存在或不可用', 400);
+  if (!version || version.status !== 'ready') return error('所选模板没有可用版本', 400);
+  if (product.template_profile_id === profileId) {
+    return json({ success: true, unchanged: true, template_profile: serializeShopeeTemplateProfile(profile, version), message: '任务已使用该模板' });
+  }
+
+  const manifest = parseJson(version.manifest_json, {});
+  const templateChannels = Array.isArray(manifest.shipping_channels) ? manifest.shipping_channels : [];
+  const channelMap = new Map(templateChannels.map(channel => [String(channel.id), channel]));
+  const selectedChannels = normalizeShopeeShippingChannels(product.shipping_channels);
+  const unsupportedChannels = selectedChannels.filter(channel => !channelMap.has(channel));
+  if (unsupportedChannels.length) return error(`新模板不支持任务已选物流渠道：${unsupportedChannels.join(', ')}`, 409);
+
+  const preOrderDts = product.pre_order_dts === null || product.pre_order_dts === undefined || product.pre_order_dts === ''
+    ? null : Number(product.pre_order_dts);
+  if (preOrderDts !== null) {
+    const blockedChannels = selectedChannels.filter(channel => channelMap.get(channel)?.supports_preorder === false);
+    if (blockedChannels.length) return error(`新模板的物流渠道不支持预售：${blockedChannels.join(', ')}`, 409);
+  }
+
+  const categoryId = String(product.category_id || '').trim();
+  const category = categoryId ? await shopeeGetTemplateCategory(env, version.id, categoryId) : null;
+  if (categoryId && !category) return error(`新模板不包含任务分类 ID：${categoryId}`, 409);
+  if (preOrderDts !== null && category?.dts_min !== null && category?.dts_min !== undefined) {
+    if (preOrderDts < Number(category.dts_min) || preOrderDts > Number(category.dts_max)) {
+      return error(`新模板中该分类的 Pre-order DTS 范围为 ${category.dts_range}`, 409);
+    }
+  }
+
+  const highestPrice = Math.max(0, ...(product.variations || []).map(variation => {
+    const value = Number(variation.price_float_enabled ? variation.price_max : variation.price);
+    return Number.isFinite(value) ? value : 0;
+  }));
+  for (const channelId of selectedChannels) {
+    const priceLimit = Number(channelMap.get(channelId)?.price_limit);
+    if (Number.isFinite(priceLimit) && priceLimit > 0 && highestPrice > priceLimit) {
+      return error(`新模板物流渠道 ${channelId} 的最高价格限制为 ${priceLimit}`, 409);
+    }
+  }
+
+  await shopeeUpdateProductTemplate(env, taskId, profileId, version.id);
+  return json({
+    success: true,
+    template_profile: serializeShopeeTemplateProfile(profile, version),
+    message: '任务模板已切换，现有商品、图片和工作流结果保持不变',
+  });
 }
 
 async function handleUpdateTask(request, env, path, idx) {
