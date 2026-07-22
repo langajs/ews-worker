@@ -140,7 +140,7 @@
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ { success: true, status: 'accepted' } }}",
+        "responseBody": "={{ { success: true, status: 'accepted', plan_id: $json.body.plan_id || '' } }}",
         "options": {
           "responseCode": 202
         }

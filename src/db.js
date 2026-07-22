@@ -179,7 +179,7 @@ async function jstCreateExpectedImages(env, tid, sid, si, vc, mode, mic, dic, in
 }
 async function jstCheckSubTaskImages(env, sid) { var r = await getOne(env, "SELECT COUNT(*) as total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as done FROM ews_jst_task_images WHERE sub_task_id = ?", [sid]); return { total: r?.total || 0, completed: r?.done || 0 }; }
 async function jstCheckParentCompletion(env, tid) {
-  var p = await getOne(env, "SELECT SUM(CASE WHEN status IN ('pending','processing') THEN 1 ELSE 0 END) as active, SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed FROM ews_jst_push_plans WHERE task_id = ?", [tid]);
+  var p = await getOne(env, "SELECT SUM(CASE WHEN status IN ('pending','dispatching','processing') THEN 1 ELSE 0 END) as active, SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed FROM ews_jst_push_plans WHERE task_id = ?", [tid]);
   if ((p?.failed || 0) > 0) { var fs = (p?.active || 0) > 0 ? 'partial_failed' : 'failed'; await env.DB.prepare("UPDATE ews_jst_tasks SET status=?, updated_at=datetime('now') WHERE id=?").bind(fs, tid).run(); await updateTaskIndexStatus(env, tid, fs); return; }
   var r = await getOne(env, "SELECT COUNT(*) as total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as done FROM ews_jst_sub_tasks WHERE parent_task_id = ?", [tid]);
   if (r && r.total > 0 && r.total === r.done && (p?.active || 0) === 0) { await env.DB.prepare("UPDATE ews_jst_tasks SET status='completed', updated_at=datetime('now') WHERE id=?").bind(tid).run(); await updateTaskIndexStatus(env, tid, 'completed'); }
@@ -198,7 +198,7 @@ async function jstCreatePushPlans(env, plans) { await createPushPlans(env, 'ews_
 async function jstGetPushPlans(env, tid) { return await query(env, "SELECT * FROM ews_jst_push_plans WHERE task_id = ? ORDER BY batch_order ASC, webhook_type ASC", [tid]); }
 async function jstGetPendingPlans(env, tid, lim) { return await query(env, "SELECT * FROM ews_jst_push_plans WHERE task_id = ? AND status='pending' ORDER BY batch_order ASC LIMIT ?", [tid, lim]); }
 async function jstUpdatePlanStatus(env, pid, s, e) { await env.DB.prepare("UPDATE ews_jst_push_plans SET status=?, error=? WHERE id=?").bind(s, e || '', pid).run(); }
-async function jstGetPlanStats(env, tid) { var r = await query(env, "SELECT status, COUNT(*) as cnt FROM ews_jst_push_plans WHERE task_id=? GROUP BY status", [tid]); var s = { pending: 0, processing: 0, done: 0, failed: 0, total: 0 }; for (const x of (r?.results || [])) { s[x.status] = x.cnt; s.total += x.cnt; } return s; }
+async function jstGetPlanStats(env, tid) { var r = await query(env, "SELECT status, COUNT(*) as cnt FROM ews_jst_push_plans WHERE task_id=? GROUP BY status", [tid]); var s = { pending: 0, dispatching: 0, processing: 0, done: 0, failed: 0, total: 0 }; for (const x of (r?.results || [])) { s[x.status] = x.cnt; s.total += x.cnt; } return s; }
 async function jstRefundCredits(env, tid) { var t = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id = ?", [tid]); if (t?.user_id) await env.DB.prepare("UPDATE ews_users SET credits = credits + 1 WHERE id = ?").bind(t.user_id).run(); }
 
 // ==================== Shopee 模块 ====================
@@ -496,7 +496,7 @@ async function shopeeCreateExpectedImages(env, tid, sid, si, mic, dic, skuCount,
 async function shopeeCheckSubTaskImages(env, sid) { var r = await getOne(env, "SELECT COUNT(*) as total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as done FROM ews_shopee_task_images WHERE sub_task_id = ?", [sid]); return { total: r?.total || 0, completed: r?.done || 0 }; }
 async function shopeeSaveImage(env, img) { var pk = img.sub_task_id + '_' + img.image_type + '_' + img.position + '_'; await env.DB.prepare("INSERT OR REPLACE INTO ews_shopee_task_images (id, parent_task_id, sub_task_id, set_index, image_type, position, image_url, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', datetime('now'))").bind(pk, img.parent_task_id, img.sub_task_id, img.set_index, img.image_type, img.position, img.image_url).run(); }
 async function shopeeCheckParentCompletion(env, tid) {
-  var p = await getOne(env, "SELECT SUM(CASE WHEN status IN ('pending','processing') THEN 1 ELSE 0 END) as active, SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed FROM ews_shopee_push_plans WHERE task_id = ?", [tid]);
+  var p = await getOne(env, "SELECT SUM(CASE WHEN status IN ('pending','dispatching','processing') THEN 1 ELSE 0 END) as active, SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed FROM ews_shopee_push_plans WHERE task_id = ?", [tid]);
   if ((p?.failed || 0) > 0) { var fs = (p?.active || 0) > 0 ? 'partial_failed' : 'failed'; await env.DB.prepare("UPDATE ews_shopee_products SET status=?, updated_at=datetime('now') WHERE id=?").bind(fs, tid).run(); await updateTaskIndexStatus(env, tid, fs); return; }
   var r = await getOne(env, "SELECT COUNT(*) as total, SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as done FROM ews_shopee_sub_tasks WHERE parent_task_id = ?", [tid]);
   if (r && r.total > 0 && r.total === r.done && (p?.active || 0) === 0) { await env.DB.prepare("UPDATE ews_shopee_products SET status='completed', updated_at=datetime('now') WHERE id=?").bind(tid).run(); await updateTaskIndexStatus(env, tid, 'completed'); }
@@ -508,7 +508,7 @@ async function shopeeCreatePushPlans(env, plans) { await createPushPlans(env, 'e
 async function shopeeGetPushPlans(env, tid) { return await query(env, "SELECT * FROM ews_shopee_push_plans WHERE task_id = ? ORDER BY batch_order ASC, webhook_type ASC", [tid]); }
 async function shopeeGetPendingPlans(env, tid, lim) { return await query(env, "SELECT * FROM ews_shopee_push_plans WHERE task_id = ? AND status='pending' ORDER BY batch_order ASC LIMIT ?", [tid, lim]); }
 async function shopeeUpdatePlanStatus(env, pid, s, e) { await env.DB.prepare("UPDATE ews_shopee_push_plans SET status=?, error=? WHERE id=?").bind(s, e || '', pid).run(); }
-async function shopeeGetPlanStats(env, tid) { var r = await query(env, "SELECT status, COUNT(*) as cnt FROM ews_shopee_push_plans WHERE task_id=? GROUP BY status", [tid]); var s = { pending: 0, processing: 0, done: 0, failed: 0, total: 0 }; for (const x of (r?.results || [])) { s[x.status] = x.cnt; s.total += x.cnt; } return s; }
+async function shopeeGetPlanStats(env, tid) { var r = await query(env, "SELECT status, COUNT(*) as cnt FROM ews_shopee_push_plans WHERE task_id=? GROUP BY status", [tid]); var s = { pending: 0, dispatching: 0, processing: 0, done: 0, failed: 0, total: 0 }; for (const x of (r?.results || [])) { s[x.status] = x.cnt; s.total += x.cnt; } return s; }
 
 // Shopee 导出记录
 async function shopeeCreateExportRecord(env, r) { await env.DB.prepare("INSERT INTO ews_shopee_export_records (id, task_id, file_url, created_at) VALUES (?, ?, ?, datetime('now'))").bind(r.id, r.task_id, r.file_url).run(); }

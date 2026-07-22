@@ -2013,6 +2013,8 @@ const MAX_QUEUE_DISPATCHES_PER_RUN = 100;
 const QUEUE_USER_TURN_SIZE = 10;
 const PUSH_PLAN_MAX_RETRIES = 3;
 const PUSH_PLAN_RETRY_DELAYS_SECONDS = [30, 120, 300];
+const PUSH_WEBHOOK_TIMEOUT_MS = 15_000;
+const PUSH_PLAN_DISPATCH_TIMEOUT_SECONDS = 90;
 
 async function getPendingPlansForRelease(env, planTable, taskId, imageLimit, metadataLimit, flags, dispatchBudget) {
   const safeTable = normalizePushPlanTable(planTable);
@@ -2055,23 +2057,59 @@ async function pushToWebhook(url, data) {
     missingUrl.retryable = false;
     throw missingUrl;
   }
-  const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-  if (!resp.ok) {
-    const responseError = new Error('Webhook响应异常: HTTP ' + resp.status);
-    responseError.retryable = resp.status === 408 || resp.status === 425 || resp.status === 429 || resp.status >= 500;
-    throw responseError;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PUSH_WEBHOOK_TIMEOUT_MS);
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+      signal: controller.signal,
+    });
+    if (resp.status !== 202) {
+      const responseError = new Error('Webhook响应异常: HTTP ' + resp.status + '，预期 HTTP 202');
+      responseError.retryable = resp.ok || resp.status === 408 || resp.status === 425 || resp.status === 429 || resp.status >= 500;
+      throw responseError;
+    }
+    let ack;
+    try { ack = await resp.json(); }
+    catch (_) {
+      const invalidJson = new Error('Webhook ACK不是有效JSON');
+      invalidJson.retryable = true;
+      throw invalidJson;
+    }
+    const expectedPlanId = String(data?.plan_id || '');
+    if (ack?.success !== true || ack?.status !== 'accepted' || String(ack?.plan_id || '') !== expectedPlanId) {
+      const invalidAck = new Error('Webhook ACK校验失败');
+      invalidAck.retryable = true;
+      throw invalidAck;
+    }
+    return ack;
+  } catch (err) {
+    if (err?.name === 'AbortError') {
+      const timeout = new Error(`Webhook请求超过${PUSH_WEBHOOK_TIMEOUT_MS / 1000}秒未确认接收`);
+      timeout.retryable = true;
+      throw timeout;
+    }
+    if (err.retryable === undefined) err.retryable = true;
+    throw err;
+  } finally {
+    clearTimeout(timer);
   }
-  return true;
 }
 
 async function markPushPlanFailed(env, planTable, planId, message, expectedStatus = 'processing') {
   const safeTable = normalizePushPlanTable(planTable);
-  const currentStatus = expectedStatus === 'pending' ? 'pending' : 'processing';
+  const statusWhere = expectedStatus === 'pending'
+    ? "status='pending'"
+    : expectedStatus === 'dispatching'
+      ? "status='dispatching'"
+      : "status IN ('dispatching','processing')";
   const plan = await getOne(env, `SELECT task_id FROM ${safeTable} WHERE id=?`, [planId]);
   const result = await env.DB.prepare(`UPDATE ${safeTable}
     SET status='failed', retry_count=?, error=?, processing_at='', next_retry_at='', updated_at=datetime('now')
-    WHERE id=? AND status=?`)
-    .bind(PUSH_PLAN_MAX_RETRIES, message || '推送失败', planId, currentStatus).run();
+    WHERE id=? AND ${statusWhere}`)
+    .bind(PUSH_PLAN_MAX_RETRIES, message || '推送失败', planId).run();
   if (d1Changes(result) > 0 && plan?.task_id) await reconcileTaskStatusForPushPlans(env, safeTable, plan.task_id, message || '推送失败');
   return d1Changes(result) > 0;
 }
@@ -2089,7 +2127,7 @@ async function schedulePushPlanRetry(env, planTable, planId, taskId, retryCount,
   const retryMessage = `${message || '推送失败'}；${delaySeconds}秒后自动重试 (${nextRetryCount}/${PUSH_PLAN_MAX_RETRIES})`;
   const result = await env.DB.prepare(`UPDATE ${safeTable}
     SET status='pending', retry_count=?, error=?, processing_at='', next_retry_at=datetime('now', ?), updated_at=datetime('now')
-    WHERE id=? AND task_id=? AND status='processing'`)
+    WHERE id=? AND task_id=? AND status IN ('dispatching','processing')`)
     .bind(nextRetryCount, retryMessage, `+${delaySeconds} seconds`, planId, taskId).run();
   if (d1Changes(result) < 1) return false;
   await refundTaskCredit(env, taskId);
@@ -2101,7 +2139,7 @@ async function completePushPlanFromCallback(env, planTable, taskId, webhookType,
   const subTaskClause = subTaskId ? ' AND sub_task_id=?' : '';
   const params = [taskId, webhookType];
   if (subTaskId) params.push(subTaskId);
-  const completed = await env.DB.prepare(`UPDATE ${safeTable} SET status='done', error='', next_retry_at='', updated_at=datetime('now') WHERE task_id=? AND webhook_type=?${subTaskClause} AND status='processing'`).bind(...params).run();
+  const completed = await env.DB.prepare(`UPDATE ${safeTable} SET status='done', error='', processing_at='', next_retry_at='', updated_at=datetime('now') WHERE task_id=? AND webhook_type=?${subTaskClause} AND status IN ('dispatching','processing')`).bind(...params).run();
   if (d1Changes(completed) > 0) return true;
   const donePlan = await getOne(env, `SELECT id FROM ${safeTable} WHERE task_id=? AND webhook_type=?${subTaskClause} AND status='done'`, params);
   if (donePlan) return true;
@@ -2127,10 +2165,10 @@ async function completePushPlanByIdFromCallback(env, planTable, taskId, planId) 
   const plan = await getOne(env, `SELECT id, status FROM ${safeTable} WHERE id=? AND task_id=?`, [planId, taskId]);
   if (!plan) return false;
   if (plan.status === 'done') return true;
-  if (plan.status === 'processing') {
+  if (plan.status === 'dispatching' || plan.status === 'processing') {
     const completed = await env.DB.prepare(`UPDATE ${safeTable}
       SET status='done', error='', processing_at='', next_retry_at='', updated_at=datetime('now')
-      WHERE id=? AND task_id=? AND status='processing'`).bind(planId, taskId).run();
+      WHERE id=? AND task_id=? AND status=?`).bind(planId, taskId, plan.status).run();
     return d1Changes(completed) > 0;
   }
   const acceptsLateCallback = plan.status === 'pending' || plan.status === 'failed';
@@ -2146,14 +2184,14 @@ async function completePushPlanByIdFromCallback(env, planTable, taskId, planId) 
 
 async function getUserImageActiveCount(env, userId) {
   const active = await getOne(env, `SELECT
-    ((SELECT COUNT(*) FROM ews_jst_push_plans WHERE user_id=? AND status='processing' AND is_image=1)
-    + (SELECT COUNT(*) FROM ews_shopee_push_plans WHERE user_id=? AND status='processing' AND is_image=1)) AS cnt`, [userId, userId]);
+    ((SELECT COUNT(*) FROM ews_jst_push_plans WHERE user_id=? AND status IN ('dispatching','processing') AND is_image=1)
+    + (SELECT COUNT(*) FROM ews_shopee_push_plans WHERE user_id=? AND status IN ('dispatching','processing') AND is_image=1)) AS cnt`, [userId, userId]);
   return active?.cnt || 0;
 }
 
 async function getUserMetadataActiveCount(env, userId) {
   const active = await getOne(env, `SELECT COUNT(*) AS cnt FROM ews_jst_push_plans
-    WHERE user_id=? AND status='processing' AND webhook_type='metadata'`, [userId]);
+    WHERE user_id=? AND status IN ('dispatching','processing') AND webhook_type='metadata'`, [userId]);
   return active?.cnt || 0;
 }
 
@@ -2161,25 +2199,25 @@ async function claimPushPlan(env, planTable, plan, taskId, userId, imageConcurre
   const safeTable = normalizePushPlanTable(planTable);
   if (safeTable === 'ews_jst_push_plans' && plan.webhook_type === 'metadata') {
     const claim = await env.DB.prepare(`UPDATE ${safeTable}
-      SET status='processing', error='', processing_at=datetime('now'), next_retry_at='', updated_at=datetime('now')
+      SET status='dispatching', error='', processing_at=datetime('now'), next_retry_at='', updated_at=datetime('now')
       WHERE id=? AND task_id=? AND status='pending' AND (next_retry_at='' OR next_retry_at<=datetime('now'))
-      AND (SELECT COUNT(*) FROM ews_jst_push_plans WHERE user_id=? AND status='processing' AND webhook_type='metadata') < ?`)
+      AND (SELECT COUNT(*) FROM ews_jst_push_plans WHERE user_id=? AND status IN ('dispatching','processing') AND webhook_type='metadata') < ?`)
       .bind(plan.id, taskId, userId, JST_METADATA_CONCURRENCY).run();
     return d1Changes(claim) > 0;
   }
   if (!plan.is_image) {
     const claim = await env.DB.prepare(`UPDATE ${safeTable}
-      SET status='processing', error='', processing_at=datetime('now'), next_retry_at='', updated_at=datetime('now')
+      SET status='dispatching', error='', processing_at=datetime('now'), next_retry_at='', updated_at=datetime('now')
       WHERE id=? AND task_id=? AND status='pending' AND (next_retry_at='' OR next_retry_at<=datetime('now'))`)
       .bind(plan.id, taskId).run();
     return d1Changes(claim) > 0;
   }
   const claim = await env.DB.prepare(`UPDATE ${safeTable}
-      SET status='processing', error='', processing_at=datetime('now'), next_retry_at='', updated_at=datetime('now')
+      SET status='dispatching', error='', processing_at=datetime('now'), next_retry_at='', updated_at=datetime('now')
       WHERE id=? AND task_id=? AND status='pending'
       AND (next_retry_at='' OR next_retry_at<=datetime('now'))
-      AND ((SELECT COUNT(*) FROM ews_jst_push_plans WHERE user_id=? AND status='processing' AND is_image=1)
-      + (SELECT COUNT(*) FROM ews_shopee_push_plans WHERE user_id=? AND status='processing' AND is_image=1)) < ?`)
+      AND ((SELECT COUNT(*) FROM ews_jst_push_plans WHERE user_id=? AND status IN ('dispatching','processing') AND is_image=1)
+      + (SELECT COUNT(*) FROM ews_shopee_push_plans WHERE user_id=? AND status IN ('dispatching','processing') AND is_image=1)) < ?`)
     .bind(plan.id, taskId, userId, userId, imageConcurrencyLimit).run();
   return d1Changes(claim) > 0;
 }
@@ -2190,10 +2228,13 @@ async function dispatchPushPlan(env, planTable, taskId, plan) {
     try { payload = JSON.parse(plan.payload); }
     catch (err) { err.retryable = false; throw err; }
     await pushToWebhook(plan.webhook_url, payload);
+    await env.DB.prepare(`UPDATE ${normalizePushPlanTable(planTable)}
+      SET status='processing', processing_at=datetime('now'), updated_at=datetime('now')
+      WHERE id=? AND task_id=? AND status='dispatching'`).bind(plan.id, taskId).run();
   } catch (err) {
     if (err.retryable !== false && await schedulePushPlanRetry(env, planTable, plan.id, taskId, plan.retry_count, err.message)) return;
     const terminalMessage = err.retryable === false ? err.message : `${err.message}；已达到自动重试上限`;
-    const failed = await markPushPlanFailed(env, planTable, plan.id, terminalMessage);
+    const failed = await markPushPlanFailed(env, planTable, plan.id, terminalMessage, 'dispatching');
     if (!failed) return;
     await refundTaskCredit(env, taskId);
   }
@@ -2223,7 +2264,7 @@ async function releaseTaskPlans(env, planTable, platform, taskId, ctx, dispatchB
     const claimed = await claimPushPlan(env, planTable, plan, taskId, ownerId, imageConcurrencyLimit);
     if (!claimed) continue;
     if (taskOwner?.user_id && !(await consumeUserCredit(env, taskOwner.user_id))) {
-      await markPushPlanFailed(env, planTable, plan.id, '算力不足');
+      await markPushPlanFailed(env, planTable, plan.id, '算力不足', 'dispatching');
       continue;
     }
     dispatched++;
@@ -2405,7 +2446,7 @@ async function setTaskStatusForPushPlan(env, planTable, taskId, status) {
 async function reconcileTaskStatusForPushPlans(env, planTable, taskId, message, options = {}) {
   const safeTable = normalizePushPlanTable(planTable);
   const stats = await getOne(env, `SELECT
-    SUM(CASE WHEN status IN ('pending','processing') THEN 1 ELSE 0 END) as active,
+    SUM(CASE WHEN status IN ('pending','dispatching','processing') THEN 1 ELSE 0 END) as active,
     SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) as failed
     FROM ${safeTable} WHERE task_id=?`, [taskId]);
   const active = stats?.active || 0;
@@ -2419,10 +2460,10 @@ async function reconcileTaskStatusForPushPlans(env, planTable, taskId, message, 
 
 async function reconcileOpenPushPlanTaskStatuses(env) {
   const jstRows = await query(env, `SELECT DISTINCT task_id FROM ews_jst_push_plans
-    WHERE status IN ('failed','pending','processing') LIMIT 100`);
+    WHERE status IN ('failed','pending','dispatching','processing') LIMIT 100`);
   for (const row of (jstRows?.results || [])) await reconcileTaskStatusForPushPlans(env, 'ews_jst_push_plans', row.task_id);
   const shopeeRows = await query(env, `SELECT DISTINCT task_id FROM ews_shopee_push_plans
-    WHERE status IN ('failed','pending','processing') LIMIT 100`);
+    WHERE status IN ('failed','pending','dispatching','processing') LIMIT 100`);
   for (const row of (shopeeRows?.results || [])) await reconcileTaskStatusForPushPlans(env, 'ews_shopee_push_plans', row.task_id);
 }
 
@@ -2430,6 +2471,15 @@ async function recoverStalePushPlans(env) {
   const timeoutMinutes = await getPushPlanTimeoutMinutes(env);
   const staleModifier = `-${timeoutMinutes} minutes`;
   for (const table of ['ews_jst_push_plans', 'ews_shopee_push_plans']) {
+    const dispatchingRows = await query(env, `SELECT id, task_id, retry_count FROM ${table}
+      WHERE status='dispatching' AND processing_at < datetime('now', ?)
+      ORDER BY processing_at ASC LIMIT 50`, [`-${PUSH_PLAN_DISPATCH_TIMEOUT_SECONDS} seconds`]);
+    for (const row of (dispatchingRows?.results || [])) {
+      const message = `Push plan dispatch acknowledgement timed out after ${PUSH_PLAN_DISPATCH_TIMEOUT_SECONDS} seconds`;
+      if (await schedulePushPlanRetry(env, table, row.id, row.task_id, row.retry_count, message)) continue;
+      const failed = await markPushPlanFailed(env, table, row.id, `${message}；已达到自动重试上限`, 'dispatching');
+      if (failed) await refundTaskCredit(env, row.task_id);
+    }
     const rows = await query(env, `SELECT id, task_id, retry_count FROM ${table}
       WHERE status='processing' AND processing_at < datetime('now', ?)
       ORDER BY processing_at ASC LIMIT 50`, [staleModifier]);
@@ -2481,7 +2531,7 @@ async function failImageQueuePlan(env, row, reason) {
   const whType = `${row.image_type}_${parseInt(row.image_position) || 1}`;
   const result = await env.DB.prepare(`UPDATE ${planTable}
     SET status='failed', retry_count=?, error=?, processing_at='', next_retry_at='', updated_at=datetime('now')
-    WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`)
+    WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status IN ('dispatching','processing')`)
     .bind(PUSH_PLAN_MAX_RETRIES, reason, row.task_id, row.sub_task_id || '', whType).run();
   if (d1Changes(result) > 0) {
     await refundTaskCredit(env, row.task_id);
@@ -2729,11 +2779,11 @@ function callbackWebhookType(payload) {
 }
 
 async function findProcessingCallbackPlan(env, planTable, taskId, webhookType, subTaskId, planId = '') {
-  if (planId) return getOne(env, `SELECT id, retry_count FROM ${planTable} WHERE id=? AND task_id=? AND webhook_type=? AND status='processing'`, [planId, taskId, webhookType]);
+  if (planId) return getOne(env, `SELECT id, retry_count FROM ${planTable} WHERE id=? AND task_id=? AND webhook_type=? AND status IN ('dispatching','processing')`, [planId, taskId, webhookType]);
   const subTaskWhere = webhookType === 'title' ? '' : ' AND sub_task_id=?';
   const params = [taskId, webhookType];
   if (subTaskWhere) params.push(subTaskId || '');
-  return getOne(env, `SELECT id, retry_count FROM ${planTable} WHERE task_id=? AND webhook_type=?${subTaskWhere} AND status='processing'`, params);
+  return getOne(env, `SELECT id, retry_count FROM ${planTable} WHERE task_id=? AND webhook_type=?${subTaskWhere} AND status IN ('dispatching','processing')`, params);
 }
 
 async function failCallbackPushPlan(env, row, reason) {
@@ -2896,7 +2946,7 @@ async function processImageQueuePayload(env, ctx, row) {
       : await completePushPlanFromCallback(env, planTable, task_id, whType, sub_task_id);
     if (!completed) throw new Error('图片计划暂时无法完成，请稍后重试');
   } else {
-    const planInfo = await env.DB.prepare(`SELECT id, webhook_url, payload, retry_count FROM ${planTable} WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status='processing'`)
+    const planInfo = await env.DB.prepare(`SELECT id, webhook_url, payload, retry_count FROM ${planTable} WHERE task_id=? AND sub_task_id=? AND webhook_type=? AND status IN ('dispatching','processing')`)
       .bind(task_id, sub_task_id, whType).first();
     const workflowError = String(row.error_message || '').trim();
     if (planInfo) {
@@ -3207,7 +3257,7 @@ async function handleGetPlans(env, path, idx) {
     `${image.sub_task_id || ''}|${image.image_type}|${parseInt(image.position) || 1}`,
     image.image_url || '',
   ]));
-  const s = { pending: 0, processing: 0, done: 0, failed: 0, total: 0 };
+  const s = { pending: 0, dispatching: 0, processing: 0, done: 0, failed: 0, total: 0 };
   for (const r of stats) { s[r.status] = r.cnt; s.total += r.cnt; }
   return json({ success: true, plans: plans.map(p => {
     let preview_url = '';
@@ -3236,7 +3286,7 @@ async function handleRetryPlan(env, path, request, ctx, idx) {
   const plansTable = idx.platform === 'jst' ? 'ews_jst_push_plans' : 'ews_shopee_push_plans';
   const plan = await getOne(env, `SELECT * FROM ${plansTable} WHERE id=?`, [planId]);
   if (!plan || plan.task_id !== taskId) return error('计划不存在', 404);
-  if (plan.status === 'processing') return error('计划正在处理中，请勿重复推送', 409);
+  if (plan.status === 'dispatching' || plan.status === 'processing') return error('计划正在处理中，请勿重复推送', 409);
   await clearFailedImageQueueForPlan(env, plan);
   await env.DB.prepare(`UPDATE ${plansTable} SET status='pending', retry_count=0, error='', processing_at='', next_retry_at='', updated_at=datetime('now') WHERE id=?`).bind(planId).run();
   await reconcileTaskStatusForPushPlans(env, plansTable, taskId, 'retry plan resumed', { resumeWhenNoFailures: true });

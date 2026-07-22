@@ -10,7 +10,10 @@
       },
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2.1,
-      "position": [-384, -32],
+      "position": [
+        -384,
+        -32
+      ],
       "id": "1189d0e9-a64c-4e78-a8da-85a49af2a001",
       "name": "Webhook",
       "webhookId": "ea268e70-8d37-49ab-b275-9dfbf04b3001"
@@ -42,19 +45,27 @@
       },
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
-      "position": [-160, -32],
+      "position": [
+        -160,
+        -32
+      ],
       "id": "514515b6-4b78-42ad-b125-17eb9baa7002",
       "name": "密钥校对"
     },
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ { success: true, status: 'accepted' } }}",
-        "options": { "responseCode": 202 }
+        "responseBody": "={{ { success: true, status: 'accepted', plan_id: $json.body.plan_id || '' } }}",
+        "options": {
+          "responseCode": 202
+        }
       },
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.4,
-      "position": [64, -192],
+      "position": [
+        64,
+        -192
+      ],
       "id": "876ef398-2a0b-4fb9-babf-458f0eea7003",
       "name": "接受请求"
     },
@@ -62,11 +73,16 @@
       "parameters": {
         "respondWith": "json",
         "responseBody": "={{ { success: false, error: 'callback_secret 校验失败', retryable: false } }}",
-        "options": { "responseCode": 401 }
+        "options": {
+          "responseCode": 401
+        }
       },
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.4,
-      "position": [64, 128],
+      "position": [
+        64,
+        128
+      ],
       "id": "0e3c91f0-cbf5-49c7-8098-83e6f46f7004",
       "name": "拒绝请求"
     },
@@ -76,7 +92,10 @@
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [288, -32],
+      "position": [
+        288,
+        -32
+      ],
       "id": "f52f4d5c-758a-40df-b08b-77e049977005",
       "name": "提取参数",
       "onError": "continueErrorOutput"
@@ -94,7 +113,10 @@
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
-      "position": [512, -32],
+      "position": [
+        512,
+        -32
+      ],
       "id": "5b8822eb-07fa-420a-a7e0-136012897006",
       "name": "deepseek-v4-flash",
       "retryOnFail": true,
@@ -102,7 +124,10 @@
       "waitBetweenTries": 5000,
       "onError": "continueErrorOutput",
       "credentials": {
-        "httpHeaderAuth": { "id": "11xE3AjgQ1iUHDdR", "name": "deepseek" }
+        "httpHeaderAuth": {
+          "id": "11xE3AjgQ1iUHDdR",
+          "name": "deepseek"
+        }
       }
     },
     {
@@ -111,7 +136,10 @@
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [736, -32],
+      "position": [
+        736,
+        -32
+      ],
       "id": "c4033b3a-4045-4f8a-be91-59cf1cdc7007",
       "name": "校验商品元数据",
       "onError": "continueErrorOutput"
@@ -121,7 +149,14 @@
         "method": "POST",
         "url": "={{ $json.callbackUrl }}",
         "sendHeaders": true,
-        "headerParameters": { "parameters": [{ "name": "Content-Type", "value": "application/json" }] },
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ { callback_secret: $json.callback_secret, task_id: $json.task_id, plan_id: $json.plan_id, workflow_type: $json.workflow_type, products: $json.products } }}",
@@ -129,7 +164,10 @@
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
-      "position": [960, -96],
+      "position": [
+        960,
+        -96
+      ],
       "id": "6270512a-815d-4a3a-98b3-5259224a7008",
       "name": "成功回调",
       "retryOnFail": true,
@@ -142,7 +180,10 @@
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [736, 192],
+      "position": [
+        736,
+        192
+      ],
       "id": "7f9030d0-dbb2-4db9-acd2-d16dcc4e7009",
       "name": "失败封装"
     },
@@ -151,7 +192,14 @@
         "method": "POST",
         "url": "={{ $json.callbackUrl }}",
         "sendHeaders": true,
-        "headerParameters": { "parameters": [{ "name": "Content-Type", "value": "application/json" }] },
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ { callback_secret: $json.callback_secret, task_id: $json.task_id, plan_id: $json.plan_id, workflow_type: $json.workflow_type, error: $json.error, retryable: $json.retryable } }}",
@@ -159,7 +207,10 @@
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
-      "position": [960, 192],
+      "position": [
+        960,
+        192
+      ],
       "id": "63fd0941-9592-4f25-b88a-74e7b9e37010",
       "name": "失败回调",
       "retryOnFail": true,
@@ -168,13 +219,111 @@
     }
   ],
   "connections": {
-    "Webhook": { "main": [[{ "node": "密钥校对", "type": "main", "index": 0 }]] },
-    "密钥校对": { "main": [[{ "node": "接受请求", "type": "main", "index": 0 }], [{ "node": "拒绝请求", "type": "main", "index": 0 }]] },
-    "接受请求": { "main": [[{ "node": "提取参数", "type": "main", "index": 0 }]] },
-    "提取参数": { "main": [[{ "node": "deepseek-v4-flash", "type": "main", "index": 0 }], [{ "node": "失败封装", "type": "main", "index": 0 }]] },
-    "deepseek-v4-flash": { "main": [[{ "node": "校验商品元数据", "type": "main", "index": 0 }], [{ "node": "失败封装", "type": "main", "index": 0 }]] },
-    "校验商品元数据": { "main": [[{ "node": "成功回调", "type": "main", "index": 0 }], [{ "node": "失败封装", "type": "main", "index": 0 }]] },
-    "失败封装": { "main": [[{ "node": "失败回调", "type": "main", "index": 0 }]] }
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "密钥校对",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "密钥校对": {
+      "main": [
+        [
+          {
+            "node": "接受请求",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "拒绝请求",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "接受请求": {
+      "main": [
+        [
+          {
+            "node": "提取参数",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "提取参数": {
+      "main": [
+        [
+          {
+            "node": "deepseek-v4-flash",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "失败封装",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "deepseek-v4-flash": {
+      "main": [
+        [
+          {
+            "node": "校验商品元数据",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "失败封装",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "校验商品元数据": {
+      "main": [
+        [
+          {
+            "node": "成功回调",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "失败封装",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "失败封装": {
+      "main": [
+        [
+          {
+            "node": "失败回调",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
   },
   "pinData": {},
   "active": false,
