@@ -1538,7 +1538,7 @@ async function handleUpdateTask(request, env, path, idx) {
         return error(`该分类的 Pre-order DTS 范围为 ${templateCategory.dts_range}`, 400);
       }
     }
-    await env.DB.prepare("UPDATE ews_tasks SET name=?, status='pending', updated_at=datetime('now') WHERE id=?").bind(taskName, taskId).run();
+    await env.DB.prepare("UPDATE ews_tasks SET name=?, status='pending', completed_at=NULL, updated_at=datetime('now') WHERE id=?").bind(taskName, taskId).run();
     await shopeeCreateProduct(env, {
       id: taskId, task_id: taskId, template_profile_id: templateProfileId, template_version_id: templateVersion.id, name: taskName, category_id: categoryId,
       source_brief: sourceBrief, product_type: productType,
@@ -1661,7 +1661,7 @@ async function handleUpdateTask(request, env, path, idx) {
       mode: mode === 'dedup' ? 'dedup' : 'full',
     });
     // 更新索引
-    await env.DB.prepare("UPDATE ews_tasks SET name = ?, status = 'pending', updated_at = datetime('now') WHERE id = ?")
+    await env.DB.prepare("UPDATE ews_tasks SET name = ?, status = 'pending', completed_at = NULL, updated_at = datetime('now') WHERE id = ?")
       .bind(String(name).slice(0, 30), taskId).run();
 
     // 变体（二维规格）

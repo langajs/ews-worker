@@ -76,7 +76,7 @@ async function consumeUserCredit(env, userId) {
 }
 
 async function createTaskIndex(env, id, platform, name, userId) { await env.DB.prepare("INSERT INTO ews_tasks (id, platform, name, status, user_id, created_at, updated_at) VALUES (?, ?, ?, 'init', ?, datetime('now'), datetime('now'))").bind(id, platform, name || '', userId || '').run(); }
-async function updateTaskIndexStatus(env, id, status) { await env.DB.prepare("UPDATE ews_tasks SET status = ?, updated_at = datetime('now') WHERE id = ?").bind(status, id).run(); }
+async function updateTaskIndexStatus(env, id, status) { await env.DB.prepare("UPDATE ews_tasks SET status = ?, updated_at = datetime('now'), completed_at = CASE WHEN ? = 'completed' THEN COALESCE(completed_at, datetime('now')) ELSE NULL END WHERE id = ?").bind(status, status, id).run(); }
 async function getTaskIndex(env, id) { return await getOne(env, "SELECT * FROM ews_tasks WHERE id = ?", [id]); }
 async function getTaskList(env, platform, userId, role, limit = 0, offset = 0) {
   let sql = "SELECT * FROM ews_tasks"; const params = []; const ws = [];

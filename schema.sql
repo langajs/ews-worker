@@ -78,11 +78,13 @@ CREATE TABLE IF NOT EXISTS ews_tasks (
   status TEXT NOT NULL DEFAULT 'init',  -- init / pending / processing / completed / failed
   user_id TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_ews_tasks_platform ON ews_tasks(platform);
 CREATE INDEX IF NOT EXISTS idx_ews_tasks_user ON ews_tasks(user_id);
 CREATE INDEX IF NOT EXISTS idx_ews_tasks_created ON ews_tasks(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ews_tasks_completed ON ews_tasks(completed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ews_tasks_user_created ON ews_tasks(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ews_tasks_platform_created ON ews_tasks(platform, created_at DESC);
 
