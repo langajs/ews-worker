@@ -25,7 +25,7 @@ Shopee basic template 不包含详情图字段，因此系统固定不构造详�
 
 ## Shopee 备用图片模型
 
-Shopee 主图、附图和 SKU 图默认使用 GRSAI。只有创建或轮询结果中的错误文本包含 `excessive system load`（不区分大小写）时，工作流才切换到 `https://api.lk888.ai` 的 `gpt-image-2`；其他错误继续沿用原有失败、轮询和 Worker 重试逻辑。备用接口同时兼容同步 `data[0].url` 和异步 `task_id` 返回，切换后仍受原任务 900 秒总超时限制，备用接口失败不会再次回切。
+Shopee 主图、附图和 SKU 图默认使用 GRSAI。只有创建或轮询结果中的错误文本包含 `excessive system load`（不区分大小写）时，工作流才切换到 `https://api.lk888.ai` 的 `gpt-image-2`；其他错误继续沿用原有失败、轮询和 Worker 重试逻辑。备用接口同时兼容同步 `data[0].url`、顶层异步 `task_id`，以及实际接口使用的 `{ code, data: { task_id } }` 包装响应；状态查询同样兼容顶层和 `data` 包装。切换后继承主模型任务的原始开始时间，始终受 900 秒总超时限制，备用接口失败不会再次回切。
 
 备用接口必须使用名为 `EWS Backup Image API`、ID 为 `bkpImgApi20260722` 的 n8n `httpHeaderAuth` credential，Header 为 `Authorization: Bearer <API_KEY>`。API Key 只能保存到 n8n 加密凭据库，不得写入工作流 JSON、仓库或日志。工作流更新执行：
 

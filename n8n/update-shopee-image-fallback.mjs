@@ -86,6 +86,7 @@ return {
   imagePosition: task.imagePosition,
   callbackSecret: task.callbackSecret,
   callbackUrl: task.callbackUrl,
+  startedAt: task.startedAt,
   elapsedSeconds,
   timedOut: elapsedSeconds >= 900,
 };`;
@@ -115,15 +116,49 @@ function errorText(value) {
   try { return JSON.stringify(value); } catch (_) { return String(value); }
 }
 
-const backupTaskId = String(response.task_id || response.id || '').trim();
-const imageUrl = String(response.result_url || response.data?.[0]?.url || response.results?.[0]?.url || '').trim();
-const state = String(response.state || '').toLowerCase();
-let error = errorText(response.error)
-  || errorText(response.message)
-  || errorText(response.description)
+function responsePayload(value) {
+  for (const key of ['data', 'result', 'payload']) {
+    const candidate = value?.[key];
+    if (candidate && !Array.isArray(candidate) && typeof candidate === 'object') return candidate;
+  }
+  return value || {};
+}
+
+function firstUrl(value, depth = 0) {
+  if (!value || depth > 4) return '';
+  if (typeof value === 'string') {
+    const text = value.trim();
+    return text.startsWith('http://') || text.startsWith('https://') ? text : '';
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) { const found = firstUrl(item, depth + 1); if (found) return found; }
+    return '';
+  }
+  if (typeof value !== 'object') return '';
+  for (const key of ['result_url', 'url', 'image_url', 'output_url']) {
+    const found = firstUrl(value[key], depth + 1); if (found) return found;
+  }
+  for (const key of ['data', 'results', 'images', 'output', 'result']) {
+    const found = firstUrl(value[key], depth + 1); if (found) return found;
+  }
+  return '';
+}
+
+const payload = responsePayload(response);
+const taskIds = payload.task_ids || response.task_ids || payload['任务ids'] || response['任务ids'];
+const backupTaskId = String(payload.task_id || response.task_id || payload.id || response.id || (Array.isArray(taskIds) ? taskIds[0] : '') || '').trim();
+const imageUrl = firstUrl(response);
+const state = String(payload.state || response.state || '').toLowerCase();
+const businessCode = Number(response.code ?? payload.code);
+const failedByCode = Number.isFinite(businessCode) && businessCode !== 0 && businessCode !== 200;
+let error = errorText(payload.error)
+  || errorText(response.error)
+  || errorText(payload.message)
+  || errorText(payload.description)
+  || (failedByCode ? errorText(response.msg) || '备用图片服务业务码 ' + businessCode : '')
   || (Number(response.statusCode) >= 400 ? '备用图片服务HTTP ' + response.statusCode : '');
 let status = imageUrl ? 'succeeded' : (backupTaskId ? 'pending' : 'failed');
-if (state === 'failed') status = 'failed';
+if (state === 'failed' || failedByCode || payload.success === false || response.success === false) status = 'failed';
 if (state === 'success' && !imageUrl) {
   status = 'failed';
   error = error || '备用图片服务返回成功但没有图片URL';
@@ -162,14 +197,49 @@ function errorText(value) {
   try { return JSON.stringify(value); } catch (_) { return String(value); }
 }
 
-const state = String(response.state || '').toLowerCase();
-const imageUrl = String(response.result_url || response.data?.[0]?.url || response.results?.[0]?.url || '').trim();
-let error = errorText(response.error)
-  || errorText(response.message)
-  || errorText(response.description)
+function responsePayload(value) {
+  for (const key of ['data', 'result', 'payload']) {
+    const candidate = value?.[key];
+    if (candidate && !Array.isArray(candidate) && typeof candidate === 'object') return candidate;
+  }
+  return value || {};
+}
+
+function firstUrl(value, depth = 0) {
+  if (!value || depth > 4) return '';
+  if (typeof value === 'string') {
+    const text = value.trim();
+    return text.startsWith('http://') || text.startsWith('https://') ? text : '';
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) { const found = firstUrl(item, depth + 1); if (found) return found; }
+    return '';
+  }
+  if (typeof value !== 'object') return '';
+  for (const key of ['result_url', 'url', 'image_url', 'output_url']) {
+    const found = firstUrl(value[key], depth + 1); if (found) return found;
+  }
+  for (const key of ['data', 'results', 'images', 'output', 'result']) {
+    const found = firstUrl(value[key], depth + 1); if (found) return found;
+  }
+  return '';
+}
+
+const payload = responsePayload(response);
+const state = String(payload.state || response.state || '').toLowerCase();
+const imageUrl = firstUrl(response);
+const businessCode = Number(response.code ?? payload.code);
+const failedByCode = Number.isFinite(businessCode) && businessCode !== 0 && businessCode !== 200;
+const isFinal = payload.is_final === true || response.is_final === true;
+let error = errorText(payload.error)
+  || errorText(response.error)
+  || errorText(payload.message)
+  || errorText(payload.description)
+  || (failedByCode ? errorText(response.msg) || '备用图片查询业务码 ' + businessCode : '')
   || (Number(response.statusCode) >= 400 ? '备用图片查询HTTP ' + response.statusCode : '');
-let status = state === 'success' ? 'succeeded' : (state === 'failed' ? 'failed' : 'pending');
-if (response.is_final === true && state !== 'success') status = 'failed';
+let status = imageUrl ? 'succeeded' : (state === 'success' ? 'succeeded' : (state === 'failed' ? 'failed' : 'pending'));
+if (failedByCode || payload.success === false || response.success === false) status = 'failed';
+if (isFinal && status !== 'succeeded') status = 'failed';
 if (status === 'succeeded' && !imageUrl) {
   status = 'failed';
   error = error || '备用图片服务返回成功但没有图片URL';
@@ -180,7 +250,7 @@ return {
   provider: 'backup',
   backupTaskId: task.backupTaskId,
   status,
-  progress: response.progress,
+  progress: payload.progress ?? response.progress,
   results: imageUrl ? [{ url: imageUrl }] : [],
   error,
   taskId: task.taskId,
