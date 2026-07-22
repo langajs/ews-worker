@@ -1,9 +1,6 @@
 {
   "type": "module",
   "dependencies": {
-    "@jsquash/jpeg": "^1.6.0",
-    "@jsquash/png": "^3.1.1",
-    "@jsquash/resize": "^2.1.1",
     "aws4fetch": "^1.0.20",
     "fast-xml-parser": "^5.10.1",
     "fflate": "^0.8.3"

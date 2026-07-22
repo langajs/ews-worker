@@ -32,7 +32,6 @@ import {
   shopeeSaveImage, shopeeCheckParentCompletion, shopeeRefundCredits, shopeeUpdateVariationExports,
 } from './db.js';
 import { generateToken, hashPassword, verifyPassword, authenticateRequest, DEFAULT_PASSWORD } from './auth.js';
-import { processSkuUploadImage } from './sku-upload-image.js';
 import {
   buildShopeeWorkbook, compareShopeeTemplateSemantics, parseShopeeTemplate, sha256Hex,
   SHOPEE_TEMPLATE_SEMANTIC_KEYS,
@@ -1137,6 +1136,7 @@ const SHOPEE_DESCRIPTION_MIN_LENGTH = 100;
 const SHOPEE_DESCRIPTION_MAX_LENGTH = 3000;
 const SHOPEE_PREORDER_BLOCKED_CHANNEL_IDS = Object.freeze(['5012']);
 const MAX_UPLOAD_REQUEST_BYTES = 11 * 1024 * 1024;
+const SKU_UPLOAD_MAX_OUTPUT_BYTES = 2_000_000;
 const JST_TEMPLATE_COLUMNS = Object.freeze([
   '款式编码','商品编码','颜色','规格','商品主图','商品详情图','图片地址','商品名称','推荐文案','商品描述','宝贝链接',
   '库存','重量(kg)','基本售价','市场|吊牌价','最低分销控价','最高分销控价','供应商名','3:4主图','长图','透明素材图','白底图',
@@ -3233,6 +3233,11 @@ function detectImageContentType(buffer, declaredType) {
   return declared === 'image/jpg' ? 'image/jpeg' : declared;
 }
 
+function hasJpegSignature(buffer) {
+  const bytes = new Uint8Array(buffer);
+  return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+}
+
 async function processOneImage(env, platform, task_id, sub_task_id, set_index, image_type, image_position, image_url, publicUrl) {
   try {
     const resp = await fetchImageWithTimeout(image_url);
@@ -3852,6 +3857,8 @@ async function handleUpload(request, env) {
   if (!file || typeof file.arrayBuffer !== 'function') return error('请选择有效文件', 400);
   const taskId = formData.get('task_id'); if (!taskId) return error('缺少 task_id', 400);
   const folder = String(formData.get('folder') || 'uploads');
+  const requestedUploadId = String(formData.get('upload_id') || '').trim();
+  if (requestedUploadId && !/^[a-zA-Z0-9_-]{8,64}$/.test(requestedUploadId)) return error('upload_id 格式无效', 400);
   const task = await getTaskIndex(env, taskId);
   if (!task) return error('任务不存在', 404);
   if (request.auth?.role !== 'admin' && task.user_id !== request.auth?.username) return error('无权访问该任务', 403);
@@ -3862,20 +3869,10 @@ async function handleUpload(request, env) {
   const imageTypes = ['image/jpeg','image/png','image/webp','image/gif'];
   const isSizeChartPdf = folder === 'size-chart' && contentType === 'application/pdf';
   if (!imageTypes.includes(contentType) && !isSizeChartPdf) return error('仅支持 JPG/PNG/WebP/GIF，尺码表可使用 PDF', 400);
-  if (folder === 'sku-upload' && !['image/jpeg','image/png'].includes(contentType)) return error('SKU成品图仅支持 JPG 或 PNG', 400);
+  if (folder === 'sku-upload' && (contentType !== 'image/jpeg' || !hasJpegSignature(buffer))) return error('SKU成品图需要先转为小于2MB的 JPG，请刷新创建页后重新上传', 422);
+  if (folder === 'sku-upload' && buffer.byteLength > SKU_UPLOAD_MAX_OUTPUT_BYTES) return error('SKU成品图不能超过2MB，请刷新创建页后重新上传', 422);
   let extension = isSizeChartPdf ? 'pdf' : ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' }[contentType] || 'bin');
-  let processing = null;
-  if (folder === 'sku-upload') {
-    try {
-      processing = await processSkuUploadImage(buffer, contentType);
-    } catch (err) {
-      return error(err.message || 'SKU图片处理失败', 400);
-    }
-    buffer = processing.buffer;
-    contentType = processing.contentType;
-    extension = processing.extension;
-  }
-  const key = `ews/${taskId}/${folder}/${uuid()}.${extension}`;
+  const key = `ews/${taskId}/${folder}/${requestedUploadId || uuid()}.${extension}`;
   await env.R2.put(key, buffer, { httpMetadata: { contentType } });
   const config = await getConfig(env);
   const publicUrl = config.r2_public_url || '';
@@ -3889,7 +3886,7 @@ async function handleUpload(request, env) {
     url: `${publicUrl.replace(/\/+$/, '')}/${key}`,
     content_type: contentType,
     size_bytes: buffer.byteLength,
-    ...(processing ? { image_processing: { quality: processing.quality, resized: processing.resized, reencoded: processing.reencoded, width: processing.width, height: processing.height } } : {}),
+    ...(folder === 'sku-upload' ? { image_processing: { processor: formData.get('client_processed') === '1' ? 'browser' : 'passthrough', quality: null, resized: false, reencoded: false } } : {}),
     message: '上传成功',
   });
 }
