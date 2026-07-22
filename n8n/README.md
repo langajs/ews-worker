@@ -23,6 +23,16 @@ Shopee basic template 不包含详情图字段，因此系统固定不构造详�
 3. 当前新版工作流的“密钥校对”固定使用 `v3`，必须与系统 `callback_secret` 保持一致。
 4. 将 `push_primary_images_only` 设为 `false`，并按平台开启 `n8n_title_enabled` 和 `n8n_sku_image_enabled`。关闭的工作流不会构造推送计划；两个开关也可由管理员为单个用户设置继承、开启或关闭。
 
+## Shopee 备用图片模型
+
+Shopee 主图、附图和 SKU 图默认使用 GRSAI。只有创建或轮询结果中的错误文本包含 `excessive system load`（不区分大小写）时，工作流才切换到 `https://api.lk888.ai` 的 `gpt-image-2`；其他错误继续沿用原有失败、轮询和 Worker 重试逻辑。备用接口同时兼容同步 `data[0].url` 和异步 `task_id` 返回，切换后仍受原任务 900 秒总超时限制，备用接口失败不会再次回切。
+
+备用接口必须使用名为 `EWS Backup Image API`、ID 为 `bkpImgApi20260722` 的 n8n `httpHeaderAuth` credential，Header 为 `Authorization: Bearer <API_KEY>`。API Key 只能保存到 n8n 加密凭据库，不得写入工作流 JSON、仓库或日志。工作流更新执行：
+
+```powershell
+node n8n/update-shopee-image-fallback.mjs
+```
+
 ## 异步图片处理与 R2 直传
 
 7 个图片工作流在模型出图后调用 `ews-image-sidecar` 的 `POST /v1/image-jobs`。Fastify API 只负责鉴权和写入 BullMQ，持久化成功后立即返回 HTTP `202`；独立图片 Worker 从 Valkey 队列消费任务，因此 n8n 不再等待图片下载、转码和上传。图片 Worker 使用 `sharp/libvips` 将图片转为 quality 88 JPEG；输出超过 1.9MB 时才使用 Bilinear 等比缩小。

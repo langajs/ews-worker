@@ -64,7 +64,7 @@
       },
       {
         "parameters": {
-          "jsCode": "const response = $input.first().json || {};\nconst original = $node['提取参数'].json;\n\nfunction errorText(value) {\n  if (!value) return '';\n  if (typeof value === 'string') return value;\n  if (value.message) return String(value.message);\n  if (value.description) return String(value.description);\n  try { return JSON.stringify(value); } catch (_) { return String(value); }\n}\n\nconst serviceTaskId = String(response.id || '').trim();\nconst responseError = errorText(response.error)\n  || (Number(response.statusCode) >= 400 ? '图片服务HTTP ' + response.statusCode : '')\n  || (!serviceTaskId ? errorText(response.message) || '图片服务未返回任务ID' : '');\n\nreturn {\n  grsaiTaskId: serviceTaskId,\n  status: serviceTaskId ? String(response.status || 'pending') : 'failed',\n  error: responseError,\n  taskId: original.taskId,\n  subTaskId: original.subTaskId,\n  setIndex: original.setIndex,\n  imageType: original.imageType,\n  imagePosition: original.imagePosition,\n  callbackSecret: original.callbackSecret,\n  callbackUrl: original.callbackUrl,\n  startedAt: Date.now(),\n  timedOut: false,\n};"
+          "jsCode": "const response = $input.first().json || {};\nconst original = $node['提取参数'].json;\n\nfunction errorText(value) {\n  if (!value) return '';\n  if (typeof value === 'string') return value;\n  if (value.message) return String(value.message);\n  if (value.description) return String(value.description);\n  try { return JSON.stringify(value); } catch (_) { return String(value); }\n}\n\nconst serviceTaskId = String(response.id || '').trim();\nconst responseError = errorText(response.error)\n  || errorText(response.message)\n  || errorText(response.description)\n  || (Number(response.statusCode) >= 400 ? '图片服务HTTP ' + response.statusCode : '')\n  || (!serviceTaskId ? '图片服务未返回任务ID' : '');\n\nreturn {\n  provider: 'grsai',\n  grsaiTaskId: serviceTaskId,\n  status: serviceTaskId ? String(response.status || 'pending') : 'failed',\n  error: responseError,\n  taskId: original.taskId,\n  subTaskId: original.subTaskId,\n  setIndex: original.setIndex,\n  imageType: original.imageType,\n  imagePosition: original.imagePosition,\n  callbackSecret: original.callbackSecret,\n  callbackUrl: original.callbackUrl,\n  startedAt: Date.now(),\n  timedOut: false,\n};"
         },
         "type": "n8n-nodes-base.code",
         "typeVersion": 2,
@@ -304,7 +304,7 @@
       },
       {
         "parameters": {
-          "jsCode": "const response = $input.first().json || {};\nconst task = $node['提取任务ID'].json;\nconst elapsedSeconds = Math.floor((Date.now() - task.startedAt) / 1000);\n\nfunction errorText(value) {\n  if (!value) return '';\n  if (typeof value === 'string') return value;\n  if (value.message) return String(value.message);\n  if (value.description) return String(value.description);\n  try { return JSON.stringify(value); } catch (_) { return String(value); }\n}\n\nconst results = Array.isArray(response.results) ? response.results : [];\nconst imageUrl = String(results[0]?.url || '').trim();\nlet status = String(response.status || '').trim();\nlet error = errorText(response.error)\n  || (Number(response.statusCode) >= 400 ? '图片查询HTTP ' + response.statusCode : '');\nif (!status && error) status = 'failed';\nif (!status) status = 'pending';\nif (status === 'succeeded' && !imageUrl) {\n  status = 'failed';\n  error = '图片服务返回成功但没有图片URL';\n}\n\nreturn {\n  grsaiTaskId: task.grsaiTaskId,\n  status,\n  progress: response.progress,\n  results,\n  error,\n  taskId: task.taskId,\n  subTaskId: task.subTaskId,\n  setIndex: task.setIndex,\n  imageType: task.imageType,\n  imagePosition: task.imagePosition,\n  callbackSecret: task.callbackSecret,\n  callbackUrl: task.callbackUrl,\n  elapsedSeconds,\n  timedOut: elapsedSeconds >= 900,\n};"
+          "jsCode": "const response = $input.first().json || {};\nconst task = $node['提取任务ID'].json;\nconst elapsedSeconds = Math.floor((Date.now() - task.startedAt) / 1000);\n\nfunction errorText(value) {\n  if (!value) return '';\n  if (typeof value === 'string') return value;\n  if (value.message) return String(value.message);\n  if (value.description) return String(value.description);\n  try { return JSON.stringify(value); } catch (_) { return String(value); }\n}\n\nconst results = Array.isArray(response.results) ? response.results : [];\nconst imageUrl = String(results[0]?.url || '').trim();\nlet status = String(response.status || '').trim();\nlet error = errorText(response.error)\n  || errorText(response.message)\n  || errorText(response.description)\n  || (Number(response.statusCode) >= 400 ? '图片查询HTTP ' + response.statusCode : '');\nif (!status && error) status = 'failed';\nif (!status) status = 'pending';\nif (status === 'succeeded' && !imageUrl) {\n  status = 'failed';\n  error = '图片服务返回成功但没有图片URL';\n}\n\nreturn {\n  provider: 'grsai',\n  grsaiTaskId: task.grsaiTaskId,\n  status,\n  progress: response.progress,\n  results,\n  error,\n  taskId: task.taskId,\n  subTaskId: task.subTaskId,\n  setIndex: task.setIndex,\n  imageType: task.imageType,\n  imagePosition: task.imagePosition,\n  callbackSecret: task.callbackSecret,\n  callbackUrl: task.callbackUrl,\n  elapsedSeconds,\n  timedOut: elapsedSeconds >= 900,\n};"
         },
         "type": "n8n-nodes-base.code",
         "typeVersion": 2,
@@ -412,6 +412,172 @@
         ],
         "id": "0832373f-ea4e-4dbe-a9d9-915144f0b5dc",
         "name": "图片队列已接收"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": false,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 3
+            },
+            "conditions": [
+              {
+                "id": "711b8717-a558-4def-90ef-bc6b89b284f3",
+                "leftValue": "={{ $json.provider !== 'backup' && !$json.timedOut && String($json.error || '').toLowerCase().includes('excessive system load') }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          1056,
+          320
+        ],
+        "id": "9e021928-24af-46eb-80ff-ef32c934118f",
+        "name": "是否切换备用模型"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "https://api.lk888.ai/v1/media/generate",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ {\n  model: 'gpt-image-2',\n  prompt: $node['提取参数'].json.finalPrompt,\n  params: {\n    aspect_ratio: '1:1',\n    images: $node['提取参数'].json.imagesArray,\n    n: 1,\n    quality: 'auto',\n    resolution: '1K',\n    response_format: 'url',\n    size: '1024x1024'\n  }\n} }}",
+          "options": {
+            "timeout": 120000
+          }
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          1296,
+          480
+        ],
+        "id": "3f8bd023-34cc-4af0-a6bb-e339e2e16867",
+        "name": "备用模型创建任务",
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "bkpImgApi20260722",
+            "name": "EWS Backup Image API"
+          }
+        },
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "jsCode": "const response = $input.first().json || {};\nconst original = $node['是否切换备用模型'].json;\n\nfunction errorText(value) {\n  if (!value) return '';\n  if (typeof value === 'string') return value;\n  if (value.message) return String(value.message);\n  if (value.description) return String(value.description);\n  try { return JSON.stringify(value); } catch (_) { return String(value); }\n}\n\nconst backupTaskId = String(response.task_id || response.id || '').trim();\nconst imageUrl = String(response.result_url || response.data?.[0]?.url || response.results?.[0]?.url || '').trim();\nconst state = String(response.state || '').toLowerCase();\nlet error = errorText(response.error)\n  || errorText(response.message)\n  || errorText(response.description)\n  || (Number(response.statusCode) >= 400 ? '备用图片服务HTTP ' + response.statusCode : '');\nlet status = imageUrl ? 'succeeded' : (backupTaskId ? 'pending' : 'failed');\nif (state === 'failed') status = 'failed';\nif (state === 'success' && !imageUrl) {\n  status = 'failed';\n  error = error || '备用图片服务返回成功但没有图片URL';\n}\nif (status === 'failed' && !error) error = '备用图片服务未返回任务ID或图片URL';\n\nconst startedAt = Number(original.startedAt) || Date.now();\nconst elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);\nreturn {\n  provider: 'backup',\n  backupTaskId,\n  status,\n  results: imageUrl ? [{ url: imageUrl }] : [],\n  error,\n  taskId: original.taskId,\n  subTaskId: original.subTaskId,\n  setIndex: original.setIndex,\n  imageType: original.imageType,\n  imagePosition: original.imagePosition,\n  callbackSecret: original.callbackSecret,\n  callbackUrl: original.callbackUrl,\n  startedAt,\n  elapsedSeconds,\n  timedOut: elapsedSeconds >= 900,\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1536,
+          480
+        ],
+        "id": "bbab84b9-9128-49a9-8b98-388b54ff33cf",
+        "name": "解析备用创建结果"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 3
+            },
+            "conditions": [
+              {
+                "id": "8550d409-f6c2-48f1-9df4-3681abba86c9",
+                "leftValue": "={{ $json.provider }}",
+                "rightValue": "backup",
+                "operator": {
+                  "type": "string",
+                  "operation": "equals",
+                  "name": "filter.operator.equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          368,
+          304
+        ],
+        "id": "f424ef60-b238-4590-ae53-9739fa763e2f",
+        "name": "是否备用模型任务"
+      },
+      {
+        "parameters": {
+          "url": "={{ 'https://api.lk888.ai/v1/media/status?task_id=' + encodeURIComponent($json.backupTaskId) }}",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          368,
+          368
+        ],
+        "id": "e701fd8c-6b11-4349-9b6b-e6a8cf2aa670",
+        "name": "备用模型查询结果",
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "bkpImgApi20260722",
+            "name": "EWS Backup Image API"
+          }
+        },
+        "onError": "continueRegularOutput"
+      },
+      {
+        "parameters": {
+          "jsCode": "const response = $input.first().json || {};\nconst task = $node['解析备用创建结果'].json;\nconst elapsedSeconds = Math.floor((Date.now() - task.startedAt) / 1000);\n\nfunction errorText(value) {\n  if (!value) return '';\n  if (typeof value === 'string') return value;\n  if (value.message) return String(value.message);\n  if (value.description) return String(value.description);\n  try { return JSON.stringify(value); } catch (_) { return String(value); }\n}\n\nconst state = String(response.state || '').toLowerCase();\nconst imageUrl = String(response.result_url || response.data?.[0]?.url || response.results?.[0]?.url || '').trim();\nlet error = errorText(response.error)\n  || errorText(response.message)\n  || errorText(response.description)\n  || (Number(response.statusCode) >= 400 ? '备用图片查询HTTP ' + response.statusCode : '');\nlet status = state === 'success' ? 'succeeded' : (state === 'failed' ? 'failed' : 'pending');\nif (response.is_final === true && state !== 'success') status = 'failed';\nif (status === 'succeeded' && !imageUrl) {\n  status = 'failed';\n  error = error || '备用图片服务返回成功但没有图片URL';\n}\nif (status === 'failed' && !error) error = String(response.status || response.status_group || '备用图片服务生成失败');\n\nreturn {\n  provider: 'backup',\n  backupTaskId: task.backupTaskId,\n  status,\n  progress: response.progress,\n  results: imageUrl ? [{ url: imageUrl }] : [],\n  error,\n  taskId: task.taskId,\n  subTaskId: task.subTaskId,\n  setIndex: task.setIndex,\n  imageType: task.imageType,\n  imagePosition: task.imagePosition,\n  callbackSecret: task.callbackSecret,\n  callbackUrl: task.callbackUrl,\n  startedAt: task.startedAt,\n  elapsedSeconds,\n  timedOut: elapsedSeconds >= 900,\n};"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          1040,
+          640
+        ],
+        "id": "f116685e-ee25-4aa2-8cdb-a2c2ce02f33b",
+        "name": "重组备用查询"
       }
     ],
     "pinData": {},
@@ -475,7 +641,7 @@
         "main": [
           [
             {
-              "node": "查询结果",
+              "node": "是否备用模型任务",
               "type": "main",
               "index": 0
             }
@@ -526,7 +692,7 @@
         "main": [
           [
             {
-              "node": "失败通知",
+              "node": "是否切换备用模型",
               "type": "main",
               "index": 0
             }
@@ -597,6 +763,86 @@
           [
             {
               "node": "失败通知",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "是否切换备用模型": {
+        "main": [
+          [
+            {
+              "node": "备用模型创建任务",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "失败通知",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "备用模型创建任务": {
+        "main": [
+          [
+            {
+              "node": "解析备用创建结果",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "解析备用创建结果": {
+        "main": [
+          [
+            {
+              "node": "任务完成",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "是否备用模型任务": {
+        "main": [
+          [
+            {
+              "node": "备用模型查询结果",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "查询结果",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "备用模型查询结果": {
+        "main": [
+          [
+            {
+              "node": "重组备用查询",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "重组备用查询": {
+        "main": [
+          [
+            {
+              "node": "任务完成",
               "type": "main",
               "index": 0
             }
