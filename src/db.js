@@ -75,11 +75,33 @@ async function consumeUserCredit(env, userId) {
   return (meta.changes ?? meta.rows_written ?? 0) > 0;
 }
 
+const TASK_RETENTION_DAYS = 7;
+const TASK_VISIBLE_SQL = `(
+  (status='completed' AND completed_at IS NOT NULL AND completed_at<>''
+    AND completed_at >= datetime('now', '-${TASK_RETENTION_DAYS} days'))
+  OR ((status<>'completed' OR completed_at IS NULL OR completed_at='')
+    AND created_at >= datetime('now', '-${TASK_RETENTION_DAYS} days'))
+)`;
+
+function parseSqliteUtc(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return NaN;
+  return Date.parse(/[zZ]|[+-]\d\d:\d\d$/.test(raw) ? raw : `${raw.replace(' ', 'T')}Z`);
+}
+
+function isTaskExpired(task, now = Date.now()) {
+  const retentionBase = task?.status === 'completed' && task?.completed_at
+    ? task.completed_at
+    : task?.created_at;
+  const baseTime = parseSqliteUtc(retentionBase);
+  return Number.isFinite(baseTime) && baseTime + TASK_RETENTION_DAYS * 86400000 < now;
+}
+
 async function createTaskIndex(env, id, platform, name, userId) { await env.DB.prepare("INSERT INTO ews_tasks (id, platform, name, status, user_id, created_at, updated_at) VALUES (?, ?, ?, 'init', ?, datetime('now'), datetime('now'))").bind(id, platform, name || '', userId || '').run(); }
 async function updateTaskIndexStatus(env, id, status) { await env.DB.prepare("UPDATE ews_tasks SET status = ?, updated_at = datetime('now'), completed_at = CASE WHEN ? = 'completed' THEN COALESCE(completed_at, datetime('now')) ELSE NULL END WHERE id = ?").bind(status, status, id).run(); }
 async function getTaskIndex(env, id) { return await getOne(env, "SELECT * FROM ews_tasks WHERE id = ?", [id]); }
 async function getTaskList(env, platform, userId, role, limit = 0, offset = 0) {
-  let sql = "SELECT * FROM ews_tasks"; const params = []; const ws = [];
+  let sql = "SELECT * FROM ews_tasks"; const params = []; const ws = [TASK_VISIBLE_SQL];
   if (platform) { ws.push("platform = ?"); params.push(platform); }
   if (role !== 'admin') { ws.push("user_id = ?"); params.push(userId); }
   if (ws.length) sql += " WHERE " + ws.join(" AND ");
@@ -88,7 +110,7 @@ async function getTaskList(env, platform, userId, role, limit = 0, offset = 0) {
   return await query(env, sql, params);
 }
 async function getTaskCount(env, platform, userId, role) {
-  let sql = "SELECT COUNT(*) AS cnt FROM ews_tasks"; const params = []; const ws = [];
+  let sql = "SELECT COUNT(*) AS cnt FROM ews_tasks"; const params = []; const ws = [TASK_VISIBLE_SQL];
   if (platform) { ws.push("platform = ?"); params.push(platform); }
   if (role !== 'admin') { ws.push("user_id = ?"); params.push(userId); }
   if (ws.length) sql += " WHERE " + ws.join(" AND ");
@@ -521,6 +543,7 @@ export {
   createUser, getUserByUsername, getUserList, updateUserPassword, toggleUserActive, updateUserGroup, deleteUser, updateUserPlatformAccess, updateUserImageConcurrencyLimit, updateUserWebhook,
   normalizeUserImageConcurrencyLimit,
   getUserCredits, updateUserCredits, consumeUserCredit,
+  TASK_RETENTION_DAYS, isTaskExpired,
   createTaskIndex, updateTaskIndexStatus, getTaskIndex, getTaskList, getTaskCount, deleteTaskIndex,
   jstCreateTask, jstUpdateTask, jstGetTask, jstUpdateTaskStatus,
   jstCreateVariant, jstClearVariants, jstReplaceVariants,

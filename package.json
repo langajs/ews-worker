@@ -1,5 +1,8 @@
 {
   "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
   "dependencies": {
     "aws4fetch": "^1.0.20",
     "fast-xml-parser": "^5.10.1",

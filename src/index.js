@@ -7,15 +7,16 @@ import {
   createUser, getUserByUsername, getUserList, updateUserPassword,
   toggleUserActive, updateUserGroup, deleteUser, updateUserPlatformAccess, updateUserImageConcurrencyLimit, updateUserWebhook, getUserCredits, updateUserCredits, consumeUserCredit,
   normalizeUserImageConcurrencyLimit,
-  createTaskIndex, updateTaskIndexStatus, getTaskIndex, getTaskList, getTaskCount, deleteTaskIndex,
+  TASK_RETENTION_DAYS, isTaskExpired,
+  createTaskIndex, updateTaskIndexStatus, getTaskIndex, getTaskList, getTaskCount,
   jstCreateTask, jstUpdateTask, jstGetTask, jstUpdateTaskStatus,
   jstReplaceVariants,
   jstCreateSubTask, jstGetSubTasks, jstUpdateSubTask, jstDeleteSubTasks,
   jstSaveMetadataBatch, jstSaveImage, jstClearImages,
-  jstCreateExpectedImages, jstCheckSubTaskImages, jstCheckParentCompletion, jstDeleteTaskRecord,
+  jstCreateExpectedImages, jstCheckSubTaskImages, jstCheckParentCompletion,
   jstCreatePushPlans, jstGetPushPlans, jstGetPendingPlans, jstGetPlanStats,
   jstRefundCredits,
-  shopeeCreateProduct, shopeeGetProduct, shopeeUpdateProductTemplate, shopeeDeleteProduct,
+  shopeeCreateProduct, shopeeGetProduct, shopeeUpdateProductTemplate,
   shopeeListTemplateProfiles, shopeeGetTemplateProfile, shopeeGetTemplateProfileByContext, shopeeClaimTemplateProfile,
   shopeeAssignTemplateGroup, shopeeReplaceTemplateGroups, shopeeReplaceGroupTemplates,
   shopeeGetTemplateVersion, shopeeGetCurrentTemplateVersion, shopeeGetLatestTemplateVersion, shopeeGetTemplateVersionByHash,
@@ -218,6 +219,7 @@ async function requireTaskAccess(request, env, path, handler) {
   if (request.auth?.role !== 'admin' && task.user_id !== request.auth?.username) {
     return error('无权访问该任务', 403);
   }
+  if (isTaskExpired(task)) return error('任务缓存已过期并等待自动清理', 410);
   return handler(task);
 }
 
@@ -225,10 +227,20 @@ async function requireTaskAccess(request, env, path, handler) {
 const loginAttempts = new Map();
 const RATE_LIMIT_MAX = 5;
 const RATE_LIMIT_WINDOW = 300;
+const TASK_CLEANUP_CRON = '17 */6 * * *';
+const TASK_CLEANUP_BATCH_SIZE = 20;
+const TASK_CLEANUP_INTERVAL_HOURS = 72;
+const TASK_EXPIRED_SQL = `(
+  (status='completed' AND completed_at IS NOT NULL AND completed_at<>''
+    AND completed_at < datetime('now', '-${TASK_RETENTION_DAYS} days'))
+  OR ((status<>'completed' OR completed_at IS NULL OR completed_at='')
+    AND created_at < datetime('now', '-${TASK_RETENTION_DAYS} days'))
+)`;
 
 export default {
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(processPendingQueue(env, ctx));
+    if (event.cron === TASK_CLEANUP_CRON) ctx.waitUntil(runScheduledTaskCleanup(env));
+    else ctx.waitUntil(processPendingQueue(env, ctx));
   },
 
   async queue(batch, env, ctx) {
@@ -261,6 +273,8 @@ export default {
         return requireAuth(request, env, () => handleGetConfig(request, env, url));
       if (path === '/api/config' && method === 'PUT')
         return requireAuth(request, env, () => handleUpdateConfig(request, env));
+      if (path === '/api/admin/task-cleanup' && method === 'POST')
+        return requireAuth(request, env, () => handleAdminTaskCleanup(request, env));
 
       // --- 用户与模板分组 ---
       if (path === '/api/groups' && method === 'GET')
@@ -1272,6 +1286,155 @@ async function resetGeneratedTaskArtifacts(env, taskId, platform) {
   await env.DB.prepare(`DELETE FROM ${prefix}_sub_tasks WHERE parent_task_id=?`).bind(taskId).run();
 }
 
+async function deleteTaskR2Objects(env, taskId) {
+  if (!/^[A-Za-z0-9_-]+$/.test(String(taskId || ''))) throw new Error('Invalid task ID for R2 cleanup');
+  const prefix = `ews/${taskId}/`;
+  let deleted = 0;
+  while (true) {
+    const objects = await env.R2.list({ prefix, limit: 1000 });
+    const keys = objects.objects.map(object => object.key);
+    if (!keys.length) break;
+    await env.R2.delete(keys);
+    deleted += keys.length;
+  }
+  return deleted;
+}
+
+async function deleteExpiredCallbackInboxObjects(env) {
+  const cutoff = Date.now() - TASK_RETENTION_DAYS * 86400000;
+  let cursor;
+  let deleted = 0;
+  do {
+    const options = { prefix: CALLBACK_INBOX_PREFIX, limit: 1000 };
+    if (cursor) options.cursor = cursor;
+    const objects = await env.R2.list(options);
+    const keys = objects.objects.filter(object => {
+      const uploadedAt = object.uploaded instanceof Date ? object.uploaded.getTime() : Date.parse(object.uploaded);
+      return Number.isFinite(uploadedAt) && uploadedAt < cutoff;
+    }).map(object => object.key);
+    if (keys.length) await env.R2.delete(keys);
+    deleted += keys.length;
+    cursor = objects.truncated ? objects.cursor : undefined;
+  } while (cursor);
+  return deleted;
+}
+
+async function deleteTaskDatabaseRecords(env, taskId, platform) {
+  const statements = [
+    env.DB.prepare('DELETE FROM ews_callback_queue WHERE task_id=?').bind(taskId),
+    env.DB.prepare('DELETE FROM ews_image_queue WHERE task_id=?').bind(taskId),
+  ];
+  if (platform === 'jst') {
+    statements.push(
+      env.DB.prepare('DELETE FROM ews_jst_sku_titles WHERE sub_task_id IN (SELECT id FROM ews_jst_sub_tasks WHERE parent_task_id=?)').bind(taskId),
+      env.DB.prepare('DELETE FROM ews_jst_task_images WHERE parent_task_id=?').bind(taskId),
+      env.DB.prepare('DELETE FROM ews_jst_push_plans WHERE task_id=?').bind(taskId),
+      env.DB.prepare('DELETE FROM ews_jst_export_records WHERE task_id=?').bind(taskId),
+      env.DB.prepare('DELETE FROM ews_jst_sub_tasks WHERE parent_task_id=?').bind(taskId),
+      env.DB.prepare('DELETE FROM ews_jst_variants WHERE task_id=?').bind(taskId),
+      env.DB.prepare('DELETE FROM ews_jst_tasks WHERE id=?').bind(taskId),
+    );
+  } else if (platform === 'shopee') {
+    statements.push(
+      env.DB.prepare('DELETE FROM ews_shopee_variations WHERE product_id IN (SELECT id FROM ews_shopee_products WHERE task_id=?)').bind(taskId),
+      env.DB.prepare('DELETE FROM ews_shopee_task_images WHERE parent_task_id=?').bind(taskId),
+      env.DB.prepare('DELETE FROM ews_shopee_push_plans WHERE task_id=?').bind(taskId),
+      env.DB.prepare('DELETE FROM ews_shopee_export_records WHERE task_id=?').bind(taskId),
+      env.DB.prepare('DELETE FROM ews_shopee_sub_tasks WHERE parent_task_id=?').bind(taskId),
+      env.DB.prepare('DELETE FROM ews_shopee_products WHERE task_id=?').bind(taskId),
+    );
+  } else {
+    throw new Error(`Unsupported task platform: ${platform}`);
+  }
+  statements.push(env.DB.prepare('DELETE FROM ews_tasks WHERE id=?').bind(taskId));
+  await env.DB.batch(statements);
+}
+
+async function purgeTask(env, task) {
+  const deletedObjects = await deleteTaskR2Objects(env, task.id);
+  await deleteTaskDatabaseRecords(env, task.id, task.platform);
+  return deletedObjects;
+}
+
+async function taskCleanupDue(env) {
+  return !!(await getOne(env, `SELECT 1 AS due FROM ews_queue_scheduler_state
+    WHERE state_key='task_cleanup_last_success'
+      AND (state_value='' OR state_value <= datetime('now', '-${TASK_CLEANUP_INTERVAL_HOURS} hours'))`));
+}
+
+async function acquireTaskCleanupLease(env) {
+  const result = await env.DB.prepare(`UPDATE ews_queue_scheduler_state
+    SET state_value=datetime('now', '+30 minutes'), updated_at=datetime('now')
+    WHERE state_key='task_cleanup_lease'
+      AND (state_value='' OR state_value < datetime('now'))`).run();
+  return d1Changes(result) > 0;
+}
+
+async function releaseTaskCleanupLease(env) {
+  await env.DB.prepare(`UPDATE ews_queue_scheduler_state
+    SET state_value='', updated_at=datetime('now')
+    WHERE state_key='task_cleanup_lease'`).run();
+}
+
+async function countExpiredTasks(env) {
+  const row = await getOne(env, `SELECT COUNT(*) AS cnt FROM ews_tasks WHERE ${TASK_EXPIRED_SQL}`);
+  return row?.cnt || 0;
+}
+
+async function runTaskCleanup(env, { execute = true, force = false, limit = TASK_CLEANUP_BATCH_SIZE } = {}) {
+  const safeLimit = Math.min(Math.max(parseInt(limit) || TASK_CLEANUP_BATCH_SIZE, 1), 50);
+  const total = await countExpiredTasks(env);
+  const candidates = await query(env, `SELECT id,platform,status,created_at,completed_at
+    FROM ews_tasks WHERE ${TASK_EXPIRED_SQL} ORDER BY created_at ASC LIMIT ?`, [safeLimit]);
+  const tasks = candidates?.results || [];
+  if (!execute) return { dry_run: true, total, tasks };
+  if (!force && !(await taskCleanupDue(env))) return { skipped: true, reason: 'not_due', total };
+  if (!(await acquireTaskCleanupLease(env))) return { skipped: true, reason: 'busy', total };
+
+  const deleted = [];
+  const failures = [];
+  let inboxObjectsDeleted = 0;
+  let inboxError = '';
+  try {
+    for (const task of tasks) {
+      try {
+        const r2_objects = await purgeTask(env, task);
+        deleted.push({ task_id: task.id, r2_objects });
+      } catch (err) {
+        failures.push({ task_id: task.id, error: err.message || 'cleanup failed' });
+      }
+    }
+    try { inboxObjectsDeleted = await deleteExpiredCallbackInboxObjects(env); }
+    catch (err) { inboxError = err.message || 'callback inbox cleanup failed'; }
+    const remaining = await countExpiredTasks(env);
+    if (remaining === 0) {
+      await env.DB.prepare(`UPDATE ews_queue_scheduler_state
+        SET state_value=datetime('now'), updated_at=datetime('now')
+        WHERE state_key='task_cleanup_last_success'`).run();
+    }
+    return { total, deleted, failures, remaining, inbox_objects_deleted: inboxObjectsDeleted, inbox_error: inboxError };
+  } finally {
+    await releaseTaskCleanupLease(env);
+  }
+}
+
+async function runScheduledTaskCleanup(env) {
+  try {
+    const result = await runTaskCleanup(env);
+    console.log('task cleanup result:', JSON.stringify(result));
+  } catch (err) {
+    console.error('task cleanup error:', err.message);
+  }
+}
+
+async function handleAdminTaskCleanup(request, env) {
+  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  const body = await parseBody(request) || {};
+  const execute = body.execute === true;
+  const result = await runTaskCleanup(env, { execute, force: execute, limit: body.limit });
+  return json({ success: true, ...result });
+}
+
 async function getTaskSummaryRows(env, sqlPrefix, ids, sqlSuffix = '') {
   const rows = [];
   for (let i = 0; i < ids.length; i += 80) {
@@ -1697,25 +1860,13 @@ async function handleUpdateTask(request, env, path, idx) {
 
 async function handleDeleteTask(env, path, idx) {
   const taskId = getTaskId(path);
-  // 清理 R2
-  const prefix = `ews/${taskId}/`;
   try {
-    let truncated = true; let cursor;
-    while (truncated) {
-      const listOpts = { prefix }; if (cursor) listOpts.cursor = cursor;
-      const objects = await env.R2.list(listOpts);
-      if (objects.objects.length > 0) {
-        const keys = objects.objects.map(o => o.key);
-        for (let i = 0; i < keys.length; i += 100) await env.R2.delete(keys.slice(i, i + 100));
-      }
-      truncated = objects.truncated; cursor = objects.cursor;
-    }
-  } catch (err) { console.error('R2 cleanup error:', err.message); }
-  // 清理平台数据
-  if (idx.platform === 'jst') await jstDeleteTaskRecord(env, taskId);
-  else if (idx.platform === 'shopee') await shopeeDeleteProduct(env, taskId);
-  await deleteTaskIndex(env, taskId);
-  return json({ success: true, message: '任务已删除' });
+    const deletedObjects = await purgeTask(env, { id: taskId, platform: idx.platform });
+    return json({ success: true, r2_objects_deleted: deletedObjects, message: '任务已删除' });
+  } catch (err) {
+    console.error('task cleanup error:', taskId, err.message);
+    return error('任务资源清理失败，请稍后重试', 503);
+  }
 }
 
 async function handleUpdateTaskStatus(request, env, path, idx) {
@@ -2649,6 +2800,7 @@ async function handleR2UploadTicket(request, env) {
   const config = await getConfig(env, idx.platform || '');
   const receivedSecret = body.secret ?? body.callback_secret;
   if (config.callback_secret && receivedSecret !== config.callback_secret) return error('上传票据密钥无效', 403);
+  if (isTaskExpired(idx)) return json({ success: false, retryable: false, error: '任务缓存已过期' }, 410);
   const contentType = String(body.content_type || '').toLowerCase();
   const sizeBytes = parseInt(body.size_bytes);
   const sha256 = String(body.sha256 || '').toLowerCase();
@@ -2685,6 +2837,7 @@ async function handleCallback(request, env, ctx) {
   const config = await getConfig(env, idx.platform || '');
   const receivedSecret = body.secret ?? body.callback_secret;
   if (config.callback_secret && receivedSecret !== config.callback_secret) return error('回调密钥无效', 403);
+  if (isTaskExpired(idx)) return json({ success: false, retryable: false, error: '任务缓存已过期' }, 410);
 
   try {
     const queueId = uuid(16);
@@ -2939,6 +3092,7 @@ async function processImageQueuePayload(env, ctx, row) {
   const task_id = row.task_id;
   const idx = await getTaskIndex(env, task_id);
   if (!idx) throw callbackPermanentError('任务不存在');
+  if (isTaskExpired(idx)) throw callbackPermanentError('任务缓存已过期');
   const config = await getConfig(env, idx.platform || '');
   const publicUrl = config.r2_public_url || '';
   const isShopee = idx.platform === 'shopee';
@@ -3005,6 +3159,7 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
   if (!task_id) throw callbackPermanentError('缺少 task_id');
   const idx = await getTaskIndex(env, task_id);
   if (!idx) throw callbackPermanentError('任务不存在');
+  if (isTaskExpired(idx)) throw callbackPermanentError('任务缓存已过期');
 
   const config = await getConfig(env, idx.platform || '');
   if (!trustedQueuePayload) {
@@ -3862,6 +4017,7 @@ async function handleUpload(request, env) {
   const task = await getTaskIndex(env, taskId);
   if (!task) return error('任务不存在', 404);
   if (request.auth?.role !== 'admin' && task.user_id !== request.auth?.username) return error('无权访问该任务', 403);
+  if (isTaskExpired(task)) return error('任务缓存已过期', 410);
   const maxSize = folder === 'size-chart' ? 2 * 1024 * 1024 : 10 * 1024 * 1024;
   if (file.size > maxSize) return error(folder === 'size-chart' ? '尺码表文件不能超过 2MB' : '文件大小不能超过 10MB', 400);
   let buffer = await file.arrayBuffer();

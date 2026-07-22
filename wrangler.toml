@@ -8,7 +8,7 @@ R2_ACCOUNT_ID = "8f89a83cd9cc730f7dd298e536eea9b2"
 R2_BUCKET_NAME = "ossapac"
 
 [triggers]
-crons = ["*/1 * * * *"]
+crons = ["*/1 * * * *", "17 */6 * * *"]
 
 # D1 数据库绑定
 [[d1_databases]]
