@@ -369,6 +369,14 @@ function comparableChannels(manifest) {
   ]).sort((left, right) => left[0].localeCompare(right[0]));
 }
 
+function channelSupportsPreOrder(field) {
+  const text = `${field.label || ''} ${field.description || ''} ${field.rule || ''}`.toLowerCase();
+  if (field.semantic_key === 'channel_id.5012') return false;
+  if (/trong\s+ngày|same\s+day/.test(text)) return false;
+  if (/(?:does not|doesn't|not)\s+support.*pre.?order|không.*(?:pre.?order|đặt trước)/.test(text)) return false;
+  return true;
+}
+
 function comparableCategories(categories) {
   return (categories || []).map(category => [
     String(category.id || ''), category.name || '', category.dts_range || '', category.dts_min ?? null, category.dts_max ?? null,
@@ -480,7 +488,7 @@ export function parseShopeeTemplate(buffer, { allowAdvanced = false } = {}) {
     id: field.semantic_key.slice('channel_id.'.length),
     label: field.label || field.key,
     price_limit: parsePriceLimit(`${field.description} ${field.rule}`),
-    supports_preorder: field.semantic_key !== 'channel_id.5012',
+    supports_preorder: channelSupportsPreOrder(field),
   }));
   if (!shippingChannels.length) throw new Error('模板未包含可用物流渠道');
 

@@ -42,6 +42,7 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Private-Network': 'true',
   'Access-Control-Expose-Headers': 'Content-Disposition',
   'Access-Control-Max-Age': '86400',
 };
@@ -1135,6 +1136,7 @@ const SHOPEE_USER_SKU_MAX_LENGTH = SHOPEE_SKU_MAX_LENGTH - SKU_PREFIX_LENGTH;
 const SHOPEE_DESCRIPTION_MIN_LENGTH = 100;
 const SHOPEE_DESCRIPTION_MAX_LENGTH = 3000;
 const SHOPEE_PREORDER_BLOCKED_CHANNEL_IDS = Object.freeze(['5012']);
+const MAX_UPLOAD_REQUEST_BYTES = 11 * 1024 * 1024;
 const JST_TEMPLATE_COLUMNS = Object.freeze([
   '款式编码','商品编码','颜色','规格','商品主图','商品详情图','图片地址','商品名称','推荐文案','商品描述','宝贝链接',
   '库存','重量(kg)','基本售价','市场|吊牌价','最低分销控价','最高分销控价','供应商名','3:4主图','长图','透明素材图','白底图',
@@ -1159,9 +1161,25 @@ function normalizeShopeeShippingChannels(value, allowedChannels = null) {
   return [...new Set((Array.isArray(channels) ? channels : []).map(String).filter(channel => /^\d+$/.test(channel) && (!allowed || allowed.has(channel))))];
 }
 
-function normalizeShopeePreOrderShippingChannels(channels, preOrderDts) {
+function isShopeePreOrderBlockedChannel(channel) {
+  if (!channel) return false;
+  const id = String(channel.id || channel).trim();
+  const label = String(channel.label || '').trim();
+  if (typeof channel === 'object' && Object.prototype.hasOwnProperty.call(channel, 'supports_preorder')) {
+    return channel.supports_preorder === false;
+  }
+  return SHOPEE_PREORDER_BLOCKED_CHANNEL_IDS.includes(id) || /trong\s+ngày|same\s+day/i.test(label);
+}
+
+function getShopeePreOrderBlockedChannels(templateChannels) {
+  return (Array.isArray(templateChannels) ? templateChannels : []).filter(isShopeePreOrderBlockedChannel);
+}
+
+function normalizeShopeePreOrderShippingChannels(channels, preOrderDts, templateChannels = []) {
   if (preOrderDts === null || preOrderDts === undefined || preOrderDts === '') return channels;
-  return channels.filter(channel => !SHOPEE_PREORDER_BLOCKED_CHANNEL_IDS.includes(channel));
+  const blockedIds = new Set(getShopeePreOrderBlockedChannels(templateChannels).map(channel => String(channel.id)));
+  if (!templateChannels.length) for (const id of SHOPEE_PREORDER_BLOCKED_CHANNEL_IDS) blockedIds.add(id);
+  return channels.filter(channel => !blockedIds.has(String(channel)));
 }
 
 function shopeeVariationGroupKey(value) {
@@ -1373,11 +1391,12 @@ async function handleSwitchShopeeTaskTemplate(request, env, path, idx) {
   const preOrderDts = product.pre_order_dts === null || product.pre_order_dts === undefined || product.pre_order_dts === ''
     ? null : Number(product.pre_order_dts);
   if (preOrderDts !== null) {
-    const blockedChannels = selectedChannels.filter(channel => channelMap.get(channel)?.supports_preorder === false);
+    const blockedChannels = selectedChannels.filter(channel => isShopeePreOrderBlockedChannel(channelMap.get(channel) || { id: channel }));
     if (blockedChannels.length) return error(`新模板的物流渠道不支持预售：${blockedChannels.join(', ')}`, 409);
   }
 
   const categoryId = String(product.category_id || '').trim();
+  if (preOrderDts !== null && !categoryId) return error('任务填写了 Pre-order DTS，切换模板前必须先补充 Category ID', 409);
   const category = categoryId ? await shopeeGetTemplateCategory(env, version.id, categoryId) : null;
   if (categoryId && !category) return error(`新模板不包含任务分类 ID：${categoryId}`, 409);
   if (preOrderDts !== null && category?.dts_min !== null && category?.dts_min !== undefined) {
@@ -1511,14 +1530,22 @@ async function handleUpdateTask(request, env, path, idx) {
         }
       }
     }
-    const preOrderDts = pre_order_dts === undefined || pre_order_dts === null || pre_order_dts === '' ? null : parseInt(pre_order_dts);
+    const preOrderDts = pre_order_dts === undefined || pre_order_dts === null || pre_order_dts === '' ? null : Number(pre_order_dts);
+    const categoryId = String(category_id || '').trim();
+    if (categoryId && !/^\d+$/.test(categoryId)) return error('Category ID 必须为数字', 400);
+    if (preOrderDts !== null && !categoryId) return error('填写 Pre-order DTS 时必须选择 Category ID，DTS 范围按分类确定', 400);
+    const templateCategory = categoryId ? await shopeeGetTemplateCategory(env, templateVersion.id, categoryId) : null;
+    if (categoryId && !templateCategory) return error('所选 Category ID 不在当前模板版本中', 400);
     const requestedChannels = normalizeShopeeShippingChannels(shipping_channels);
     const unsupportedChannels = requestedChannels.filter(channel => !allowedShippingIds.includes(channel));
     if (unsupportedChannels.length) return error('当前店铺模板不支持物流渠道: ' + unsupportedChannels.join(', '), 400);
     const rawChannels = normalizeShopeeShippingChannels(requestedChannels, allowedShippingIds);
-    const channels = normalizeShopeePreOrderShippingChannels(rawChannels, preOrderDts);
+    const blockedPreOrderChannels = rawChannels
+      .map(channel => templateShipping.find(item => String(item.id) === channel) || { id: channel })
+      .filter(isShopeePreOrderBlockedChannel);
+    const channels = normalizeShopeePreOrderShippingChannels(rawChannels, preOrderDts, templateShipping);
     if (!channels.length) {
-      if (preOrderDts !== null && rawChannels.some(channel => SHOPEE_PREORDER_BLOCKED_CHANNEL_IDS.includes(channel))) return error('预售商品不能使用5012 / Trong Ngày，请至少选择其他物流渠道', 400);
+      if (preOrderDts !== null && blockedPreOrderChannels.length) return error(`预售商品不能使用 ${blockedPreOrderChannels.map(channel => `${channel.id} / ${channel.label || '该渠道'}`).join('、')}，请至少选择其他物流渠道`, 400);
       return error('至少选择一个物流渠道', 400);
     }
     for (const channel of channels) {
@@ -1529,10 +1556,6 @@ async function handleUpdateTask(request, env, path, idx) {
     const sizeChartImage = String(size_chart_image || '').trim();
     if (sizeChartTemplate && sizeChartImage) return error('尺码表模板和尺码表图片只能填写一个', 400);
     if (preOrderDts !== null && (!Number.isInteger(preOrderDts) || preOrderDts < 5 || preOrderDts > 30)) return error('预售DTS必须为5~30天', 400);
-    const categoryId = String(category_id || '').trim();
-    if (categoryId && !/^\d+$/.test(categoryId)) return error('Category ID 必须为数字', 400);
-    const templateCategory = categoryId ? await shopeeGetTemplateCategory(env, templateVersion.id, categoryId) : null;
-    if (categoryId && !templateCategory) return error('所选 Category ID 不在当前模板版本中', 400);
     if (preOrderDts !== null && templateCategory?.dts_min !== null && templateCategory?.dts_min !== undefined) {
       if (preOrderDts < Number(templateCategory.dts_min) || preOrderDts > Number(templateCategory.dts_max)) {
         return error(`该分类的 Pre-order DTS 范围为 ${templateCategory.dts_range}`, 400);
@@ -3203,6 +3226,9 @@ function detectImageContentType(buffer, declaredType) {
   const bytes = new Uint8Array(buffer);
   if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a) return 'image/png';
   if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.length >= 6 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38 && (bytes[4] === 0x37 || bytes[4] === 0x39) && bytes[5] === 0x61) return 'image/gif';
+  if (bytes.length >= 12 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return 'image/webp';
+  if (bytes.length >= 5 && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2d) return 'application/pdf';
   return String(declaredType || '').split(';', 1)[0].trim().toLowerCase();
 }
 
@@ -3531,10 +3557,10 @@ function validateShopeeRow(product, variations, templateManifest, templateCatego
   var shippingChannels = normalizeShopeeShippingChannels(product.shipping_channels, allowedShippingIds);
   var blockedPreOrderChannels = product.pre_order_dts === null || product.pre_order_dts === undefined || product.pre_order_dts === ''
     ? []
-    : shippingChannels.filter(function(channel) { return SHOPEE_PREORDER_BLOCKED_CHANNEL_IDS.includes(channel); });
-  shippingChannels = normalizeShopeePreOrderShippingChannels(shippingChannels, product.pre_order_dts);
-  if (blockedPreOrderChannels.length) warnings.push('Pre-order DTS 已自动关闭不支持预售的物流渠道: ' + blockedPreOrderChannels.join(', '));
-  if (!shippingChannels.length) errors.push(blockedPreOrderChannels.length ? '预售商品不能使用5012 / Trong Ngày，请至少开启其他物流渠道' : '至少需要开启一个物流渠道');
+    : shippingChannels.map(function(channel) { return templateShipping.find(function(item) { return String(item.id) === channel; }) || { id: channel }; }).filter(isShopeePreOrderBlockedChannel);
+  shippingChannels = normalizeShopeePreOrderShippingChannels(shippingChannels, product.pre_order_dts, templateShipping);
+  if (blockedPreOrderChannels.length) warnings.push('Pre-order DTS 已自动关闭不支持预售的物流渠道: ' + blockedPreOrderChannels.map(function(channel) { return channel.id + ' / ' + (channel.label || '该渠道'); }).join(', '));
+  if (!shippingChannels.length) errors.push(blockedPreOrderChannels.length ? '预售商品不能使用当前已选物流渠道，请至少开启一个支持预售的渠道' : '至少需要开启一个物流渠道');
   for (var ci = 0; ci < shippingChannels.length; ci++) {
     var channelLimit = Number(templateShipping.find(function(channel) { return String(channel.id) === shippingChannels[ci]; })?.price_limit);
     if (channelLimit && highest > channelLimit) errors.push('物流渠道' + shippingChannels[ci] + '允许的最高价格为' + channelLimit);
@@ -3544,6 +3570,7 @@ function validateShopeeRow(product, variations, templateManifest, templateCatego
   // 分类ID
   if (categoryId && !/^\d+$/.test(categoryId)) warnings.push('分类ID(Category)应为数字（当前: ' + categoryId + '）');
   if (categoryId && !templateCategory) errors.push('分类ID不在当前店铺模板中');
+  if (product.pre_order_dts !== null && product.pre_order_dts !== undefined && product.pre_order_dts !== '' && !categoryId) errors.push('填写 Pre-order DTS 时必须选择 Category ID，DTS 范围按分类确定');
   if (product.pre_order_dts !== null && product.pre_order_dts !== undefined && product.pre_order_dts !== '' && templateCategory?.dts_min !== null && templateCategory?.dts_min !== undefined) {
     var dts = Number(product.pre_order_dts);
     if (dts < Number(templateCategory.dts_min) || dts > Number(templateCategory.dts_max)) errors.push('当前分类的Pre-order DTS范围为' + templateCategory.dts_range);
@@ -3623,7 +3650,7 @@ async function shopeeHandleExport(env, taskId) {
   const subTasks = (product.sub_tasks && product.sub_tasks.length) ? product.sub_tasks : [];
   const imageMap = new Map((product.images_rec || []).map(image => [image.sub_task_id + '|' + image.image_type + '|' + image.position, image.image_url || '']));
   const allowedShippingIds = (templateManifest.shipping_channels || []).map(channel => String(channel.id));
-  var shippingChannels = normalizeShopeePreOrderShippingChannels(normalizeShopeeShippingChannels(product.shipping_channels, allowedShippingIds), product.pre_order_dts);
+  var shippingChannels = normalizeShopeePreOrderShippingChannels(normalizeShopeeShippingChannels(product.shipping_channels, allowedShippingIds), product.pre_order_dts, templateManifest.shipping_channels || []);
 
   function generatedImage(type, pos, setIdx, subTaskId) {
     return imageMap.get(subTaskId + '|' + type + '|' + pos) || '';
@@ -3814,6 +3841,10 @@ async function shopeeHandleExport(env, taskId) {
 // ========== 上传 ==========
 
 async function handleUpload(request, env) {
+  const requestBytes = Number(request.headers.get('Content-Length') || 0);
+  if (Number.isFinite(requestBytes) && requestBytes > MAX_UPLOAD_REQUEST_BYTES) {
+    return error('上传请求不能超过 11MB', 413);
+  }
   const formData = await parseBody(request);
   if (!(formData instanceof FormData)) return error('请使用 multipart/form-data 格式上传', 400);
   const file = formData.get('file');
@@ -3823,14 +3854,14 @@ async function handleUpload(request, env) {
   const task = await getTaskIndex(env, taskId);
   if (!task) return error('任务不存在', 404);
   if (request.auth?.role !== 'admin' && task.user_id !== request.auth?.username) return error('无权访问该任务', 403);
-  const imageTypes = ['image/jpeg','image/png','image/webp','image/gif'];
-  const isSizeChartPdf = folder === 'size-chart' && file.type === 'application/pdf';
-  if (!imageTypes.includes(file.type) && !isSizeChartPdf) return error('仅支持 JPG/PNG/WebP/GIF，尺码表可使用 PDF', 400);
-  if (folder === 'sku-upload' && !['image/jpeg','image/png'].includes(file.type)) return error('SKU成品图仅支持 JPG 或 PNG', 400);
   const maxSize = folder === 'size-chart' ? 2 * 1024 * 1024 : 10 * 1024 * 1024;
   if (file.size > maxSize) return error(folder === 'size-chart' ? '尺码表文件不能超过 2MB' : '文件大小不能超过 10MB', 400);
   let buffer = await file.arrayBuffer();
   let contentType = detectImageContentType(buffer, file.type);
+  const imageTypes = ['image/jpeg','image/png','image/webp','image/gif'];
+  const isSizeChartPdf = folder === 'size-chart' && contentType === 'application/pdf';
+  if (!imageTypes.includes(contentType) && !isSizeChartPdf) return error('仅支持 JPG/PNG/WebP/GIF，尺码表可使用 PDF', 400);
+  if (folder === 'sku-upload' && !['image/jpeg','image/png'].includes(contentType)) return error('SKU成品图仅支持 JPG 或 PNG', 400);
   let extension = isSizeChartPdf ? 'pdf' : ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' }[contentType] || 'bin');
   let processing = null;
   if (folder === 'sku-upload') {
@@ -3857,7 +3888,7 @@ async function handleUpload(request, env) {
     url: `${publicUrl.replace(/\/+$/, '')}/${key}`,
     content_type: contentType,
     size_bytes: buffer.byteLength,
-    ...(processing ? { image_processing: { quality: processing.quality, resized: processing.resized, width: processing.width, height: processing.height } } : {}),
+    ...(processing ? { image_processing: { quality: processing.quality, resized: processing.resized, reencoded: processing.reencoded, width: processing.width, height: processing.height } } : {}),
     message: '上传成功',
   });
 }
