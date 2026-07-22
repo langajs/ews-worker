@@ -439,6 +439,7 @@ CREATE TABLE IF NOT EXISTS ews_shopee_products (
   length_cm REAL,
   width_cm REAL,
   height_cm REAL,
+  dimension_mode TEXT NOT NULL DEFAULT 'global', -- global / variant
   gtin TEXT NOT NULL DEFAULT '',
   brand_id TEXT NOT NULL DEFAULT '',
   hs_code TEXT NOT NULL DEFAULT '',
@@ -487,6 +488,9 @@ CREATE TABLE IF NOT EXISTS ews_shopee_variations (
   sku TEXT NOT NULL DEFAULT '',
   sku_description TEXT NOT NULL DEFAULT '',
   weight_kg REAL NOT NULL DEFAULT 0.2,
+  length_cm REAL,
+  width_cm REAL,
+  height_cm REAL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   FOREIGN KEY (product_id) REFERENCES ews_shopee_products(id) ON DELETE CASCADE
 );

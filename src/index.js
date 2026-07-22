@@ -1410,7 +1410,7 @@ async function handleUpdateTask(request, env, path, idx) {
   const body = await parseBody(request);
 
   if (idx.platform === 'shopee') {
-    const { template_profile_id, store_id, name, source_brief, product_type, main_description, reference_title, reference_image, auxiliary_images, generate_count, mode, category_id, cover_image, images, length_cm, width_cm, height_cm, gtin, variation_name1, variation_name2, variation_image_mode, size_chart_template_id, size_chart_image, pre_order_dts, shipping_channels, variations } = body || {};
+    const { template_profile_id, store_id, name, source_brief, product_type, main_description, reference_title, reference_image, auxiliary_images, generate_count, mode, category_id, cover_image, images, length_cm, width_cm, height_cm, dimension_mode, gtin, variation_name1, variation_name2, variation_image_mode, size_chart_template_id, size_chart_image, pre_order_dts, shipping_channels, variations } = body || {};
     const taskName = String(name || '').trim();
     if (!taskName) return error('任务名称不能为空', 400);
     if (taskName.length > 30) return error('任务名称不能超过30字符', 400);
@@ -1438,6 +1438,14 @@ async function handleUpdateTask(request, env, path, idx) {
     if (productType !== 'single' && (!variationName1 || variationName1.length > 14)) return error('一级规格名必须为1~14字符', 400);
     const variationImageMode = normalizeShopeeVariationImageMode(variation_image_mode, 'upload');
     const normalizedImageMode = productType === 'single' ? 'none' : variationImageMode;
+    const dimensionMode = dimension_mode === undefined || dimension_mode === null || dimension_mode === '' ? 'global' : String(dimension_mode);
+    if (!['global', 'variant'].includes(dimensionMode)) return error('尺寸模式只能是全局尺寸或按 SKU 尺寸', 400);
+    const globalDimensions = [length_cm, width_cm, height_cm].map(parseNumberOrNull);
+    const globalDimensionCount = globalDimensions.filter(value => value !== null).length;
+    if (dimensionMode === 'global') {
+      if (globalDimensionCount !== 0 && globalDimensionCount !== 3) return error('全局尺寸的长、宽、高必须同时填写或全部留空', 400);
+      if (globalDimensions.some(value => value !== null && (value <= 0 || value > 10000000))) return error('全局尺寸必须大于0且不超过10000000', 400);
+    }
     const normalizedVariations = [];
     const combinationKeys = new Set();
     const skuCodes = new Set();
@@ -1451,6 +1459,10 @@ async function handleUpdateTask(request, env, path, idx) {
       if (!Number.isInteger(stock) || stock < 0 || stock > 10000000) return error(`变体#${i + 1}库存必须为0~10000000`, 400);
       const weightKg = v.weight_kg === undefined || v.weight_kg === null || v.weight_kg === '' ? 0.2 : Number(v.weight_kg);
       if (!Number.isFinite(weightKg) || weightKg <= 0 || weightKg * 1000 > 100000000) return error(`变体#${i + 1}重量必须大于0且导出后不超过100000000g`, 400);
+      const variantDimensions = dimensionMode === 'variant' ? [v.length_cm, v.width_cm, v.height_cm].map(parseNumberOrNull) : [null, null, null];
+      const variantDimensionCount = variantDimensions.filter(value => value !== null).length;
+      if (dimensionMode === 'variant' && variantDimensionCount !== 0 && variantDimensionCount !== 3) return error(`变体#${i + 1}的长、宽、高必须同时填写或全部留空`, 400);
+      if (variantDimensions.some(value => value !== null && (value <= 0 || value > 10000000))) return error(`变体#${i + 1}尺寸必须大于0且不超过10000000`, 400);
       const sku = String(v.sku || '').trim();
       if (sku.length > SHOPEE_USER_SKU_MAX_LENGTH) return error(`变体#${i + 1}商家SKU不能超过${SHOPEE_USER_SKU_MAX_LENGTH}字符（系统会添加${SKU_PREFIX_LENGTH}字符随机前缀）`, 400);
       const skuKey = sku.toLocaleLowerCase();
@@ -1477,6 +1489,7 @@ async function handleUpdateTask(request, env, path, idx) {
         price: pricing.price, price_float_enabled: pricing.price_float_enabled,
         price_min: pricing.price_min, price_max: pricing.price_max, price_precision: pricing.price_precision,
         stock, sku, sku_description: skuDescription, weight_kg: weightKg,
+        length_cm: variantDimensions[0], width_cm: variantDimensions[1], height_cm: variantDimensions[2],
       });
     }
     if (highestPrice / lowestPrice > 5) return error('最高SKU价格除以最低SKU价格不能超过5', 400);
@@ -1498,10 +1511,6 @@ async function handleUpdateTask(request, env, path, idx) {
         }
       }
     }
-    const dimensions = [length_cm, width_cm, height_cm].map(parseNumberOrNull);
-    const dimensionCount = dimensions.filter(value => value !== null).length;
-    if (dimensionCount !== 0 && dimensionCount !== 3) return error('长、宽、高必须同时填写或全部留空', 400);
-    if (dimensions.some(value => value !== null && (value <= 0 || value > 10000000))) return error('长、宽、高必须大于0且不超过10000000', 400);
     const preOrderDts = pre_order_dts === undefined || pre_order_dts === null || pre_order_dts === '' ? null : parseInt(pre_order_dts);
     const requestedChannels = normalizeShopeeShippingChannels(shipping_channels);
     const unsupportedChannels = requestedChannels.filter(channel => !allowedShippingIds.includes(channel));
@@ -1540,7 +1549,7 @@ async function handleUpdateTask(request, env, path, idx) {
       mode: mode === 'dedup' ? 'dedup' : 'full',
       main_image_count: 9, detail_image_count: 0,
       cover_image: cover_image || '', images: images || '[]',
-      weight_kg: 0.2, length_cm: dimensions[0], width_cm: dimensions[1], height_cm: dimensions[2], gtin: gtin || '',
+      weight_kg: 0.2, length_cm: dimensionMode === 'global' ? globalDimensions[0] : null, width_cm: dimensionMode === 'global' ? globalDimensions[1] : null, height_cm: dimensionMode === 'global' ? globalDimensions[2] : null, dimension_mode: dimensionMode, gtin: gtin || '',
       variation_name1: productType === 'single' ? '' : variationName1, variation_name2: productType === 'two' ? variationName2 : '',
       variation_name1_export: '', variation_name2_export: '', variation_image_mode: normalizedImageMode,
       size_chart_template_id: sizeChartTemplate, size_chart_image: sizeChartImage, pre_order_dts: preOrderDts,
@@ -3393,6 +3402,8 @@ function validateShopeeRow(product, variations, templateManifest, templateCatego
   var variationName2 = product.variation_name2 || '';
   var productType = normalizeShopeeProductType(product.product_type, variations);
   var isSingle = productType === 'single';
+  var dimensionMode = product.dimension_mode === 'variant' ? 'variant' : 'global';
+  if (product.dimension_mode && !['global', 'variant'].includes(product.dimension_mode)) errors.push('尺寸模式无效');
 
   // 必填字段
   if (!n) errors.push('任务名称不能为空');
@@ -3452,9 +3463,19 @@ function validateShopeeRow(product, variations, templateManifest, templateCatego
   var lowest = Math.min(...priceLows.filter(Number.isFinite));
   var highest = Math.max(...priceHighs.filter(Number.isFinite));
   if (Number.isFinite(lowest) && lowest > 0 && Number.isFinite(highest) && highest / lowest > 5) errors.push('最高SKU价格除以最低SKU价格不能超过5');
-  var dimensions = [product.length_cm, product.width_cm, product.height_cm].map(parseNumberOrNull);
-  var dimensionCount = dimensions.filter(function(value) { return value !== null; }).length;
-  if (dimensionCount !== 0 && dimensionCount !== 3) errors.push('长、宽、高必须同时填写或全部留空');
+  if (dimensionMode === 'global') {
+    var dimensions = [product.length_cm, product.width_cm, product.height_cm].map(parseNumberOrNull);
+    var dimensionCount = dimensions.filter(function(value) { return value !== null; }).length;
+    if (dimensionCount !== 0 && dimensionCount !== 3) errors.push('全局尺寸的长、宽、高必须同时填写或全部留空');
+    if (dimensions.some(function(value) { return value !== null && (value <= 0 || value > 10000000); })) errors.push('全局尺寸必须大于0且不超过10000000');
+  } else {
+    for (var di = 0; di < variations.length; di++) {
+      var variantDimensions = [variations[di].length_cm, variations[di].width_cm, variations[di].height_cm].map(parseNumberOrNull);
+      var variantDimensionCount = variantDimensions.filter(function(value) { return value !== null; }).length;
+      if (variantDimensionCount !== 0 && variantDimensionCount !== 3) errors.push('变体#' + (di + 1) + ' 的长、宽、高必须同时填写或全部留空');
+      if (variantDimensions.some(function(value) { return value !== null && (value <= 0 || value > 10000000); })) errors.push('变体#' + (di + 1) + ' 尺寸必须大于0且不超过10000000');
+    }
+  }
   var templateShipping = Array.isArray(templateManifest?.shipping_channels) ? templateManifest.shipping_channels : [];
   var allowedShippingIds = templateShipping.map(function(channel) { return String(channel.id); });
   var shippingChannels = normalizeShopeeShippingChannels(product.shipping_channels, allowedShippingIds);
@@ -3651,6 +3672,9 @@ async function shopeeHandleExport(env, taskId) {
   // 先构造平台语义字段，再由店铺模板隐藏 token 决定实际列位置。
   function makeRow(subTask, setIdx, variationsIdx) {
     var v = variations[variationsIdx];
+    var rowDimensions = product.dimension_mode === 'variant'
+      ? [v.length_cm, v.width_cm, v.height_cm]
+      : [product.length_cm, product.width_cm, product.height_cm];
     var images = productImages(setIdx, subTask.id || '');
     var coverImage = getImg(setIdx, subTask.id || '', 'main', 1);
     var parentSku = parentSkuFor(subTask, setIdx);
@@ -3685,9 +3709,9 @@ async function shopeeHandleExport(env, taskId) {
       ps_item_image_7: images[6] || '',
       ps_item_image_8: images[7] || '',
       ps_weight: weightInGrams(v),
-      ps_length: product.length_cm ?? '',
-      ps_width: product.width_cm ?? '',
-      ps_height: product.height_cm ?? '',
+      ps_length: rowDimensions[0] ?? '',
+      ps_width: rowDimensions[1] ?? '',
+      ps_height: rowDimensions[2] ?? '',
       ps_product_pre_order_dts: product.pre_order_dts ?? '',
       ps_brand: product.brand_id || '',
       et_title_reason: '',
