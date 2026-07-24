@@ -1,0 +1,41 @@
+services:
+  n8n:
+    image: ${N8N_IMAGE}
+    container_name: ews-n8n-${NODE_NAME}
+    restart: unless-stopped
+    ports:
+      - "${N8N_PORT}:5678"
+    environment:
+      N8N_HOST: ${N8N_HOST}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: ${N8N_PROTOCOL}
+      N8N_EDITOR_BASE_URL: ${N8N_PUBLIC_URL}
+      WEBHOOK_URL: ${N8N_PUBLIC_URL}
+      N8N_PROXY_HOPS: ${N8N_PROXY_HOPS:-1}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      GENERIC_TIMEZONE: Asia/Shanghai
+      TZ: Asia/Shanghai
+      NODE_ENV: production
+      DB_SQLITE_POOL_SIZE: 2
+      N8N_CONCURRENCY_PRODUCTION_LIMIT: ${N8N_CONCURRENCY}
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: 168
+      EXECUTIONS_DATA_PRUNE_MAX_COUNT: 10000
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - "${WORKFLOW_DIRECTORY}:/workflows:ro"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5678/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+volumes:
+  n8n_data:
+    name: ews_n8n_${NODE_NAME}_data
+

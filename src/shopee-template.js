@@ -1,5 +1,6 @@
 import { unzipSync, zipSync, strFromU8, strToU8 } from 'fflate';
 import { XMLParser } from 'fast-xml-parser';
+import { isShopeePreOrderShippingChannel } from './shopee-preorder.js';
 
 const MAX_TEMPLATE_BYTES = 5 * 1024 * 1024;
 const MAX_TEMPLATE_ENTRIES = 100;
@@ -370,11 +371,7 @@ function comparableChannels(manifest) {
 }
 
 function channelSupportsPreOrder(field) {
-  const text = `${field.label || ''} ${field.description || ''} ${field.rule || ''}`.toLowerCase();
-  if (field.semantic_key === 'channel_id.5012') return false;
-  if (/trong\s+ngày|same\s+day/.test(text)) return false;
-  if (/(?:does not|doesn't|not)\s+support.*pre.?order|không.*(?:pre.?order|đặt trước)/.test(text)) return false;
-  return true;
+  return isShopeePreOrderShippingChannel(field);
 }
 
 function comparableCategories(categories) {

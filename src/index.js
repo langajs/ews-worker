@@ -37,6 +37,10 @@ import {
   buildShopeeWorkbook, compareShopeeTemplateSemantics, parseShopeeTemplate, sha256Hex,
   SHOPEE_TEMPLATE_SEMANTIC_KEYS,
 } from './shopee-template.js';
+import {
+  annotateShopeeShippingChannels,
+  isShopeePreOrderShippingChannel,
+} from './shopee-preorder.js';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -598,7 +602,7 @@ function serializeShopeeTemplateVersion(version) {
     unknown_required_tokens: manifest.unknown_required_tokens || [],
     created_at: version.version_created_at || version.created_at,
     label: shopeeTemplateVersionLabel(version, manifest),
-    shipping_channels: manifest.shipping_channels || [],
+    shipping_channels: annotateShopeeShippingChannels(manifest.shipping_channels),
   };
 }
 
@@ -682,7 +686,7 @@ async function handleGetShopeeTemplateProfile(request, env, path) {
     profile: serialized,
     store: serialized,
     categories,
-    shipping_channels: manifest.shipping_channels || [],
+    shipping_channels: annotateShopeeShippingChannels(manifest.shipping_channels),
   };
   if (request.auth.role === 'admin') {
     const versions = (await shopeeGetTemplateProfileVersions(env, profileId))?.results || [];
@@ -1148,7 +1152,6 @@ const JST_USER_SKU_MAX_LENGTH = JST_SKU_MAX_LENGTH - SKU_PREFIX_LENGTH;
 const SHOPEE_USER_SKU_MAX_LENGTH = SHOPEE_SKU_MAX_LENGTH - SKU_PREFIX_LENGTH;
 const SHOPEE_DESCRIPTION_MIN_LENGTH = 100;
 const SHOPEE_DESCRIPTION_MAX_LENGTH = 3000;
-const SHOPEE_PREORDER_BLOCKED_CHANNEL_IDS = Object.freeze(['5012']);
 const MAX_UPLOAD_REQUEST_BYTES = 11 * 1024 * 1024;
 const SKU_UPLOAD_MAX_OUTPUT_BYTES = 2_000_000;
 const JST_TEMPLATE_COLUMNS = Object.freeze([
@@ -1176,24 +1179,13 @@ function normalizeShopeeShippingChannels(value, allowedChannels = null) {
 }
 
 function isShopeePreOrderBlockedChannel(channel) {
-  if (!channel) return false;
-  const id = String(channel.id || channel).trim();
-  const label = String(channel.label || '').trim();
-  if (typeof channel === 'object' && Object.prototype.hasOwnProperty.call(channel, 'supports_preorder')) {
-    return channel.supports_preorder === false;
-  }
-  return SHOPEE_PREORDER_BLOCKED_CHANNEL_IDS.includes(id) || /trong\s+ngày|same\s+day/i.test(label);
-}
-
-function getShopeePreOrderBlockedChannels(templateChannels) {
-  return (Array.isArray(templateChannels) ? templateChannels : []).filter(isShopeePreOrderBlockedChannel);
+  return !isShopeePreOrderShippingChannel(channel);
 }
 
 function normalizeShopeePreOrderShippingChannels(channels, preOrderDts, templateChannels = []) {
   if (preOrderDts === null || preOrderDts === undefined || preOrderDts === '') return channels;
-  const blockedIds = new Set(getShopeePreOrderBlockedChannels(templateChannels).map(channel => String(channel.id)));
-  if (!templateChannels.length) for (const id of SHOPEE_PREORDER_BLOCKED_CHANNEL_IDS) blockedIds.add(id);
-  return channels.filter(channel => !blockedIds.has(String(channel)));
+  const channelMap = new Map((Array.isArray(templateChannels) ? templateChannels : []).map(channel => [String(channel.id), channel]));
+  return channels.filter(channel => isShopeePreOrderShippingChannel(channelMap.get(String(channel)) || { id: channel }));
 }
 
 function shopeeVariationGroupKey(value) {
@@ -1592,7 +1584,7 @@ async function handleUpdateTask(request, env, path, idx) {
   const body = await parseBody(request);
 
   if (idx.platform === 'shopee') {
-    const { template_profile_id, store_id, name, source_brief, product_type, main_description, reference_title, reference_image, auxiliary_images, generate_count, mode, category_id, cover_image, images, length_cm, width_cm, height_cm, dimension_mode, gtin, variation_name1, variation_name2, variation_image_mode, size_chart_template_id, size_chart_image, pre_order_dts, shipping_channels, variations } = body || {};
+    const { template_profile_id, store_id, name, source_brief, product_type, main_description, reference_title, reference_image, auxiliary_images, generate_count, mode, category_id, cover_image, images, length_cm, width_cm, height_cm, dimension_mode, gtin, variation_name1, variation_name2, variation_image_mode, size_chart_template_id, size_chart_image, pre_order_enabled, pre_order_dts, shipping_channels, variations } = body || {};
     const taskName = String(name || '').trim();
     if (!taskName) return error('任务名称不能为空', 400);
     if (taskName.length > 30) return error('任务名称不能超过30字符', 400);
@@ -1693,7 +1685,11 @@ async function handleUpdateTask(request, env, path, idx) {
         }
       }
     }
-    const preOrderDts = pre_order_dts === undefined || pre_order_dts === null || pre_order_dts === '' ? null : Number(pre_order_dts);
+    const preOrderEnabled = pre_order_enabled === undefined
+      ? !(pre_order_dts === undefined || pre_order_dts === null || pre_order_dts === '')
+      : isEnabled(pre_order_enabled);
+    if (preOrderEnabled && (pre_order_dts === undefined || pre_order_dts === null || pre_order_dts === '')) return error('开启预售后必须填写 Pre-order DTS', 400);
+    const preOrderDts = preOrderEnabled ? Number(pre_order_dts) : null;
     const categoryId = String(category_id || '').trim();
     if (categoryId && !/^\d+$/.test(categoryId)) return error('Category ID 必须为数字', 400);
     if (preOrderDts !== null && !categoryId) return error('填写 Pre-order DTS 时必须选择 Category ID，DTS 范围按分类确定', 400);
@@ -1703,12 +1699,13 @@ async function handleUpdateTask(request, env, path, idx) {
     const unsupportedChannels = requestedChannels.filter(channel => !allowedShippingIds.includes(channel));
     if (unsupportedChannels.length) return error('当前店铺模板不支持物流渠道: ' + unsupportedChannels.join(', '), 400);
     const rawChannels = normalizeShopeeShippingChannels(requestedChannels, allowedShippingIds);
-    const blockedPreOrderChannels = rawChannels
+    const blockedPreOrderChannels = preOrderDts === null ? [] : rawChannels
       .map(channel => templateShipping.find(item => String(item.id) === channel) || { id: channel })
       .filter(isShopeePreOrderBlockedChannel);
     const channels = normalizeShopeePreOrderShippingChannels(rawChannels, preOrderDts, templateShipping);
+    if (blockedPreOrderChannels.length) return error(`预售仅支持 Tủ nhận hàng - SPX、Tủ nhận hàng - Viettel Smartbox、Nhanh；请移除 ${blockedPreOrderChannels.map(channel => channel.label || channel.id).join('、')}`, 400);
     if (!channels.length) {
-      if (preOrderDts !== null && blockedPreOrderChannels.length) return error(`预售商品不能使用 ${blockedPreOrderChannels.map(channel => `${channel.id} / ${channel.label || '该渠道'}`).join('、')}，请至少选择其他物流渠道`, 400);
+      if (preOrderDts !== null) return error('当前模板没有已选择的预售可用物流，请选择 Tủ nhận hàng - SPX、Tủ nhận hàng - Viettel Smartbox 或 Nhanh', 400);
       return error('至少选择一个物流渠道', 400);
     }
     for (const channel of channels) {
