@@ -5,17 +5,28 @@ param(
   [string]$NodeName,
 
   [Parameter(Mandatory = $true)]
-  [ValidateRange(1024, 65535)]
+  [ValidateRange(1, 65535)]
   [int]$Port,
 
   [Parameter(Mandatory = $true)]
   [ValidatePattern('^https?://')]
   [string]$PublicUrl,
 
-  [string]$Image = 'n8nio/n8n:2.25.7',
+  [string]$Image = 'n8nio/n8n:stable',
 
   [ValidateRange(1, 100)]
   [int]$Concurrency = 20,
+
+  [ValidateSet('direct', 'tunnel')]
+  [string]$Exposure = 'direct',
+
+  [string]$TunnelToken = '',
+
+  [string]$CloudflaredImage = 'cloudflare/cloudflared:latest',
+
+  [string]$OriginCertPath = '',
+
+  [string]$OriginKeyPath = '',
 
   [string]$EncryptionKey = '',
 
@@ -41,6 +52,33 @@ if ($uri.AbsolutePath -ne '/') {
   throw 'PublicUrl must use a dedicated domain root, for example https://n8n-node2.example.com'
 }
 $PublicUrl = $PublicUrl.TrimEnd('/') + '/'
+$publicPort = if ($uri.IsDefaultPort) { if ($uri.Scheme -eq 'https') { 443 } else { 80 } } else { $uri.Port }
+$isLocalPublicUrl = @('localhost', '127.0.0.1', '::1') -contains $uri.DnsSafeHost
+if ($Exposure -eq 'tunnel' -and -not $TunnelToken) {
+  throw 'TunnelToken is required when Exposure is tunnel. Copy it from Cloudflare Zero Trust > Networks > Tunnels > Add a replica.'
+}
+if (($OriginCertPath -and -not $OriginKeyPath) -or ($OriginKeyPath -and -not $OriginCertPath)) {
+  throw 'OriginCertPath and OriginKeyPath must be provided together.'
+}
+$useOriginTls = [bool]($OriginCertPath -and $OriginKeyPath)
+if ($Exposure -eq 'direct' -and -not $isLocalPublicUrl) {
+  $supportedHttpPorts = @(80, 8080, 8880, 2052, 2082, 2086, 2095)
+  $supportedHttpsPorts = @(443, 2053, 2083, 2087, 2096, 8443)
+  $supportedPorts = if ($uri.Scheme -eq 'https') { $supportedHttpsPorts } else { $supportedHttpPorts }
+  if ($supportedPorts -notcontains $publicPort) {
+    throw "Cloudflare DNS proxy does not support public $($uri.Scheme.ToUpperInvariant()) port $publicPort for this deployment path."
+  }
+  if ($Port -ne $publicPort) {
+    throw "Direct DNS mode requires Port ($Port) to match the public URL port ($publicPort)."
+  }
+  if ($uri.Scheme -eq 'https' -and -not $useOriginTls) {
+    throw 'Direct HTTPS mode requires OriginCertPath and OriginKeyPath so Cloudflare can use Full (strict) to the origin.'
+  }
+}
+if ($useOriginTls) {
+  $OriginCertPath = (Resolve-Path $OriginCertPath).Path
+  $OriginKeyPath = (Resolve-Path $OriginKeyPath).Path
+}
 
 & docker version --format '{{.Server.Version}}' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Docker Engine is unavailable' }
@@ -54,6 +92,39 @@ $envFile = Join-Path $stateRoot '.env'
 $composeFile = Join-Path $stateRoot 'compose.extra-node.yaml'
 New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
 
+$sslEnvironment = if ($useOriginTls) {
+@'
+      N8N_SSL_CERT: /certs/origin.pem
+      N8N_SSL_KEY: /certs/origin.key
+'@
+} else { '' }
+$sslVolumes = if ($useOriginTls) {
+@'
+      - "${ORIGIN_CERT_FILE}:/certs/origin.pem:ro"
+      - "${ORIGIN_KEY_FILE}:/certs/origin.key:ro"
+'@
+} else { '' }
+$healthScheme = if ($useOriginTls) { 'https' } else { 'http' }
+$healthcheckScript = if ($useOriginTls) {
+  "process.env.NODE_TLS_REJECT_UNAUTHORIZED='0';fetch('https://127.0.0.1:5678/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+} else {
+  "fetch('http://127.0.0.1:5678/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+}
+$tunnelService = if ($Exposure -eq 'tunnel') {
+@'
+  cloudflared:
+    image: ${CLOUDFLARED_IMAGE}
+    container_name: ews-cloudflared-${NODE_NAME}
+    restart: unless-stopped
+    depends_on:
+      - n8n
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    command: tunnel --no-autoupdate run
+
+'@
+} else { '' }
+
 $composeContent = @'
 services:
   n8n:
@@ -61,7 +132,7 @@ services:
     container_name: ews-n8n-${NODE_NAME}
     restart: unless-stopped
     ports:
-      - "${N8N_PORT}:5678"
+      - "${N8N_BIND_PREFIX}${N8N_PORT}:5678"
     environment:
       N8N_HOST: ${N8N_HOST}
       N8N_PORT: 5678
@@ -82,20 +153,27 @@ services:
       N8N_PERSONALIZATION_ENABLED: "false"
       N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
       N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+__SSL_ENVIRONMENT__
     volumes:
       - n8n_data:/home/node/.n8n
       - "${WORKFLOW_DIRECTORY}:/workflows:ro"
+__SSL_VOLUMES__
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5678/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "__HEALTHCHECK_SCRIPT__"]
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 30s
 
+__TUNNEL_SERVICE__
 volumes:
   n8n_data:
     name: ews_n8n_${NODE_NAME}_data
 '@
+$composeContent = $composeContent.Replace('__SSL_ENVIRONMENT__', $sslEnvironment.TrimEnd())
+$composeContent = $composeContent.Replace('__SSL_VOLUMES__', $sslVolumes.TrimEnd())
+$composeContent = $composeContent.Replace('__HEALTHCHECK_SCRIPT__', $healthcheckScript)
+$composeContent = $composeContent.Replace('__TUNNEL_SERVICE__', $tunnelService)
 [IO.File]::WriteAllText($composeFile, $composeContent, (New-Object Text.UTF8Encoding($false)))
 
 if ($CredentialsDirectory) {
@@ -149,10 +227,13 @@ if (-not $EncryptionKey) {
 if ($EncryptionKey.Length -lt 32) { throw 'EncryptionKey must contain at least 32 characters' }
 
 $workflowMount = $importDirectory.Replace('\', '/')
+$bindPrefix = if ($Exposure -eq 'tunnel') { '127.0.0.1:' } else { '' }
 $envLines = @(
   "NODE_NAME=$NodeName"
   "N8N_IMAGE=$Image"
+  "CLOUDFLARED_IMAGE=$CloudflaredImage"
   "N8N_PORT=$Port"
+  "N8N_BIND_PREFIX=$bindPrefix"
   "N8N_HOST=$($uri.DnsSafeHost)"
   "N8N_PROTOCOL=$($uri.Scheme)"
   "N8N_PUBLIC_URL=$PublicUrl"
@@ -161,6 +242,13 @@ $envLines = @(
   "N8N_PROXY_HOPS=1"
   "WORKFLOW_DIRECTORY=$workflowMount"
 )
+if ($Exposure -eq 'tunnel') {
+  $envLines += "CLOUDFLARE_TUNNEL_TOKEN=$TunnelToken"
+}
+if ($useOriginTls) {
+  $envLines += "ORIGIN_CERT_FILE=$($OriginCertPath.Replace('\', '/'))"
+  $envLines += "ORIGIN_KEY_FILE=$($OriginKeyPath.Replace('\', '/'))"
+}
 [IO.File]::WriteAllLines($envFile, $envLines, (New-Object Text.UTF8Encoding($false)))
 
 $projectName = "ews-n8n-$NodeName"
@@ -171,8 +259,13 @@ if ($LASTEXITCODE -ne 0) { throw 'Failed to start the n8n container' }
 $healthy = $false
 for ($attempt = 0; $attempt -lt 60; $attempt++) {
   try {
-    $response = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/healthz" -TimeoutSec 3
-    if ($response.StatusCode -eq 200) { $healthy = $true; break }
+    if ($useOriginTls) {
+      & curl.exe -k -fsS "${healthScheme}://127.0.0.1:$Port/healthz" | Out-Null
+      if ($LASTEXITCODE -eq 0) { $healthy = $true; break }
+    } else {
+      $response = Invoke-WebRequest -UseBasicParsing -Uri "${healthScheme}://127.0.0.1:$Port/healthz" -TimeoutSec 3
+      if ($response.StatusCode -eq 200) { $healthy = $true; break }
+    }
   } catch {}
   Start-Sleep -Seconds 2
 }
@@ -203,7 +296,8 @@ if ($ImportWorkflows) {
 }
 
 Write-Host "n8n node is ready: $PublicUrl"
-Write-Host "Local health check: http://127.0.0.1:$Port/healthz"
+Write-Host "Exposure mode: $Exposure"
+Write-Host "Local health check: ${healthScheme}://127.0.0.1:$Port/healthz"
 Write-Host "Node state directory: $stateRoot"
 if (-not $ImportWorkflows) {
   Write-Host 'Initialize the owner account, then rerun with the same parameters and -ImportWorkflows.'
