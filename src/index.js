@@ -41,7 +41,11 @@ import {
   annotateShopeeShippingChannels,
   isShopeePreOrderShippingChannel,
 } from './shopee-preorder.js';
-import { DISTRIBUTED_N8N_SCRIPT, getDistributedN8nWiki } from './admin-deployment-wiki.js';
+import {
+  DISTRIBUTED_N8N_INSTALLER_FILENAME,
+  getDistributedN8nInstallerScript,
+  getDistributedN8nWiki,
+} from './admin-deployment-wiki.js';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -474,11 +478,11 @@ async function handleGetDistributedN8nWiki(request) {
 async function handleDownloadDistributedN8nScript(request) {
   const denied = adminWikiError(request);
   if (denied) return denied;
-  return new Response(DISTRIBUTED_N8N_SCRIPT, {
+  return new Response(getDistributedN8nInstallerScript(), {
     headers: {
       ...CORS_HEADERS,
       'Content-Type': 'text/plain; charset=utf-8',
-      'Content-Disposition': 'attachment; filename="deploy-extra-node.ps1"',
+      'Content-Disposition': `attachment; filename="${DISTRIBUTED_N8N_INSTALLER_FILENAME}"`,
       'Cache-Control': 'private, no-store, max-age=0',
       'X-Content-Type-Options': 'nosniff',
     },

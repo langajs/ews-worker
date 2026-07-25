@@ -5,7 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [[rules]]
 type = "Text"
-globs = ["**/*.ps1"]
+globs = ["**/*.ps1", "**/*.cmd", "**/n8n/*.json"]
 fallthrough = true
 
 [vars]

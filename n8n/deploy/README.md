@@ -1,72 +1,48 @@
-# EWS 额外 n8n 节点部署
+# EWS n8n 一键部署
 
-该方案部署独立的 n8n 实例，用独立端口、SQLite 数据卷和 `N8N_ENCRYPTION_KEY` 承接指定用户的工作流。它不是 n8n queue mode 集群；EWS Worker 仍按任务所属用户的 `webhook_config` 选择目标地址，因此不同用户可以分流到不同主机。
+生产部署入口位于管理员导航的“部署 Wiki”。管理员填写节点信息、n8n owner 和三组模型 API Key 后，浏览器会下载一份完整的 `install-ews-{node}.cmd`。
 
-## 标准部署入口
+宿主机仅需：
 
-生产部署的权威说明位于 EWS 管理员导航中的“分布式部署 Wiki”。Wiki 在管理员鉴权后加载，并提供可直接复制的 Linux 和 Windows Docker 命令；宿主机只需要 Docker Engine 或 Docker Desktop，不要求安装 Node.js、PowerShell 或反向代理。
+- Windows 10/11
+- Docker Desktop，且 Docker Engine 已启动
+- Windows 自带的 `cmd.exe` 和系统组件
 
-当前支持两种入口：
+执行方式：
 
-- 本地主机：Cloudflare Tunnel。n8n 只绑定 `127.0.0.1:{Port}`，`cloudflared` 使用同一 Docker network 转发到 `http://n8n:5678`。
-- 云服务器：Cloudflare DNS 橙云代理。n8n 直接挂载 Cloudflare Origin CA 证书并监听受支持的 HTTPS 端口，推荐 `443`。
+```bat
+install-ews-node2.cmd
+```
 
-两种模式都使用节点专属 Docker volume 和持久化 `N8N_ENCRYPTION_KEY`。重新创建容器不会清空 n8n 数据，但删除数据卷或加密密钥会导致不可恢复的数据或凭证损失。
+也可以直接双击该 CMD 文件。用户无需打开 PowerShell 或处理执行策略；CMD 内部会调用 Windows 自带组件运行嵌入的安装逻辑。
 
-## 标准执行顺序
+安装器会自动完成以下操作：
 
-1. 在管理员 Wiki 中选择“本地主机”或“云服务器”，填写域名、节点名、端口以及可选的 Tunnel token。
-2. 执行对应操作系统的“生成并持久化节点配置”命令。
-3. 执行 Docker 启动命令并打开节点域名，完成 n8n owner 初始化。
-4. 安全迁移三份 Credential JSON，使用 `docker cp` 与 `docker exec` 导入。
-5. 导入并发布仓库 `n8n/` 中的 9 个工作流，完成健康检查与最小业务闭环。
-6. 在 EWS“系统配置 → 用户管理 → 工作流地址”中逐用户切换 webhook。
+1. 创建节点专属 Docker network、volume 和 `n8nio/n8n:stable` 容器。
+2. 持久化 `N8N_ENCRYPTION_KEY`，初始化 n8n owner。
+3. 导入三组 `HTTP Header Auth` 凭证。
+4. 导入并发布仓库内 9 个生产工作流。
+5. 将 7 个图片工作流改写为管理员填写的图片服务地址；同主机容器会自动接入图片服务所在的 Docker network。
+6. 校验图片服务 `/readyz`、n8n `/healthz` 和工作流发布状态。
 
-## 可选 PowerShell 辅助脚本
+节点状态保存在 `%LOCALAPPDATA%\EWS\n8n-nodes\{node}`。重复执行同一节点脚本会复用数据卷和加密密钥，并重新导入当前工作流。
 
-`deploy-extra-node.ps1` 是标准 Docker 流程的自动化封装，不是生产部署的必要依赖。Windows 可以直接使用 Windows PowerShell 5.1/PowerShell 7；Linux 只有在主动选择该辅助方式时才需要 PowerShell 7。
+## Cloudflare Tunnel
 
-~~~powershell
-.\deploy-extra-node.ps1 -NodeName node2 -Exposure tunnel -TunnelToken "<CLOUDFLARE_TUNNEL_TOKEN>" -Port 5679 -PublicUrl https://n8n-node2.example.com -WorkflowDirectory ..\
-~~~
+Cloudflare 不属于安装器依赖。n8n 部署成功后，管理员在 Cloudflare 创建 remotely-managed tunnel，再使用 Wiki 生成的独立 Docker 命令连接。
 
-脚本会生成 Docker Compose 配置并保存在宿主机节点状态目录。相同 `NodeName` 会复用 `.env` 中的加密密钥和 `ews_n8n_{NodeName}_data` 数据卷。
+Public Hostname 的 Service 固定为：
 
-## 辅助脚本参数
+```text
+http://n8n:5678
+```
 
-- `-Exposure tunnel|direct`：本地主机使用 `tunnel`，云服务器使用 `direct`。
-- `-TunnelToken <token>`：Tunnel 模式必填，来自 Cloudflare connector token。
-- `-OriginCertPath <path>` / `-OriginKeyPath <path>`：DNS 直连 HTTPS 必填，用于 n8n 源站 TLS。
-- `-Image n8nio/n8n:stable`：默认使用稳定镜像标签；生产升级时可显式传入已验证的固定版本。
-- `-Concurrency 20`：该节点生产执行并发上限。
-- `-EncryptionKey <secret>`：首次部署时传入自有密钥；未传时自动生成。
-- `-WorkflowDirectory <path>`：覆盖工作流 JSON 目录。
-- `-CredentialsDirectory <path>`：导入从原节点解密导出的 Credential JSON 目录，并保留原 Credential ID。
-- `-SkipActivation`：只导入，不逐个发布工作流。
+`cloudflared` 必须加入安装器创建的 `ews-{node}` Docker network。无需公网 IP、端口转发或额外反向代理。
 
-Windows 状态目录为 `%LOCALAPPDATA%\EWS\n8n-nodes\{NodeName}`；Linux 使用辅助脚本时取决于 PowerShell 返回的 LocalApplicationData 或 `$HOME/.local/state`。不要跨节点复用加密密钥。
+## 安全边界
 
-## 用户分流
-
-在 EWS 的“系统配置 → 用户管理 → 工作流地址”中为用户填写新节点地址。留空字段继续继承系统默认地址。
-
-| 配置项 | webhook 路径 |
-| --- | --- |
-| Shopee 商品元数据 | `/webhook/vn/v3t1` |
-| Shopee 主图 | `/webhook/vn/v3m1` |
-| Shopee 附图 | `/webhook/vn/v3m2` |
-| Shopee SKU 图 | `/webhook/vn/v3s1` |
-| 聚水潭商品元数据 | `/webhook/jst/v3-metadata` |
-| 聚水潭主图 | `/webhook/cn/v3m1` |
-| 聚水潭附图 | `/webhook/cn/v3m2` |
-| 聚水潭详情图 | `/webhook/cn/v3d1` |
-| 聚水潭 SKU 图 | `/webhook/cn/v3s1` |
-
-例如 `PublicUrl` 为 `https://n8n-node2.example.com`，Shopee 主图地址应填写 `https://n8n-node2.example.com/webhook/vn/v3m1`。
-
-## 运维边界
-
-- 每个节点的执行记录默认保留 168 小时，最多保留 10000 条。
-- 当前工作流引用 `GrsaiApp`、`deepseek` 和 `EWS Backup Image API` 三组 HTTP Header Auth。推荐从原节点按 Credential ID 解密导出到独立目录，再通过 `-CredentialsDirectory` 导入；脚本会在容器内清除中转副本，管理员仍须安全删除宿主机明文目录。
-- n8n Variables 和项目成员不会跨节点复制，需要在额外节点单独配置。不要把明文凭据写进部署脚本或仓库。
-- 扩容后先用测试任务逐项验证 9 个 webhook，再把生产用户绑定到新节点。
+- 密钥只在浏览器本地注入下载脚本，不通过 EWS API 上传。
+- 下载脚本包含 Base64 编码的敏感信息，不等于加密。部署后必须删除。
+- 模型密钥导入 n8n 后，安装器会删除宿主机和容器内的临时凭证文件。
+- 不要将生成的安装器提交到 Git、网盘或聊天工具。
+- 原始安装器模板不包含真实密钥，下载接口与 Wiki 接口均要求管理员鉴权。
