@@ -21,6 +21,8 @@ param(
 
   [string]$WorkflowDirectory = '',
 
+  [string]$CredentialsDirectory = '',
+
   [switch]$ImportWorkflows,
 
   [switch]$SkipActivation
@@ -28,7 +30,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
-$composeFile = Join-Path $scriptDirectory 'compose.extra-node.yaml'
 if (-not $WorkflowDirectory) {
   $WorkflowDirectory = (Resolve-Path (Join-Path $scriptDirectory '..')).Path
 } else {
@@ -50,7 +51,59 @@ $localStateRoot = [Environment]::GetFolderPath('LocalApplicationData')
 if (-not $localStateRoot) { $localStateRoot = Join-Path $HOME '.local/state' }
 $stateRoot = Join-Path (Join-Path (Join-Path $localStateRoot 'EWS') 'n8n-nodes') $NodeName
 $envFile = Join-Path $stateRoot '.env'
+$composeFile = Join-Path $stateRoot 'compose.extra-node.yaml'
 New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
+
+$composeContent = @'
+services:
+  n8n:
+    image: ${N8N_IMAGE}
+    container_name: ews-n8n-${NODE_NAME}
+    restart: unless-stopped
+    ports:
+      - "${N8N_PORT}:5678"
+    environment:
+      N8N_HOST: ${N8N_HOST}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: ${N8N_PROTOCOL}
+      N8N_EDITOR_BASE_URL: ${N8N_PUBLIC_URL}
+      WEBHOOK_URL: ${N8N_PUBLIC_URL}
+      N8N_PROXY_HOPS: ${N8N_PROXY_HOPS:-1}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      GENERIC_TIMEZONE: Asia/Shanghai
+      TZ: Asia/Shanghai
+      NODE_ENV: production
+      DB_SQLITE_POOL_SIZE: 2
+      N8N_CONCURRENCY_PRODUCTION_LIMIT: ${N8N_CONCURRENCY}
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: 168
+      EXECUTIONS_DATA_PRUNE_MAX_COUNT: 10000
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - "${WORKFLOW_DIRECTORY}:/workflows:ro"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5678/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+volumes:
+  n8n_data:
+    name: ews_n8n_${NODE_NAME}_data
+'@
+[IO.File]::WriteAllText($composeFile, $composeContent, (New-Object Text.UTF8Encoding($false)))
+
+if ($CredentialsDirectory) {
+  $CredentialsDirectory = (Resolve-Path $CredentialsDirectory).Path
+  if (-not (Get-ChildItem -LiteralPath $CredentialsDirectory -Filter '*.json' -File | Select-Object -First 1)) {
+    throw "No credential JSON files found in $CredentialsDirectory"
+  }
+}
 
 $importDirectory = Join-Path $stateRoot 'workflows'
 $separator = [IO.Path]::DirectorySeparatorChar
@@ -126,6 +179,17 @@ for ($attempt = 0; $attempt -lt 60; $attempt++) {
 if (-not $healthy) { throw "n8n did not become healthy within 120 seconds. Run: docker logs ews-n8n-$NodeName" }
 
 if ($ImportWorkflows) {
+  if ($CredentialsDirectory) {
+    $containerName = "ews-n8n-$NodeName"
+    & docker cp "$CredentialsDirectory/." "${containerName}:/tmp/ews-credentials"
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to copy the credential migration directory into n8n' }
+    try {
+      & docker @composeArgs exec -T n8n n8n import:credentials --separate --input=/tmp/ews-credentials
+      if ($LASTEXITCODE -ne 0) { throw 'Credential import failed' }
+    } finally {
+      & docker @composeArgs exec -T n8n node -e "require('fs').rmSync('/tmp/ews-credentials',{recursive:true,force:true})"
+    }
+  }
   & docker @composeArgs exec -T n8n n8n import:workflow --separate --input=/workflows
   if ($LASTEXITCODE -ne 0) { throw 'Workflow import failed. Initialize the n8n owner account, then rerun with -ImportWorkflows' }
   if (-not $SkipActivation) {
@@ -143,6 +207,9 @@ Write-Host "Local health check: http://127.0.0.1:$Port/healthz"
 Write-Host "Node state directory: $stateRoot"
 if (-not $ImportWorkflows) {
   Write-Host 'Initialize the owner account, then rerun with the same parameters and -ImportWorkflows.'
+}
+if ($CredentialsDirectory) {
+  Write-Host 'Credentials were imported. Securely delete the decrypted host credential directory after validation.'
 }
 Write-Host "Imported workflow definitions: $($workflowIds.Count)"
 Write-Host 'Per-user webhook prefixes (see README.md for the complete mapping):'

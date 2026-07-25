@@ -41,6 +41,7 @@ import {
   annotateShopeeShippingChannels,
   isShopeePreOrderShippingChannel,
 } from './shopee-preorder.js';
+import { DISTRIBUTED_N8N_SCRIPT, getDistributedN8nWiki } from './admin-deployment-wiki.js';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -272,6 +273,12 @@ export default {
       if (path === '/api/auth/password' && method === 'PUT')
         return requireAuth(request, env, () => handleChangePassword(request, env));
 
+      // --- 管理员部署 Wiki ---
+      if (path === '/api/admin/wiki/distributed-n8n' && method === 'GET')
+        return requireAuth(request, env, () => handleGetDistributedN8nWiki(request));
+      if (path === '/api/admin/wiki/distributed-n8n/script' && method === 'GET')
+        return requireAuth(request, env, () => handleDownloadDistributedN8nScript(request));
+
       // --- 配置 (支持 ?platform=jst|shopee) ---
       if (path === '/api/config' && method === 'GET')
         return requireAuth(request, env, () => handleGetConfig(request, env, url));
@@ -445,6 +452,37 @@ async function handleChangePassword(request, env) {
   const newHash = await hashPassword(new_password);
   await updateUserPassword(env, user.id, newHash);
   return json({ success: true, message: '密码修改成功' });
+}
+
+function adminWikiError(request) {
+  return request.auth?.role === 'admin' ? null : error('无权访问', 403);
+}
+
+async function handleGetDistributedN8nWiki(request) {
+  const denied = adminWikiError(request);
+  if (denied) return denied;
+  return new Response(JSON.stringify({ success: true, wiki: await getDistributedN8nWiki() }), {
+    headers: {
+      ...CORS_HEADERS,
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'private, no-store, max-age=0',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  });
+}
+
+async function handleDownloadDistributedN8nScript(request) {
+  const denied = adminWikiError(request);
+  if (denied) return denied;
+  return new Response(DISTRIBUTED_N8N_SCRIPT, {
+    headers: {
+      ...CORS_HEADERS,
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Content-Disposition': 'attachment; filename="deploy-extra-node.ps1"',
+      'Cache-Control': 'private, no-store, max-age=0',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  });
 }
 
 // ========== 配置 ==========

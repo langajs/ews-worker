@@ -29,6 +29,7 @@ cd ews-worker\n8n\deploy
 - `-Concurrency 20`：该节点生产执行并发上限。
 - `-EncryptionKey <secret>`：首次部署时传入自有密钥；未传时自动生成。
 - `-WorkflowDirectory <path>`：覆盖工作流 JSON 目录。
+- `-CredentialsDirectory <path>`：导入从原节点解密导出的 Credential JSON 目录，并保留原 Credential ID。
 - `-SkipActivation`：只导入，不逐个发布工作流。
 
 ## 用户分流
@@ -53,6 +54,6 @@ cd ews-worker\n8n\deploy
 
 - 每个节点的执行记录默认保留 168 小时，最多保留 10000 条。
 - 反向代理必须传递原始 `Host`、`X-Forwarded-For`、`X-Forwarded-Proto`，并把请求超时设置为至少 900 秒。
-- 导入脚本只处理工作流 JSON。n8n Credentials、Variables 和项目成员不会跨节点复制，需要在额外节点单独配置。
-- 当前工作流引用 `GrsaiApp`、`deepseek` 和 `EWS Backup Image API` 三组 HTTP Header Auth。新节点必须创建对应凭据，并在相关节点中重新选择凭据后发布；不要把明文凭据写进部署脚本或仓库。
+- 当前工作流引用 `GrsaiApp`、`deepseek` 和 `EWS Backup Image API` 三组 HTTP Header Auth。推荐从原节点按 Credential ID 解密导出到独立目录，再通过 `-CredentialsDirectory` 导入；脚本会在容器内清除中转副本，管理员仍须安全删除宿主机明文目录。
+- n8n Variables 和项目成员不会跨节点复制，需要在额外节点单独配置。不要把明文凭据写进部署脚本或仓库。
 - 扩容后先用测试任务逐项验证 9 个 webhook，再把生产用户绑定到新节点。
