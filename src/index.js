@@ -46,6 +46,7 @@ import {
   getDistributedN8nInstallerScript,
   getDistributedN8nWiki,
 } from './admin-deployment-wiki.js';
+import { getUpdateLogWiki } from './update-log.js';
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -282,6 +283,8 @@ export default {
         return requireAuth(request, env, () => handleGetDistributedN8nWiki(request));
       if (path === '/api/admin/wiki/distributed-n8n/script' && method === 'GET')
         return requireAuth(request, env, () => handleDownloadDistributedN8nScript(request));
+      if (path === '/api/admin/wiki/update-log' && method === 'GET')
+        return requireAuth(request, env, () => handleGetUpdateLog(request, env));
 
       // --- 配置 (支持 ?platform=jst|shopee) ---
       if (path === '/api/config' && method === 'GET')
@@ -483,6 +486,35 @@ async function handleDownloadDistributedN8nScript(request) {
       ...CORS_HEADERS,
       'Content-Type': 'text/plain; charset=utf-8',
       'Content-Disposition': `attachment; filename="${DISTRIBUTED_N8N_INSTALLER_FILENAME}"`,
+      'Cache-Control': 'private, no-store, max-age=0',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  });
+}
+
+async function handleGetUpdateLog(request, env) {
+  const denied = adminWikiError(request);
+  if (denied) return denied;
+  let audit = {};
+  try {
+    audit = await env.DB.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM ews_shopee_template_profiles WHERE status='active' AND deleted_at IS NULL) AS active_profiles,
+        (SELECT COUNT(*) FROM ews_shopee_template_profiles WHERE current_version_id IS NOT NULL AND deleted_at IS NULL) AS current_versions,
+        (SELECT COUNT(DISTINCT p.id)
+           FROM ews_shopee_template_profiles p
+           JOIN ews_shopee_template_fields f ON f.version_id=p.current_version_id
+          WHERE p.deleted_at IS NULL AND f.semantic_key='ps_product_pre_order_dts') AS preorder_ready_profiles,
+        (SELECT COUNT(*) FROM ews_shopee_products WHERE pre_order_dts IS NOT NULL) AS preorder_products,
+        (SELECT MAX(updated_at) FROM ews_shopee_template_profiles WHERE deleted_at IS NULL) AS last_template_update
+    `).first();
+  } catch (err) {
+    console.warn('Update log audit metrics unavailable:', err.message);
+  }
+  return new Response(JSON.stringify({ success: true, wiki: getUpdateLogWiki(audit) }), {
+    headers: {
+      ...CORS_HEADERS,
+      'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'private, no-store, max-age=0',
       'X-Content-Type-Options': 'nosniff',
     },

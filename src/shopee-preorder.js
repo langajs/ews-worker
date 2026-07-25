@@ -24,8 +24,9 @@ function channelId(channel) {
 }
 
 export function isShopeePreOrderShippingChannel(channel) {
-  if (PREORDER_CHANNEL_IDS.has(channelId(channel))) return true;
-  return PREORDER_CHANNEL_LABELS.has(normalizeChannelLabel(channel?.label));
+  const label = normalizeChannelLabel(channel?.label);
+  if (label) return PREORDER_CHANNEL_LABELS.has(label);
+  return PREORDER_CHANNEL_IDS.has(channelId(channel));
 }
 
 export function annotateShopeeShippingChannels(channels) {
