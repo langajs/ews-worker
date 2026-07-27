@@ -20,7 +20,12 @@ function runCreateResult(code, response) {
   );
 }
 
-test('Shopee image workflows preserve primary provider error responses', () => {
+function runExpression(expression, json) {
+  const source = expression.replace(/^=\{\{\s*/, '').replace(/\s*\}\}$/, '');
+  return new Function('$json', `return (${source});`)(json);
+}
+
+test('Shopee image workflows preserve errors and fall back on every primary failure', () => {
   for (const file of workflowFiles) {
     const data = workflow(file);
     const requestNode = data.nodes.find(node => node.name === 'gpt-image-2');
@@ -30,7 +35,12 @@ test('Shopee image workflows preserve primary provider error responses', () => {
     assert.equal(requestNode.parameters.options.response.response.fullResponse, true, file);
     assert.equal(requestNode.parameters.options.response.response.neverError, true, file);
     assert.equal(requestNode.parameters.options.response.response.responseFormat, 'autodetect', file);
-    assert.match(fallbackNode.parameters.conditions.conditions[0].leftValue, /excessive system load/, file);
+    const fallbackExpression = fallbackNode.parameters.conditions.conditions[0].leftValue;
+    assert.doesNotMatch(fallbackExpression, /excessive system load/, file);
+    assert.equal(runExpression(fallbackExpression, { provider: 'grsai', status: 'failed', error: 'upstream failed' }), true, file);
+    assert.equal(runExpression(fallbackExpression, { provider: 'grsai', status: 'pending', timedOut: true }), true, file);
+    assert.equal(runExpression(fallbackExpression, { provider: 'backup', status: 'failed', error: 'backup failed' }), false, file);
+    assert.equal(runExpression(fallbackExpression, { provider: 'grsai', status: 'running' }), false, file);
 
     const overloaded = runCreateResult(resultNode.parameters.jsCode, {
       body: { error: 'excessive system load' },

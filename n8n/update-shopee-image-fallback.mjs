@@ -363,7 +363,7 @@ for (const file of files) {
         options: { caseSensitive: false, leftValue: '', typeValidation: 'strict', version: 3 },
         conditions: [{
           id: conditionId,
-          leftValue: "={{ $json.provider !== 'backup' && !$json.timedOut && String($json.error || '').toLowerCase().includes('excessive system load') }}",
+          leftValue: "={{ $json.provider !== 'backup' && (String($json.status || '').toLowerCase() === 'failed' || $json.timedOut === true || String($json.error || '').trim().length > 0) }}",
           rightValue: true,
           operator: { type: 'boolean', operation: 'true', singleValue: true },
         }],

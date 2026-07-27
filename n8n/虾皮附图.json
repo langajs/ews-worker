@@ -433,7 +433,7 @@
             "conditions": [
               {
                 "id": "711b8717-a558-4def-90ef-bc6b89b284f3",
-                "leftValue": "={{ $json.provider !== 'backup' && !$json.timedOut && String($json.error || '').toLowerCase().includes('excessive system load') }}",
+                "leftValue": "={{ $json.provider !== 'backup' && (String($json.status || '').toLowerCase() === 'failed' || $json.timedOut === true || String($json.error || '').trim().length > 0) }}",
                 "rightValue": true,
                 "operator": {
                   "type": "boolean",
