@@ -1,5 +1,18 @@
 const RELEASES = Object.freeze([
   {
+    version: '2026.07.27',
+    date: '2026-07-27',
+    status: '已上线',
+    title: 'Shopee 图片工作流错误响应修复',
+    summary: '保留主图片服务的完整 HTTP 响应，修复错误体被吞后无法判断备用模型条件的问题。',
+    changes: [
+      'Shopee 主图、附图和 SKU 图工作流统一保留上游状态码、响应头与响应体。',
+      '备用模型仍仅在 excessive system load 时启用，其他异常继续使用 Worker 退避重试。',
+      '空响应现在明确记录为“图片服务返回空响应 (HTTP 200)”，便于区分上游异常与回调、R2 或队列故障。',
+      '新增工作流响应解析回归测试，覆盖过载、正常任务 ID 和空响应三种结果。',
+    ],
+  },
+  {
     version: '2026.07.25',
     date: '2026-07-25',
     status: '已上线',
@@ -75,7 +88,7 @@ const ROADMAP = Object.freeze([
 export function getUpdateLogWiki(audit = {}) {
   return {
     version: RELEASES[0].version,
-    updated_at: '2026-07-25T18:00:00+08:00',
+    updated_at: '2026-07-27T12:05:00+08:00',
     title: '更新日志与技术栈',
     subtitle: '记录线上能力、模板系统审计结论、实现边界和接下来的工程更新。',
     audit: {

@@ -12,7 +12,7 @@ const backupCredential = {
   },
 };
 
-const primaryCreateResultCode = `const response = $input.first().json || {};
+const primaryCreateResultCode = `const envelope = $input.first().json || {};
 const original = $node['提取参数'].json;
 
 function errorText(value) {
@@ -23,17 +23,25 @@ function errorText(value) {
   try { return JSON.stringify(value); } catch (_) { return String(value); }
 }
 
-const serviceTaskId = String(response.id || '').trim();
+const response = envelope.body && typeof envelope.body === 'object' && !Array.isArray(envelope.body)
+  ? envelope.body
+  : envelope;
+const responseBodyError = typeof envelope.body === 'string' ? envelope.body : '';
+const statusCode = Number(envelope.statusCode ?? response.statusCode);
+const serviceTaskId = String(response.id || response.task_id || response.data?.id || '').trim();
+const responseIsEmpty = Object.keys(response).length === 0;
 const responseError = errorText(response.error)
   || errorText(response.message)
   || errorText(response.description)
-  || (Number(response.statusCode) >= 400 ? '图片服务HTTP ' + response.statusCode : '')
+  || errorText(responseBodyError)
+  || (statusCode >= 400 ? '图片服务HTTP ' + statusCode : '')
+  || (!serviceTaskId && responseIsEmpty && Number.isFinite(statusCode) ? '图片服务返回空响应 (HTTP ' + statusCode + ')' : '')
   || (!serviceTaskId ? '图片服务未返回任务ID' : '');
 
 return {
   provider: 'grsai',
   grsaiTaskId: serviceTaskId,
-  status: serviceTaskId ? String(response.status || 'pending') : 'failed',
+  status: serviceTaskId ? String(response.status || response.data?.status || 'pending') : 'failed',
   error: responseError,
   taskId: original.taskId,
   subTaskId: original.subTaskId,
@@ -322,11 +330,22 @@ for (const file of files) {
   const wait = workflow.nodes.find(node => node.name === 'Wait');
   const primaryQuery = workflow.nodes.find(node => node.name === '查询结果');
   const primaryQueryResult = workflow.nodes.find(node => node.name === '重组查询');
+  const primaryCreate = workflow.nodes.find(node => node.name === 'gpt-image-2');
   const primaryCreateResult = workflow.nodes.find(node => node.name === '提取任务ID');
-  if (!taskFailed || !wait || !primaryQuery || !primaryQueryResult || !primaryCreateResult) {
+  if (!taskFailed || !wait || !primaryQuery || !primaryQueryResult || !primaryCreate || !primaryCreateResult) {
     throw new Error(`${file} 缺少主图片服务节点`);
   }
 
+  primaryCreate.parameters.options = {
+    ...(primaryCreate.parameters.options || {}),
+    response: {
+      response: {
+        fullResponse: true,
+        neverError: true,
+        responseFormat: 'autodetect',
+      },
+    },
+  };
   primaryCreateResult.parameters.jsCode = primaryCreateResultCode;
   primaryQueryResult.parameters.jsCode = primaryQueryResultCode;
 

@@ -41,7 +41,15 @@
           "sendBody": true,
           "specifyBody": "json",
           "jsonBody": "={{\n{\n  model: \"gpt-image-2\",\n  prompt: $json.finalPrompt,\n  images: $json.imagesArray,\n  aspectRatio: \"1024x1024\",\n  replyType: \"async\"\n}\n}}",
-          "options": {}
+          "options": {
+            "response": {
+              "response": {
+                "fullResponse": true,
+                "neverError": true,
+                "responseFormat": "autodetect"
+              }
+            }
+          }
         },
         "type": "n8n-nodes-base.httpRequest",
         "typeVersion": 4.4,
@@ -64,7 +72,7 @@
       },
       {
         "parameters": {
-          "jsCode": "const response = $input.first().json || {};\nconst original = $node['提取参数'].json;\n\nfunction errorText(value) {\n  if (!value) return '';\n  if (typeof value === 'string') return value;\n  if (value.message) return String(value.message);\n  if (value.description) return String(value.description);\n  try { return JSON.stringify(value); } catch (_) { return String(value); }\n}\n\nconst serviceTaskId = String(response.id || '').trim();\nconst responseError = errorText(response.error)\n  || errorText(response.message)\n  || errorText(response.description)\n  || (Number(response.statusCode) >= 400 ? '图片服务HTTP ' + response.statusCode : '')\n  || (!serviceTaskId ? '图片服务未返回任务ID' : '');\n\nreturn {\n  provider: 'grsai',\n  grsaiTaskId: serviceTaskId,\n  status: serviceTaskId ? String(response.status || 'pending') : 'failed',\n  error: responseError,\n  taskId: original.taskId,\n  subTaskId: original.subTaskId,\n  setIndex: original.setIndex,\n  imageType: original.imageType,\n  imagePosition: original.imagePosition,\n  callbackSecret: original.callbackSecret,\n  callbackUrl: original.callbackUrl,\n  startedAt: Date.now(),\n  timedOut: false,\n};"
+          "jsCode": "const envelope = $input.first().json || {};\nconst original = $node['提取参数'].json;\n\nfunction errorText(value) {\n  if (!value) return '';\n  if (typeof value === 'string') return value;\n  if (value.message) return String(value.message);\n  if (value.description) return String(value.description);\n  try { return JSON.stringify(value); } catch (_) { return String(value); }\n}\n\nconst response = envelope.body && typeof envelope.body === 'object' && !Array.isArray(envelope.body)\n  ? envelope.body\n  : envelope;\nconst responseBodyError = typeof envelope.body === 'string' ? envelope.body : '';\nconst statusCode = Number(envelope.statusCode ?? response.statusCode);\nconst serviceTaskId = String(response.id || response.task_id || response.data?.id || '').trim();\nconst responseIsEmpty = Object.keys(response).length === 0;\nconst responseError = errorText(response.error)\n  || errorText(response.message)\n  || errorText(response.description)\n  || errorText(responseBodyError)\n  || (statusCode >= 400 ? '图片服务HTTP ' + statusCode : '')\n  || (!serviceTaskId && responseIsEmpty && Number.isFinite(statusCode) ? '图片服务返回空响应 (HTTP ' + statusCode + ')' : '')\n  || (!serviceTaskId ? '图片服务未返回任务ID' : '');\n\nreturn {\n  provider: 'grsai',\n  grsaiTaskId: serviceTaskId,\n  status: serviceTaskId ? String(response.status || response.data?.status || 'pending') : 'failed',\n  error: responseError,\n  taskId: original.taskId,\n  subTaskId: original.subTaskId,\n  setIndex: original.setIndex,\n  imageType: original.imageType,\n  imagePosition: original.imagePosition,\n  callbackSecret: original.callbackSecret,\n  callbackUrl: original.callbackUrl,\n  startedAt: Date.now(),\n  timedOut: false,\n};"
         },
         "type": "n8n-nodes-base.code",
         "typeVersion": 2,
