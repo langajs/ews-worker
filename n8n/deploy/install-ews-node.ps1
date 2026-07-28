@@ -2,6 +2,7 @@
 param()
 
 $ErrorActionPreference = 'Stop'
+$N8nImage = 'n8nio/n8n:2.25.7'
 
 function Decode-Value([string]$Value) {
   if (-not $Value -or $Value.StartsWith('__EWS_')) {
@@ -24,7 +25,9 @@ function Wait-N8n([int]$Port, [int]$Attempts = 60) {
 function Get-N8nSettings([int]$Port, [int]$Attempts = 30) {
   for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
     try {
-      return Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:$Port/rest/settings" -TimeoutSec 5
+      $response = Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:$Port/rest/settings" -TimeoutSec 5
+      $setupFlag = $response.data.userManagement.showSetupOnFirstLoad
+      if ($null -ne $setupFlag) { return $response }
     } catch {}
     Start-Sleep -Seconds 2
   }
@@ -50,7 +53,9 @@ if ($NodeName -notmatch '^[a-z0-9][a-z0-9-]{0,31}$') { throw 'Node name must con
 if ($Domain -notmatch '^[A-Za-z0-9.-]+$' -or $Domain.Contains('..')) { throw 'Public domain is invalid.' }
 if ($Port -lt 1024 -or $Port -gt 65535) { throw 'Port must be between 1024 and 65535.' }
 if ($OwnerEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') { throw 'n8n owner email is invalid.' }
-if ($OwnerPassword.Length -lt 8) { throw 'n8n owner password must contain at least 8 characters.' }
+if ($OwnerPassword.Length -lt 8 -or $OwnerPassword.Length -gt 64) { throw 'n8n owner password must contain 8 to 64 characters.' }
+if ($OwnerPassword -notmatch '[A-Z]') { throw 'n8n owner password must contain at least one uppercase letter.' }
+if ($OwnerPassword -notmatch '\d') { throw 'n8n owner password must contain at least one number.' }
 if (-not $GrsaiKey -or -not $DeepseekKey -or -not $BackupKey) { throw 'All three model API keys are required.' }
 
 try {
@@ -75,6 +80,9 @@ try {
 
 & docker version --format '{{.Server.Version}}' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Docker Desktop is not running.' }
+if ($imageUri.Host -eq 'ews-image-sidecar' -and -not $ImageDockerNetwork) {
+  throw 'Local image service container ews-image-sidecar was not found. Start the image service on this host or enter its external HTTPS endpoint in the Wiki.'
+}
 
 $StateRoot = Join-Path (Join-Path (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'EWS') 'n8n-nodes') $NodeName
 $WorkflowDirectory = Join-Path $StateRoot 'workflows'
@@ -87,7 +95,7 @@ $VolumeName = "ews_n8n_$($NodeName)_data"
 
 New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
 if (-not (Test-Path -LiteralPath $EncryptionKeyFile) -or -not (Get-Content -LiteralPath $EncryptionKeyFile -Raw).Trim()) {
-  $generatedKey = & docker run --rm --entrypoint node n8nio/n8n:stable -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))"
+  $generatedKey = & docker run --rm --entrypoint node $N8nImage -e "process.stdout.write(require('crypto').randomBytes(32).toString('hex'))"
   if ($LASTEXITCODE -ne 0 -or -not $generatedKey) { throw 'Failed to generate the n8n encryption key.' }
   Write-Utf8NoBom $EncryptionKeyFile $generatedKey.Trim()
 }
@@ -191,7 +199,7 @@ $dockerArgs = @(
   '--env-file', $EnvFile
   '-v', "$VolumeName`:/home/node/.n8n"
   '-v', "$workflowMount`:/workflows:ro"
-  'n8nio/n8n:stable'
+  $N8nImage
 )
 & docker @dockerArgs | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Failed to start the n8n container.' }
@@ -212,6 +220,10 @@ if ($settings.data.userManagement.showSetupOnFirstLoad) {
   Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/rest/owner/setup" -ContentType 'application/json' -Body $ownerBody -TimeoutSec 20 | Out-Null
 }
 $OwnerPassword = $null
+$settings = Get-N8nSettings $Port
+if ($settings.data.userManagement.showSetupOnFirstLoad) {
+  throw 'n8n owner setup did not complete. Review the owner email and password, then run the installer again.'
+}
 
 & docker exec -e "IMAGE_SERVICE_URL=$ImageServiceBaseUrl" $ContainerName node -e "const base=process.env.IMAGE_SERVICE_URL.replace(/\/+$/,'');fetch(base+'/readyz').then(async r=>{if(!r.ok){console.error(await r.text());process.exit(1)}}).catch(e=>{console.error(e.message);process.exit(1)})"
 if ($LASTEXITCODE -ne 0) { throw "Image service is not ready: $ImageServiceBaseUrl/readyz" }

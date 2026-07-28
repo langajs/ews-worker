@@ -66,7 +66,7 @@ async function sha256(value) {
 export async function getDistributedN8nWiki() {
   const installer = getDistributedN8nInstallerScript();
   return {
-    version: '2026.07.25-quick',
+    version: '2026.07.28',
     title: 'n8n 一键部署',
     subtitle: 'Docker Desktop + 一份可双击运行的 CMD，Cloudflare Tunnel 独立连接',
     script: {
@@ -79,7 +79,7 @@ export async function getDistributedN8nWiki() {
       node_name: 'node2',
       port: 5679,
       image_service_url: 'http://ews-image-sidecar:3000',
-      n8n_version: 'stable',
+      n8n_version: '2.25.7',
       concurrency: 20,
     },
     credentials: CREDENTIALS,

@@ -50,8 +50,12 @@ test('one-click CMD embeds the complete production workflow bundle', () => {
   assert.match(cmdTemplate, /powershell\.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass/);
   assert.match(cmdTemplate, /if not defined EWS_NO_PAUSE pause/);
   assert.match(powershellTemplate, /Decode-Value \$env:EWS_NODE_NAME_B64/);
-  assert.match(powershellTemplate, /n8nio\/n8n:stable/);
+  assert.match(powershellTemplate, /\$N8nImage = 'n8nio\/n8n:2\.25\.7'/);
   assert.match(powershellTemplate, /function Get-N8nSettings/);
+  assert.match(powershellTemplate, /\$null -ne \$setupFlag/);
+  assert.match(powershellTemplate, /owner setup did not complete/);
+  assert.match(powershellTemplate, /OwnerPassword -notmatch '\[A-Z\]'/);
+  assert.match(powershellTemplate, /OwnerPassword -notmatch '\\d'/);
   assert.match(powershellTemplate, /import:credentials --separate --input=\/tmp\/ews-credentials/);
   assert.match(powershellTemplate, /docker exec -u 0 \$ContainerName node -e/);
   assert.match(powershellTemplate, /n8n import:workflow --separate --input=\/workflows/);
@@ -61,6 +65,7 @@ test('one-click CMD embeds the complete production workflow bundle', () => {
   assert.doesNotMatch(powershellTemplate, /\$workflowEntries = @\(/);
   assert.match(powershellTemplate, /docker network connect \$ImageDockerNetwork \$ContainerName/);
   assert.match(powershellTemplate, /if \(\$candidateNetwork\) \{ \$ImageDockerNetwork/);
+  assert.match(powershellTemplate, /Local image service container ews-image-sidecar was not found/);
   assert.match(powershellTemplate, /docker network ls --filter/);
   assert.match(powershellTemplate, /docker volume ls --filter/);
   assert.doesNotMatch(powershellTemplate, /docker network inspect \$NetworkName/);
@@ -81,7 +86,7 @@ test('browser parameter injection keeps secrets out of plaintext', () => {
     '__EWS_NODE_NAME_B64__': base64('test-node'),
     '__EWS_DOMAIN_B64__': base64('test-node.example.com'),
     '__EWS_OWNER_EMAIL_B64__': base64('owner@example.com'),
-    '__EWS_OWNER_PASSWORD_B64__': base64('owner-password-2026'),
+    '__EWS_OWNER_PASSWORD_B64__': base64('Owner-password-2026'),
     '__EWS_GRSAI_KEY_B64__': base64('grsai-secret-value'),
     '__EWS_DEEPSEEK_KEY_B64__': base64('deepseek-secret-value'),
     '__EWS_BACKUP_KEY_B64__': base64('backup-secret-value'),
@@ -92,7 +97,7 @@ test('browser parameter injection keeps secrets out of plaintext', () => {
   for (const [token, value] of Object.entries(values)) generated = generated.split(token).join(value);
 
   assert.doesNotMatch(generated, /__EWS_(?:NODE_NAME|DOMAIN|OWNER_EMAIL|OWNER_PASSWORD|GRSAI_KEY|DEEPSEEK_KEY|BACKUP_KEY|IMAGE_SERVICE_URL|PORT)/);
-  assert.doesNotMatch(generated, /owner-password-2026|grsai-secret-value|deepseek-secret-value|backup-secret-value/);
+  assert.doesNotMatch(generated, /Owner-password-2026|grsai-secret-value|deepseek-secret-value|backup-secret-value/);
 
   const payloadBase64 = [...generated.matchAll(/^>{1,2} "%EWS_PAYLOAD_B64%" echo ([A-Za-z0-9+/=]+)$/gm)].map(match => match[1]).join('');
   const payload = Buffer.from(payloadBase64, 'base64').toString('utf8');
@@ -115,6 +120,10 @@ test('admin deployment wiki protects installer details and uses CMD flow', () =>
   assert.match(workerEntry, /'Cache-Control': 'private, no-store, max-age=0'/);
   assert.match(frontendShell, /生成一键部署脚本/);
   assert.match(frontendShell, /只在当前浏览器内注入/);
+  assert.match(frontendShell, /脚本不会安装图片处理服务/);
+  assert.match(frontendShell, /ownerPassword\.length < 8 \|\| values\.ownerPassword\.length > 64/);
+  assert.match(frontendShell, /!\/\[A-Z\]\/\.test\(values\.ownerPassword\)/);
+  assert.match(frontendShell, /!\/\\d\/\.test\(values\.ownerPassword\)/);
   assert.match(frontendShell, /install-ews-' \+ nodeName \+ '\.cmd'/);
   assert.match(frontendShell, /cloudflare\/cloudflared:latest/);
   assert.match(frontendShell, /getDistributedN8nWiki\(\)/);

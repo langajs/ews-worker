@@ -1,5 +1,18 @@
 const RELEASES = Object.freeze([
   {
+    version: '2026.07.28',
+    date: '2026-07-28',
+    status: '已上线',
+    title: '分布式 n8n 安装器可靠性修复',
+    summary: '修复管理 API 未就绪时跳过 owner 初始化的问题，并让安装密码校验与 n8n 当前版本保持一致。',
+    changes: [
+      '安装器固定使用已验收的 n8n 2.25.7，避免 stable 标签漂移导致安装行为变化。',
+      '等待 /rest/settings 返回完整 owner 状态后再继续，禁止未初始化却误报部署成功。',
+      'owner 密码统一校验为 8-64 位、至少一个大写字母和一个数字。',
+      'owner 初始化后增加后置校验，支持中断后重复执行同一 CMD 完成恢复。',
+    ],
+  },
+  {
     version: '2026.07.27',
     date: '2026-07-27',
     status: '已上线',
@@ -88,7 +101,7 @@ const ROADMAP = Object.freeze([
 export function getUpdateLogWiki(audit = {}) {
   return {
     version: RELEASES[0].version,
-    updated_at: '2026-07-27T12:05:00+08:00',
+    updated_at: '2026-07-28T10:00:00+08:00',
     title: '更新日志与技术栈',
     subtitle: '记录线上能力、模板系统审计结论、实现边界和接下来的工程更新。',
     audit: {

@@ -18,7 +18,7 @@ install-ews-node2.cmd
 
 安装器会自动完成以下操作：
 
-1. 创建节点专属 Docker network、volume 和 `n8nio/n8n:stable` 容器。
+1. 创建节点专属 Docker network、volume 和已验收的 `n8nio/n8n:2.25.7` 容器。
 2. 持久化 `N8N_ENCRYPTION_KEY`，初始化 n8n owner。
 3. 导入三组 `HTTP Header Auth` 凭证。
 4. 导入并发布仓库内 9 个生产工作流。
@@ -26,6 +26,10 @@ install-ews-node2.cmd
 6. 校验图片服务 `/readyz`、n8n `/healthz` 和工作流发布状态。
 
 节点状态保存在 `%LOCALAPPDATA%\EWS\n8n-nodes\{node}`。重复执行同一节点脚本会复用数据卷和加密密钥，并重新导入当前工作流。
+
+n8n owner 密码必须为 8-64 位，并至少包含一个大写字母和一个数字。安装器会等待管理 API 完整就绪，并在导入工作流前确认 owner 已初始化；中断后可直接重新执行同一脚本。
+
+安装器只部署 n8n，不会在新主机上创建图片处理服务。图片服务与 n8n 同机时填写 `http://ews-image-sidecar:3000`；异地主机必须填写该服务可访问的外部 HTTPS 端点。默认本地容器不存在时，安装器会在创建 n8n 资源前直接停止并给出明确提示。
 
 ## Cloudflare Tunnel
 
