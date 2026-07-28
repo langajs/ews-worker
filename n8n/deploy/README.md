@@ -29,7 +29,7 @@ install-ews-node2.cmd
 
 n8n owner 密码必须为 8-64 位，并至少包含一个大写字母和一个数字。安装器会等待管理 API 完整就绪，并在导入工作流前确认 owner 已初始化；中断后可直接重新执行同一脚本。
 
-安装器只部署 n8n，不会在新主机上创建图片处理服务。图片服务与 n8n 同机时填写 `http://ews-image-sidecar:3000`；异地主机必须填写该服务可访问的外部 HTTPS 端点。默认本地容器不存在时，安装器会在创建 n8n 资源前直接停止并给出明确提示。
+安装器只部署 n8n，不会在新主机上创建图片处理服务。图片服务与 n8n 同机时填写 `http://ews-image-sidecar:3000`；异地主机必须填写该服务可访问的外部 HTTPS 端点。Docker Desktop 由安装器启动时，会等待本地图片服务容器恢复并通过 `docker inspect` 的 JSON 结果解析其网络；等待 30 秒后仍不存在才会停止。
 
 ## Cloudflare Tunnel
 

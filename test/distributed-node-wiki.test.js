@@ -54,9 +54,11 @@ test('one-click CMD embeds the complete production workflow bundle', () => {
   assert.match(powershellTemplate, /function Get-N8nSettings/);
   assert.match(powershellTemplate, /function Test-DockerEngine/);
   assert.match(powershellTemplate, /function Wait-DockerDesktop/);
+  assert.match(powershellTemplate, /function Wait-DockerContainerNetwork/);
   assert.match(powershellTemplate, /Get-Command docker\.exe/);
   assert.match(powershellTemplate, /Start-Process -FilePath \$dockerDesktopPath/);
   assert.match(powershellTemplate, /Linux container engine ready within/);
+  assert.match(powershellTemplate, /\$containerInfo = \$containerJson \| ConvertFrom-Json/);
   assert.match(powershellTemplate, /\$null -ne \$setupFlag/);
   assert.match(powershellTemplate, /owner setup did not complete/);
   assert.match(powershellTemplate, /OwnerPassword -notmatch '\[A-Z\]'/);
@@ -69,12 +71,13 @@ test('one-click CMD embeds the complete production workflow bundle', () => {
   assert.match(powershellTemplate, /\$workflowEntries = \$WorkflowBundleJson \| ConvertFrom-Json/);
   assert.doesNotMatch(powershellTemplate, /\$workflowEntries = @\(/);
   assert.match(powershellTemplate, /docker network connect \$ImageDockerNetwork \$ContainerName/);
-  assert.match(powershellTemplate, /if \(\$candidateNetwork\) \{ \$ImageDockerNetwork/);
+  assert.match(powershellTemplate, /\$ImageDockerNetwork = Wait-DockerContainerNetwork \$imageUri\.Host/);
   assert.match(powershellTemplate, /Local image service container ews-image-sidecar was not found/);
+  assert.doesNotMatch(powershellTemplate, /range \$name, \$_ := \.NetworkSettings\.Networks/);
   assert.match(powershellTemplate, /docker network ls --filter/);
   assert.match(powershellTemplate, /docker volume ls --filter/);
   assert.doesNotMatch(powershellTemplate, /docker network inspect \$NetworkName/);
-  assert.ok(powershellTemplate.lastIndexOf('Wait-DockerDesktop') < powershellTemplate.indexOf('& docker inspect'));
+  assert.ok(powershellTemplate.lastIndexOf('Wait-DockerDesktop') < powershellTemplate.lastIndexOf('Wait-DockerContainerNetwork'));
   assert.match(installerModule, /install-ews-node\.cmd/);
   assert.match(installerModule, /workflowEntry\('聚水潭SKU图\.json'/);
   assert.match(installerModule, /content: JSON\.stringify\(workflow\)/);

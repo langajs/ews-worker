@@ -46,6 +46,21 @@ function Wait-DockerDesktop([int]$Attempts = 90) {
   throw "Docker Desktop did not make the Linux container engine ready within $($Attempts * 2) seconds. Open Docker Desktop, confirm the engine is running with Linux containers enabled, then run this file again."
 }
 
+function Wait-DockerContainerNetwork([string]$ContainerName, [int]$Attempts = 15) {
+  for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+    try {
+      $containerJson = & docker inspect $ContainerName 2>$null
+      if ($LASTEXITCODE -eq 0 -and $containerJson) {
+        $containerInfo = $containerJson | ConvertFrom-Json
+        $networkName = $containerInfo[0].NetworkSettings.Networks.PSObject.Properties.Name | Select-Object -First 1
+        if ($networkName) { return ([string]$networkName).Trim() }
+      }
+    } catch {}
+    if ($attempt -lt $Attempts - 1) { Start-Sleep -Seconds 2 }
+  }
+  return ''
+}
+
 function Wait-N8n([int]$Port, [int]$Attempts = 60) {
   for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
     try {
@@ -111,13 +126,13 @@ if ($ImageServiceUrl.EndsWith('/v1/image-jobs')) {
 Wait-DockerDesktop
 
 $ImageDockerNetwork = ''
-try {
-  $candidateNetwork = & docker inspect $imageUri.Host --format '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{println}}{{end}}' 2>$null | Select-Object -First 1
-  if ($candidateNetwork) { $ImageDockerNetwork = ([string]$candidateNetwork).Trim() }
-} catch {}
-
-if ($imageUri.Host -eq 'ews-image-sidecar' -and -not $ImageDockerNetwork) {
-  throw 'Local image service container ews-image-sidecar was not found. Start the image service on this host or enter its external HTTPS endpoint in the Wiki.'
+if ($imageUri.Host -eq 'ews-image-sidecar') {
+  Write-Host 'Waiting for the local image service container...' -ForegroundColor Yellow
+  $ImageDockerNetwork = Wait-DockerContainerNetwork $imageUri.Host
+  if (-not $ImageDockerNetwork) {
+    throw 'Local image service container ews-image-sidecar was not found after waiting 30 seconds. Check docker ps -a, start the image service, or enter its external HTTPS endpoint in the Wiki.'
+  }
+  Write-Host "Local image service found on Docker network: $ImageDockerNetwork" -ForegroundColor Green
 }
 
 $StateRoot = Join-Path (Join-Path (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'EWS') 'n8n-nodes') $NodeName
