@@ -7,6 +7,7 @@ const CREDENTIALS = Object.freeze([
   { name: 'GRSAI API Key', usage: '双平台主图、附图、详情图和 SKU 图主模型' },
   { name: 'DeepSeek API Key', usage: '双平台商品元数据工作流' },
   { name: '备用图片 API Key', usage: 'Shopee 图片备用模型' },
+  { name: 'EWS callback_secret', usage: '本机图片服务、上传票据和 Worker 回调鉴权' },
 ]);
 
 const WEBHOOKS = Object.freeze([
@@ -32,8 +33,8 @@ const SECTIONS = Object.freeze([
     id: 'installer',
     number: '01',
     title: '生成安装脚本',
-    body: '填写页面中的节点信息、n8n 管理员账号和三组模型密钥，下载 CMD 后直接双击执行。',
-    bullets: ['宿主机只需要安装 Docker Desktop，安装器会自动启动并等待 Docker Engine', '不需要手动打开 PowerShell 或处理执行策略', '自动初始化 owner、导入三组凭证并发布 9 个工作流', '7 个图片工作流会统一改写为填写的图片服务地址'],
+    body: '填写页面中的节点信息、n8n 管理员账号和三组模型密钥，下载 CMD 后直接双击执行。回调密钥由管理员配置自动注入。',
+    bullets: ['宿主机只需要安装 Docker Desktop，安装器会自动启动并等待 Docker Engine', '自动部署 Valkey、图片 API、图片 Worker 和持久化队列', '自动初始化 owner、导入三组凭证并发布 9 个工作流', '本机图片栈健康后才继续部署 n8n'],
   },
   {
     id: 'cloudflare',
@@ -54,7 +55,7 @@ const SECTIONS = Object.freeze([
     number: '04',
     title: '验收与清理',
     body: '访问节点域名确认 n8n 可用，再创建最小 Shopee 与聚水潭任务验证回调。成功后删除下载的安装脚本。',
-    bullets: ['安装脚本包含经过 Base64 编码的模型密钥和 owner 密码', '模型密钥最终只保存在 n8n 加密凭证库', '节点状态与加密密钥保存在 %LOCALAPPDATA%\\EWS\\n8n-nodes'],
+    bullets: ['安装脚本包含经过 Base64 编码的模型密钥、回调密钥和 owner 密码', '模型密钥最终只保存在 n8n 加密凭证库', 'n8n 状态位于 %LOCALAPPDATA%\\EWS\\n8n-nodes，图片服务构建源位于 %LOCALAPPDATA%\\EWS\\image-service'],
   },
 ]);
 
@@ -68,7 +69,7 @@ export async function getDistributedN8nWiki() {
   return {
     version: '2026.07.28',
     title: 'n8n 一键部署',
-    subtitle: 'Docker Desktop + 一份可双击运行的 CMD，Cloudflare Tunnel 独立连接',
+    subtitle: 'Docker Desktop + 一份可双击运行的 CMD，闭环部署图片队列与 n8n，Cloudflare Tunnel 独立连接',
     script: {
       filename: DISTRIBUTED_N8N_INSTALLER_FILENAME,
       download_url: '/api/admin/wiki/distributed-n8n/script',
@@ -79,6 +80,7 @@ export async function getDistributedN8nWiki() {
       node_name: 'node2',
       port: 5679,
       image_service_url: 'http://ews-image-sidecar:3000',
+      image_service_version: '2026.07.28',
       n8n_version: '2.25.7',
       concurrency: 20,
     },

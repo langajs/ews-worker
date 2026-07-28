@@ -8,6 +8,7 @@ const RELEASES = Object.freeze([
     changes: [
       'Docker Desktop 未运行时由安装器自动启动，并等待 Linux Docker Engine 就绪后继续。',
       '本地图片服务改用 docker inspect JSON 解析容器网络，并等待 Docker Desktop 恢复容器，避免瞬时误报不存在。',
+      '新主机安装器内嵌图片服务源码，自动构建并部署 Valkey、图片 API、图片 Worker，闭合 n8n 图片处理依赖。',
       '安装器固定使用已验收的 n8n 2.25.7，避免 stable 标签漂移导致安装行为变化。',
       '等待 /rest/settings 返回完整 owner 状态后再继续，禁止未初始化却误报部署成功。',
       'owner 密码统一校验为 8-64 位、至少一个大写字母和一个数字。',

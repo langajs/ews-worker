@@ -3,6 +3,8 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $N8nImage = 'n8nio/n8n:2.25.7'
+$ImageServiceImage = 'ews-image-service:2026.07.28'
+$ValkeyImage = 'valkey/valkey:8-alpine'
 
 function Decode-Value([string]$Value) {
   if (-not $Value -or $Value.StartsWith('__EWS_')) {
@@ -88,6 +90,158 @@ function Write-Utf8NoBom([string]$Path, [string]$Value) {
   [IO.File]::WriteAllText($Path, $Value, (New-Object Text.UTF8Encoding($false)))
 }
 
+function Test-LocalImageService([string]$ContainerName, [string]$CallbackSecret) {
+  & docker exec -e "EWS_CHECK_SECRET=$CallbackSecret" $ContainerName node -e "fetch('http://127.0.0.1:3000/v1/stats',{headers:{authorization:'Bearer '+process.env.EWS_CHECK_SECRET}}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" 2>$null | Out-Null
+  return $LASTEXITCODE -eq 0
+}
+
+function Wait-LocalImageService([string]$ContainerName, [string]$CallbackSecret, [int]$Attempts = 60) {
+  for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+    if (Test-LocalImageService $ContainerName $CallbackSecret) { return $true }
+    Start-Sleep -Seconds 2
+  }
+  return $false
+}
+
+function Write-ImageServiceSource([string]$BundleJson, [string]$SourceRoot) {
+  $expectedFiles = @(
+    'Dockerfile', 'package.json', 'package-lock.json',
+    'src/app.js', 'src/config.js', 'src/errors.js', 'src/image.js', 'src/pipeline.js',
+    'src/queue.js', 'src/security.js', 'src/server.js', 'src/worker-api.js', 'src/worker.js'
+  )
+  $parsedEntries = $BundleJson | ConvertFrom-Json
+  $entries = @($parsedEntries)
+  if ($entries.Count -ne $expectedFiles.Count) {
+    throw "Image service bundle is incomplete: expected $($expectedFiles.Count) files, found $($entries.Count)."
+  }
+
+  $entryMap = @{}
+  foreach ($entry in $entries) {
+    $name = [string]$entry.name
+    if (-not ($expectedFiles -contains $name) -or $entryMap.ContainsKey($name) -or $null -eq $entry.content) {
+      throw "Image service bundle entry is invalid: $name"
+    }
+    $entryMap[$name] = [string]$entry.content
+  }
+  foreach ($name in $expectedFiles) {
+    if (-not $entryMap.ContainsKey($name)) { throw "Image service bundle file is missing: $name" }
+  }
+
+  if (Test-Path -LiteralPath $SourceRoot) { [IO.Directory]::Delete($SourceRoot, $true) }
+  New-Item -ItemType Directory -Path $SourceRoot -Force | Out-Null
+  $normalizedRoot = [IO.Path]::GetFullPath($SourceRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+  foreach ($name in $expectedFiles) {
+    $target = [IO.Path]::GetFullPath((Join-Path $SourceRoot $name.Replace('/', [IO.Path]::DirectorySeparatorChar)))
+    if (-not $target.StartsWith($normalizedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+      throw 'Image service bundle escaped its source directory.'
+    }
+    New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+    Write-Utf8NoBom $target $entryMap[$name]
+  }
+}
+
+function Install-LocalImageService([string]$BundleJson, [string]$CallbackSecret, [string]$TicketOrigin) {
+  $serviceRoot = Join-Path (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'EWS') 'image-service'
+  $sourceRoot = Join-Path $serviceRoot 'source'
+  $envFile = Join-Path $serviceRoot 'image-service.env'
+  $networkName = 'ews-image-service'
+  $volumeName = 'ews_image_valkey_data'
+  $valkeyContainer = 'ews-image-valkey'
+  $apiContainer = 'ews-image-sidecar'
+  $workerContainer = 'ews-image-worker'
+
+  New-Item -ItemType Directory -Path $serviceRoot -Force | Out-Null
+  Write-Host 'Preparing the bundled EWS image service...' -ForegroundColor Yellow
+  Write-ImageServiceSource $BundleJson $sourceRoot
+  & docker build --tag $ImageServiceImage $sourceRoot | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw 'Failed to build the EWS image service.' }
+
+  & docker network inspect $networkName 2>$null | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    & docker network create $networkName | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to create the image service Docker network.' }
+  }
+  & docker volume inspect $volumeName 2>$null | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    & docker volume create $volumeName | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to create the image service Valkey volume.' }
+  }
+
+  foreach ($container in @($workerContainer, $apiContainer, $valkeyContainer)) {
+    & docker rm -f $container 2>$null | Out-Null
+  }
+
+  $valkeyArgs = @(
+    'run', '-d', '--name', $valkeyContainer, '--restart', 'unless-stopped',
+    '--network', $networkName, '--network-alias', 'valkey',
+    '-v', "$volumeName`:/data", $ValkeyImage,
+    'valkey-server', '--appendonly', 'yes', '--appendfsync', 'everysec', '--maxmemory-policy', 'noeviction'
+  )
+  & docker @valkeyArgs | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw 'Failed to start the image service Valkey container.' }
+  $valkeyReady = $false
+  for ($attempt = 0; $attempt -lt 30; $attempt++) {
+    & docker exec $valkeyContainer valkey-cli ping 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) { $valkeyReady = $true; break }
+    Start-Sleep -Seconds 2
+  }
+  if (-not $valkeyReady) { throw 'Image service Valkey did not become ready within 60 seconds.' }
+
+  $imageEnv = @(
+    "IMAGE_SERVICE_SECRET=$CallbackSecret"
+    'REDIS_URL=redis://valkey:6379'
+    "TICKET_ORIGIN=$TicketOrigin"
+    'WORKER_CONCURRENCY=8'
+    'MAX_QUEUE_DEPTH=10000'
+    'JPEG_QUALITY=88'
+    'MAX_OUTPUT_BYTES=1900000'
+    'ALLOW_BENCHMARK_DNS=false'
+    'LOG_LEVEL=info'
+  )
+  [IO.File]::WriteAllLines($envFile, $imageEnv, (New-Object Text.UTF8Encoding($false)))
+  try {
+    $apiArgs = @(
+      'run', '-d', '--name', $apiContainer, '--restart', 'unless-stopped',
+      '--network', $networkName, '--network-alias', 'ews-image-sidecar',
+      '--env-file', $envFile, $ImageServiceImage
+    )
+    & docker @apiArgs | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to start the EWS image API container.' }
+
+    $workerArgs = @(
+      'run', '-d', '--name', $workerContainer, '--restart', 'unless-stopped',
+      '--network', $networkName, '--env-file', $envFile,
+      $ImageServiceImage, 'npm', 'run', 'worker'
+    )
+    & docker @workerArgs | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to start the EWS image worker container.' }
+  } finally {
+    if (Test-Path -LiteralPath $envFile) { Remove-Item -LiteralPath $envFile -Force }
+  }
+
+  if (-not (Wait-LocalImageService $apiContainer $CallbackSecret)) {
+    throw 'EWS image service did not become ready within 120 seconds.'
+  }
+  Write-Host 'EWS image service deployed successfully.' -ForegroundColor Green
+  return $networkName
+}
+
+function Ensure-LocalImageService([string]$BundleJson, [string]$CallbackSecret, [string]$TicketOrigin) {
+  $containerName = 'ews-image-sidecar'
+  $networkName = Wait-DockerContainerNetwork $containerName 3
+  if ($networkName) {
+    foreach ($container in @('ews-image-valkey', $containerName, 'ews-image-worker')) {
+      & docker start $container 2>$null | Out-Null
+    }
+    if (Wait-LocalImageService $containerName $CallbackSecret 30) {
+      Write-Host "Reusing the local image service on Docker network: $networkName" -ForegroundColor Green
+      return $networkName
+    }
+    Write-Host 'The existing image service is not healthy and will be replaced.' -ForegroundColor Yellow
+  }
+  return Install-LocalImageService $BundleJson $CallbackSecret $TicketOrigin
+}
+
 $NodeName = Decode-Value $env:EWS_NODE_NAME_B64
 $Domain = Decode-Value $env:EWS_DOMAIN_B64
 $OwnerEmail = Decode-Value $env:EWS_OWNER_EMAIL_B64
@@ -96,7 +250,10 @@ $GrsaiKey = (Decode-Value $env:EWS_GRSAI_KEY_B64).Trim()
 $DeepseekKey = (Decode-Value $env:EWS_DEEPSEEK_KEY_B64).Trim()
 $BackupKey = (Decode-Value $env:EWS_BACKUP_KEY_B64).Trim()
 $ImageServiceInput = (Decode-Value $env:EWS_IMAGE_SERVICE_URL_B64).Trim()
+$CallbackSecret = (Decode-Value $env:EWS_CALLBACK_SECRET_B64).Trim()
+$TicketOriginInput = (Decode-Value $env:EWS_TICKET_ORIGIN_B64).Trim()
 $WorkflowBundleJson = Decode-Value '__EWS_WORKFLOW_BUNDLE_B64__'
+$ImageServiceBundleJson = Decode-Value '__EWS_IMAGE_SIDECAR_BUNDLE_B64__'
 $Port = [int]$env:EWS_PORT
 
 if ($NodeName -notmatch '^[a-z0-9][a-z0-9-]{0,31}$') { throw 'Node name must contain only lowercase letters, numbers, and hyphens.' }
@@ -107,6 +264,15 @@ if ($OwnerPassword.Length -lt 8 -or $OwnerPassword.Length -gt 64) { throw 'n8n o
 if ($OwnerPassword -notmatch '[A-Z]') { throw 'n8n owner password must contain at least one uppercase letter.' }
 if ($OwnerPassword -notmatch '\d') { throw 'n8n owner password must contain at least one number.' }
 if (-not $GrsaiKey -or -not $DeepseekKey -or -not $BackupKey) { throw 'All three model API keys are required.' }
+if ($CallbackSecret -match '[\r\n]') { throw 'EWS callback secret is invalid.' }
+
+try {
+  $ticketUri = [Uri]$TicketOriginInput
+} catch {
+  throw 'EWS Worker origin is invalid.'
+}
+if ($ticketUri.Scheme -notin @('http', 'https')) { throw 'EWS Worker origin must use HTTP or HTTPS.' }
+$TicketOrigin = $ticketUri.GetLeftPart([UriPartial]::Authority).TrimEnd('/')
 
 try {
   $imageUri = [Uri]$ImageServiceInput
@@ -127,13 +293,11 @@ Wait-DockerDesktop
 
 $ImageDockerNetwork = ''
 if ($imageUri.Host -eq 'ews-image-sidecar') {
-  Write-Host 'Waiting for the local image service container...' -ForegroundColor Yellow
-  $ImageDockerNetwork = Wait-DockerContainerNetwork $imageUri.Host
-  if (-not $ImageDockerNetwork) {
-    throw 'Local image service container ews-image-sidecar was not found after waiting 30 seconds. Check docker ps -a, start the image service, or enter its external HTTPS endpoint in the Wiki.'
-  }
-  Write-Host "Local image service found on Docker network: $ImageDockerNetwork" -ForegroundColor Green
+  if (-not $CallbackSecret) { throw 'EWS callback secret is required to deploy the local image service.' }
+  $ImageDockerNetwork = Ensure-LocalImageService $ImageServiceBundleJson $CallbackSecret $TicketOrigin
 }
+$CallbackSecret = $null
+$ImageServiceBundleJson = $null
 
 $StateRoot = Join-Path (Join-Path (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'EWS') 'n8n-nodes') $NodeName
 $WorkflowDirectory = Join-Path $StateRoot 'workflows'

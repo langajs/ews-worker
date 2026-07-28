@@ -18,18 +18,19 @@ install-ews-node2.cmd
 
 安装器会自动完成以下操作：
 
-1. 创建节点专属 Docker network、volume 和已验收的 `n8nio/n8n:2.25.7` 容器。
-2. 持久化 `N8N_ENCRYPTION_KEY`，初始化 n8n owner。
-3. 导入三组 `HTTP Header Auth` 凭证。
-4. 导入并发布仓库内 9 个生产工作流。
-5. 将 7 个图片工作流改写为管理员填写的图片服务地址；同主机容器会自动接入图片服务所在的 Docker network。
-6. 校验图片服务 `/readyz`、n8n `/healthz` 和工作流发布状态。
+1. 从 CMD 内嵌源码构建图片服务，创建 Valkey 持久化队列、图片 API 和图片 Worker。
+2. 创建节点专属 Docker network、volume 和已验收的 `n8nio/n8n:2.25.7` 容器。
+3. 持久化 `N8N_ENCRYPTION_KEY`，初始化 n8n owner。
+4. 导入三组 `HTTP Header Auth` 凭证。
+5. 导入并发布仓库内 9 个生产工作流。
+6. 将 7 个图片工作流接入本机图片服务，或改写为管理员填写的外部服务地址。
+7. 校验 Valkey、图片服务 `/readyz`、n8n `/healthz` 和工作流发布状态。
 
 节点状态保存在 `%LOCALAPPDATA%\EWS\n8n-nodes\{node}`。重复执行同一节点脚本会复用数据卷和加密密钥，并重新导入当前工作流。
 
 n8n owner 密码必须为 8-64 位，并至少包含一个大写字母和一个数字。安装器会等待管理 API 完整就绪，并在导入工作流前确认 owner 已初始化；中断后可直接重新执行同一脚本。
 
-安装器只部署 n8n，不会在新主机上创建图片处理服务。图片服务与 n8n 同机时填写 `http://ews-image-sidecar:3000`；异地主机必须填写该服务可访问的外部 HTTPS 端点。Docker Desktop 由安装器启动时，会等待本地图片服务容器恢复并通过 `docker inspect` 的 JSON 结果解析其网络；等待 30 秒后仍不存在才会停止。
+默认图片服务地址 `http://ews-image-sidecar:3000` 会触发闭环部署：安装器内嵌固定版本源码，在新主机构建 `ews-image-service:2026.07.28`，创建 `ews-image-valkey`、`ews-image-sidecar`、`ews-image-worker` 和具名 Valkey volume。重复执行时会复用健康服务；只有明确填写外部 HTTP/HTTPS 端点时才跳过本机图片栈。
 
 ## Cloudflare Tunnel
 
