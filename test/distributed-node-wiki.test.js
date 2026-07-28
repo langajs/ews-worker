@@ -52,6 +52,11 @@ test('one-click CMD embeds the complete production workflow bundle', () => {
   assert.match(powershellTemplate, /Decode-Value \$env:EWS_NODE_NAME_B64/);
   assert.match(powershellTemplate, /\$N8nImage = 'n8nio\/n8n:2\.25\.7'/);
   assert.match(powershellTemplate, /function Get-N8nSettings/);
+  assert.match(powershellTemplate, /function Test-DockerEngine/);
+  assert.match(powershellTemplate, /function Wait-DockerDesktop/);
+  assert.match(powershellTemplate, /Get-Command docker\.exe/);
+  assert.match(powershellTemplate, /Start-Process -FilePath \$dockerDesktopPath/);
+  assert.match(powershellTemplate, /Linux container engine ready within/);
   assert.match(powershellTemplate, /\$null -ne \$setupFlag/);
   assert.match(powershellTemplate, /owner setup did not complete/);
   assert.match(powershellTemplate, /OwnerPassword -notmatch '\[A-Z\]'/);
@@ -69,6 +74,7 @@ test('one-click CMD embeds the complete production workflow bundle', () => {
   assert.match(powershellTemplate, /docker network ls --filter/);
   assert.match(powershellTemplate, /docker volume ls --filter/);
   assert.doesNotMatch(powershellTemplate, /docker network inspect \$NetworkName/);
+  assert.ok(powershellTemplate.lastIndexOf('Wait-DockerDesktop') < powershellTemplate.indexOf('& docker inspect'));
   assert.match(installerModule, /install-ews-node\.cmd/);
   assert.match(installerModule, /workflowEntry\('聚水潭SKU图\.json'/);
   assert.match(installerModule, /content: JSON\.stringify\(workflow\)/);
@@ -112,7 +118,7 @@ test('admin deployment wiki protects installer details and uses CMD flow', () =>
   const frontendApi = fs.readFileSync(path.join(root, '../ews-frontend/js/api.js'), 'utf8');
 
   assert.match(workerWiki, /可双击运行的 CMD/);
-  assert.match(workerWiki, /宿主机只需要 Docker Desktop/);
+  assert.match(workerWiki, /安装器会自动启动并等待 Docker Engine/);
   assert.match(workerWiki, /Cloudflare Tunnel/);
   assert.match(workerEntry, /requireAuth\(request, env, \(\) => handleGetDistributedN8nWiki\(request\)\)/);
   assert.match(workerEntry, /requireAuth\(request, env, \(\) => handleDownloadDistributedN8nScript\(request\)\)/);

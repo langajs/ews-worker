@@ -11,6 +11,41 @@ function Decode-Value([string]$Value) {
   return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Value))
 }
 
+function Test-DockerEngine {
+  & docker version --format '{{.Server.Version}}' 2>$null | Out-Null
+  return $LASTEXITCODE -eq 0
+}
+
+function Wait-DockerDesktop([int]$Attempts = 90) {
+  if (-not (Get-Command docker.exe -ErrorAction SilentlyContinue)) {
+    throw 'Docker CLI was not found. Install Docker Desktop, then run this file again.'
+  }
+  if (Test-DockerEngine) { return }
+
+  $dockerDesktopPath = Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'
+  if (-not (Test-Path -LiteralPath $dockerDesktopPath)) {
+    throw 'Docker Desktop was not found. Install Docker Desktop, then run this file again.'
+  }
+
+  Write-Host 'Docker Engine is not ready. Starting Docker Desktop and waiting...' -ForegroundColor Yellow
+  if (-not (Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue)) {
+    try {
+      Start-Process -FilePath $dockerDesktopPath
+    } catch {
+      throw "Failed to start Docker Desktop: $($_.Exception.Message)"
+    }
+  }
+
+  for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+    Start-Sleep -Seconds 2
+    if (Test-DockerEngine) {
+      Write-Host 'Docker Engine is ready.' -ForegroundColor Green
+      return
+    }
+  }
+  throw "Docker Desktop did not make the Linux container engine ready within $($Attempts * 2) seconds. Open Docker Desktop, confirm the engine is running with Linux containers enabled, then run this file again."
+}
+
 function Wait-N8n([int]$Port, [int]$Attempts = 60) {
   for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
     try {
@@ -72,14 +107,15 @@ if ($ImageServiceUrl.EndsWith('/v1/image-jobs')) {
   $ImageServiceBaseUrl = $ImageServiceUrl
   $ImageJobUrl = "$ImageServiceUrl/v1/image-jobs"
 }
+
+Wait-DockerDesktop
+
 $ImageDockerNetwork = ''
 try {
   $candidateNetwork = & docker inspect $imageUri.Host --format '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{println}}{{end}}' 2>$null | Select-Object -First 1
   if ($candidateNetwork) { $ImageDockerNetwork = ([string]$candidateNetwork).Trim() }
 } catch {}
 
-& docker version --format '{{.Server.Version}}' | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'Docker Desktop is not running.' }
 if ($imageUri.Host -eq 'ews-image-sidecar' -and -not $ImageDockerNetwork) {
   throw 'Local image service container ews-image-sidecar was not found. Start the image service on this host or enter its external HTTPS endpoint in the Wiki.'
 }

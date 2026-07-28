@@ -4,8 +4,9 @@ const RELEASES = Object.freeze([
     date: '2026-07-28',
     status: '已上线',
     title: '分布式 n8n 安装器可靠性修复',
-    summary: '修复管理 API 未就绪时跳过 owner 初始化的问题，并让安装密码校验与 n8n 当前版本保持一致。',
+    summary: '修复 Docker Engine 和管理 API 未就绪时过早失败的问题，并让安装密码校验与 n8n 当前版本保持一致。',
     changes: [
+      'Docker Desktop 未运行时由安装器自动启动，并等待 Linux Docker Engine 就绪后继续。',
       '安装器固定使用已验收的 n8n 2.25.7，避免 stable 标签漂移导致安装行为变化。',
       '等待 /rest/settings 返回完整 owner 状态后再继续，禁止未初始化却误报部署成功。',
       'owner 密码统一校验为 8-64 位、至少一个大写字母和一个数字。',

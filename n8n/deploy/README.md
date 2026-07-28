@@ -5,7 +5,7 @@
 宿主机仅需：
 
 - Windows 10/11
-- Docker Desktop，且 Docker Engine 已启动
+- 已安装 Docker Desktop
 - Windows 自带的 `cmd.exe` 和系统组件
 
 执行方式：
@@ -14,7 +14,7 @@
 install-ews-node2.cmd
 ```
 
-也可以直接双击该 CMD 文件。用户无需打开 PowerShell 或处理执行策略；CMD 内部会调用 Windows 自带组件运行嵌入的安装逻辑。
+也可以直接双击该 CMD 文件。用户无需预先启动 Docker Desktop、打开 PowerShell 或处理执行策略；CMD 内部会启动 Docker Desktop，等待 Linux Docker Engine 就绪，再调用 Windows 自带组件运行嵌入的安装逻辑。
 
 安装器会自动完成以下操作：
 

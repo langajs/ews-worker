@@ -33,7 +33,7 @@ const SECTIONS = Object.freeze([
     number: '01',
     title: '生成安装脚本',
     body: '填写页面中的节点信息、n8n 管理员账号和三组模型密钥，下载 CMD 后直接双击执行。',
-    bullets: ['宿主机只需要 Docker Desktop', '不需要手动打开 PowerShell 或处理执行策略', '自动初始化 owner、导入三组凭证并发布 9 个工作流', '7 个图片工作流会统一改写为填写的图片服务地址'],
+    bullets: ['宿主机只需要安装 Docker Desktop，安装器会自动启动并等待 Docker Engine', '不需要手动打开 PowerShell 或处理执行策略', '自动初始化 owner、导入三组凭证并发布 9 个工作流', '7 个图片工作流会统一改写为填写的图片服务地址'],
   },
   {
     id: 'cloudflare',
