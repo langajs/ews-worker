@@ -20,7 +20,7 @@ set "EWS_PAYLOAD_PS1=%EWS_TEMP_ROOT%.ps1"
 
 echo.
 echo EWS n8n node installer
-echo Starting Docker Desktop if needed and preparing deployment...
+echo Installing or starting Docker Desktop if needed and preparing deployment...
 echo.
 
 __EWS_POWERSHELL_PAYLOAD_LINES__

@@ -13,20 +13,123 @@ function Decode-Value([string]$Value) {
   return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Value))
 }
 
+function Find-DockerCli {
+  $command = Get-Command docker.exe -ErrorAction SilentlyContinue
+  if ($command) { return [string]$command.Source }
+
+  $candidates = @(
+    (Join-Path $env:ProgramFiles 'Docker\Docker\resources\bin\docker.exe'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\resources\bin\docker.exe'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\Docker\Docker\resources\bin\docker.exe')
+  )
+  foreach ($candidate in $candidates) {
+    if (Test-Path -LiteralPath $candidate) {
+      $binDirectory = Split-Path -Parent $candidate
+      if (-not (($env:Path -split ';') -contains $binDirectory)) {
+        $env:Path = "$binDirectory;$env:Path"
+      }
+      return $candidate
+    }
+  }
+  return ''
+}
+
+function Find-DockerDesktop {
+  $candidates = @(
+    (Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\Docker Desktop.exe'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\Docker\Docker\Docker Desktop.exe')
+  )
+  foreach ($candidate in $candidates) {
+    if (Test-Path -LiteralPath $candidate) { return $candidate }
+  }
+  return ''
+}
+
+function Test-DockerCommand([string[]]$Arguments) {
+  $previousPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'SilentlyContinue'
+    & docker @Arguments 2>$null | Out-Null
+    $exitCode = $LASTEXITCODE
+  } catch {
+    $exitCode = 1
+  } finally {
+    $ErrorActionPreference = $previousPreference
+  }
+  return $exitCode -eq 0
+}
+
+function Install-DockerDesktop {
+  $architecture = 'amd64'
+  if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') {
+    $architecture = 'arm64'
+  }
+  $downloadUrl = "https://desktop.docker.com/win/main/$architecture/Docker%20Desktop%20Installer.exe"
+  $installerPath = Join-Path ([IO.Path]::GetTempPath()) ("ews-docker-desktop-{0}.exe" -f [Guid]::NewGuid().ToString('N'))
+
+  Write-Host 'Docker Desktop is not installed. Downloading the official installer...' -ForegroundColor Yellow
+  try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $downloaded = $false
+    $bits = Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue
+    if ($bits) {
+      try {
+        Start-BitsTransfer -Source $downloadUrl -Destination $installerPath -DisplayName 'EWS Docker Desktop download'
+        $downloaded = $true
+      } catch {
+        if (Test-Path -LiteralPath $installerPath) { Remove-Item -LiteralPath $installerPath -Force }
+        Write-Host 'BITS download is unavailable. Falling back to HTTPS download...' -ForegroundColor Yellow
+      }
+    }
+    if (-not $downloaded) {
+      Invoke-WebRequest -UseBasicParsing -Uri $downloadUrl -OutFile $installerPath
+    }
+    if (-not (Test-Path -LiteralPath $installerPath) -or (Get-Item -LiteralPath $installerPath).Length -lt 50MB) {
+      throw 'The Docker Desktop installer download is incomplete.'
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $installerPath
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Docker') {
+      throw 'The Docker Desktop installer signature is not valid.'
+    }
+
+    Write-Host 'Installing Docker Desktop. Approve the Windows administrator prompt to continue...' -ForegroundColor Yellow
+    $process = Start-Process -FilePath $installerPath -Verb RunAs -Wait -PassThru -ArgumentList @(
+      'install', '--quiet', '--accept-license', '--backend=wsl-2'
+    )
+    if ($process.ExitCode -eq 3010) {
+      throw 'Docker Desktop was installed, but Windows must restart before deployment can continue. Restart Windows, then run this file again.'
+    }
+    if ($process.ExitCode -ne 0) {
+      throw "Docker Desktop installation failed with exit code $($process.ExitCode)."
+    }
+  } catch {
+    throw "Unable to install Docker Desktop automatically: $($_.Exception.Message)"
+  } finally {
+    if (Test-Path -LiteralPath $installerPath) { Remove-Item -LiteralPath $installerPath -Force }
+  }
+
+  if (-not (Find-DockerCli)) {
+    throw 'Docker Desktop was installed, but docker.exe was not found. Restart Windows, then run this file again.'
+  }
+  Write-Host 'Docker Desktop installed successfully.' -ForegroundColor Green
+}
+
 function Test-DockerEngine {
-  & docker version --format '{{.Server.Version}}' 2>$null | Out-Null
-  return $LASTEXITCODE -eq 0
+  return Test-DockerCommand -Arguments @('version', '--format', '{{.Server.Version}}')
 }
 
 function Wait-DockerDesktop([int]$Attempts = 90) {
-  if (-not (Get-Command docker.exe -ErrorAction SilentlyContinue)) {
-    throw 'Docker CLI was not found. Install Docker Desktop, then run this file again.'
-  }
-  if (Test-DockerEngine) { return }
+  $dockerCli = Find-DockerCli
+  if ($dockerCli -and (Test-DockerEngine)) { return }
 
-  $dockerDesktopPath = Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'
-  if (-not (Test-Path -LiteralPath $dockerDesktopPath)) {
-    throw 'Docker Desktop was not found. Install Docker Desktop, then run this file again.'
+  $dockerDesktopPath = Find-DockerDesktop
+  if (-not $dockerDesktopPath) {
+    Install-DockerDesktop
+    $dockerDesktopPath = Find-DockerDesktop
+  }
+  if (-not (Find-DockerCli) -or -not $dockerDesktopPath) {
+    throw 'Docker Desktop installation is incomplete. Restart Windows, then run this file again.'
   }
 
   Write-Host 'Docker Engine is not ready. Starting Docker Desktop and waiting...' -ForegroundColor Yellow
@@ -45,13 +148,27 @@ function Wait-DockerDesktop([int]$Attempts = 90) {
       return
     }
   }
-  throw "Docker Desktop did not make the Linux container engine ready within $($Attempts * 2) seconds. Open Docker Desktop, confirm the engine is running with Linux containers enabled, then run this file again."
+  throw "Docker Desktop did not make the Linux container engine ready within $($Attempts * 2) seconds. If Docker reports that WSL 2 or Windows features were installed, restart Windows and run this file again."
+}
+
+function Ensure-DockerImage([string]$Image) {
+  if (Test-DockerCommand -Arguments @('image', 'inspect', $Image)) {
+    Write-Host "Using local Docker image: $Image"
+    return
+  }
+  Write-Host "Pulling Docker image: $Image" -ForegroundColor Yellow
+  & docker pull $Image | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw "Failed to pull Docker image: $Image" }
 }
 
 function Wait-DockerContainerNetwork([string]$ContainerName, [int]$Attempts = 15) {
   for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
     try {
-      $containerJson = & docker inspect $ContainerName 2>$null
+      if (-not (Test-DockerCommand -Arguments @('container', 'inspect', $ContainerName))) {
+        if ($attempt -lt $Attempts - 1) { Start-Sleep -Seconds 2 }
+        continue
+      }
+      $containerJson = & docker inspect $ContainerName
       if ($LASTEXITCODE -eq 0 -and $containerJson) {
         $containerInfo = $containerJson | ConvertFrom-Json
         $networkName = $containerInfo[0].NetworkSettings.Networks.PSObject.Properties.Name | Select-Object -First 1
@@ -91,8 +208,10 @@ function Write-Utf8NoBom([string]$Path, [string]$Value) {
 }
 
 function Test-LocalImageService([string]$ContainerName, [string]$CallbackSecret) {
-  & docker exec -e "EWS_CHECK_SECRET=$CallbackSecret" $ContainerName node -e "fetch('http://127.0.0.1:3000/v1/stats',{headers:{authorization:'Bearer '+process.env.EWS_CHECK_SECRET}}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" 2>$null | Out-Null
-  return $LASTEXITCODE -eq 0
+  return Test-DockerCommand -Arguments @(
+    'exec', '-e', "EWS_CHECK_SECRET=$CallbackSecret", $ContainerName, 'node', '-e',
+    "fetch('http://127.0.0.1:3000/v1/stats',{headers:{authorization:'Bearer '+process.env.EWS_CHECK_SECRET}}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  )
 }
 
 function Wait-LocalImageService([string]$ContainerName, [string]$CallbackSecret, [int]$Attempts = 60) {
@@ -151,24 +270,30 @@ function Install-LocalImageService([string]$BundleJson, [string]$CallbackSecret,
   $workerContainer = 'ews-image-worker'
 
   New-Item -ItemType Directory -Path $serviceRoot -Force | Out-Null
-  Write-Host 'Preparing the bundled EWS image service...' -ForegroundColor Yellow
-  Write-ImageServiceSource $BundleJson $sourceRoot
-  & docker build --tag $ImageServiceImage $sourceRoot | Out-Host
-  if ($LASTEXITCODE -ne 0) { throw 'Failed to build the EWS image service.' }
+  if (Test-DockerCommand -Arguments @('image', 'inspect', $ImageServiceImage)) {
+    Write-Host "Using local Docker image: $ImageServiceImage"
+  } else {
+    Write-Host 'Preparing the bundled EWS image service...' -ForegroundColor Yellow
+    Write-ImageServiceSource $BundleJson $sourceRoot
+    & docker build --tag $ImageServiceImage $sourceRoot | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw 'Failed to build the EWS image service.' }
+  }
+  Ensure-DockerImage $ValkeyImage
 
-  & docker network inspect $networkName 2>$null | Out-Null
-  if ($LASTEXITCODE -ne 0) {
+  if (-not (Test-DockerCommand -Arguments @('network', 'inspect', $networkName))) {
     & docker network create $networkName | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Failed to create the image service Docker network.' }
   }
-  & docker volume inspect $volumeName 2>$null | Out-Null
-  if ($LASTEXITCODE -ne 0) {
+  if (-not (Test-DockerCommand -Arguments @('volume', 'inspect', $volumeName))) {
     & docker volume create $volumeName | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Failed to create the image service Valkey volume.' }
   }
 
   foreach ($container in @($workerContainer, $apiContainer, $valkeyContainer)) {
-    & docker rm -f $container 2>$null | Out-Null
+    if (Test-DockerCommand -Arguments @('container', 'inspect', $container)) {
+      & docker rm -f $container | Out-Null
+      if ($LASTEXITCODE -ne 0) { throw "Failed to replace image service container: $container" }
+    }
   }
 
   $valkeyArgs = @(
@@ -181,8 +306,10 @@ function Install-LocalImageService([string]$BundleJson, [string]$CallbackSecret,
   if ($LASTEXITCODE -ne 0) { throw 'Failed to start the image service Valkey container.' }
   $valkeyReady = $false
   for ($attempt = 0; $attempt -lt 30; $attempt++) {
-    & docker exec $valkeyContainer valkey-cli ping 2>$null | Out-Null
-    if ($LASTEXITCODE -eq 0) { $valkeyReady = $true; break }
+    if (Test-DockerCommand -Arguments @('exec', $valkeyContainer, 'valkey-cli', 'ping')) {
+      $valkeyReady = $true
+      break
+    }
     Start-Sleep -Seconds 2
   }
   if (-not $valkeyReady) { throw 'Image service Valkey did not become ready within 60 seconds.' }
@@ -231,7 +358,9 @@ function Ensure-LocalImageService([string]$BundleJson, [string]$CallbackSecret, 
   $networkName = Wait-DockerContainerNetwork $containerName 3
   if ($networkName) {
     foreach ($container in @('ews-image-valkey', $containerName, 'ews-image-worker')) {
-      & docker start $container 2>$null | Out-Null
+      if (Test-DockerCommand -Arguments @('container', 'inspect', $container)) {
+        Test-DockerCommand -Arguments @('start', $container) | Out-Null
+      }
     }
     if (Wait-LocalImageService $containerName $CallbackSecret 30) {
       Write-Host "Reusing the local image service on Docker network: $networkName" -ForegroundColor Green
@@ -290,6 +419,7 @@ if ($ImageServiceUrl.EndsWith('/v1/image-jobs')) {
 }
 
 Wait-DockerDesktop
+Ensure-DockerImage $N8nImage
 
 $ImageDockerNetwork = ''
 if ($imageUri.Host -eq 'ews-image-sidecar') {

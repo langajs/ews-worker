@@ -71,7 +71,15 @@ test('one-click CMD embeds the complete production workflow bundle', () => {
   assert.match(powershellTemplate, /\$N8nImage = 'n8nio\/n8n:2\.25\.7'/);
   assert.match(powershellTemplate, /function Get-N8nSettings/);
   assert.match(powershellTemplate, /function Test-DockerEngine/);
+  assert.match(powershellTemplate, /function Test-DockerCommand/);
+  assert.match(powershellTemplate, /function Install-DockerDesktop/);
+  assert.match(powershellTemplate, /desktop\.docker\.com\/win\/main\/\$architecture/);
+  assert.match(powershellTemplate, /SecurityProtocolType\]::Tls12/);
+  assert.match(powershellTemplate, /BITS download is unavailable/);
+  assert.match(powershellTemplate, /Get-AuthenticodeSignature/);
+  assert.match(powershellTemplate, /'--accept-license'/);
   assert.match(powershellTemplate, /function Wait-DockerDesktop/);
+  assert.match(powershellTemplate, /function Ensure-DockerImage/);
   assert.match(powershellTemplate, /function Wait-DockerContainerNetwork/);
   assert.match(powershellTemplate, /function Write-ImageServiceSource/);
   assert.match(powershellTemplate, /function Install-LocalImageService/);
@@ -103,6 +111,10 @@ test('one-click CMD embeds the complete production workflow bundle', () => {
   assert.match(powershellTemplate, /docker network ls --filter/);
   assert.match(powershellTemplate, /docker volume ls --filter/);
   assert.doesNotMatch(powershellTemplate, /docker network inspect \$NetworkName/);
+  assert.doesNotMatch(powershellTemplate, /& docker (?:network|volume) inspect \$\w+ 2>\$null/);
+  assert.match(powershellTemplate, /Test-DockerCommand -Arguments @\('network', 'inspect', \$networkName\)/);
+  assert.match(powershellTemplate, /Ensure-DockerImage \$N8nImage/);
+  assert.match(powershellTemplate, /Ensure-DockerImage \$ValkeyImage/);
   assert.ok(powershellTemplate.lastIndexOf('Wait-DockerDesktop') < powershellTemplate.lastIndexOf('Ensure-LocalImageService'));
   assert.match(installerModule, /install-ews-node\.cmd/);
   assert.match(installerModule, /workflowEntry\('聚水潭SKU图\.json'/);
@@ -157,7 +169,8 @@ test('admin deployment wiki protects installer details and uses CMD flow', () =>
   const frontendApi = fs.readFileSync(path.join(root, '../ews-frontend/js/api.js'), 'utf8');
 
   assert.match(workerWiki, /可双击运行的 CMD/);
-  assert.match(workerWiki, /安装器会自动启动并等待 Docker Engine/);
+  assert.match(workerWiki, /Docker Desktop 缺失时自动下载并安装/);
+  assert.match(workerWiki, /已有 Docker Engine 和镜像直接复用/);
   assert.match(workerWiki, /Cloudflare Tunnel/);
   assert.match(workerEntry, /requireAuth\(request, env, \(\) => handleGetDistributedN8nWiki\(request\)\)/);
   assert.match(workerEntry, /requireAuth\(request, env, \(\) => handleDownloadDistributedN8nScript\(request\)\)/);

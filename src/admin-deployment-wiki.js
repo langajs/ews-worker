@@ -34,7 +34,7 @@ const SECTIONS = Object.freeze([
     number: '01',
     title: '生成安装脚本',
     body: '填写页面中的节点信息、n8n 管理员账号和三组模型密钥，下载 CMD 后直接双击执行。回调密钥由管理员配置自动注入。',
-    bullets: ['宿主机只需要安装 Docker Desktop，安装器会自动启动并等待 Docker Engine', '自动部署 Valkey、图片 API、图片 Worker 和持久化队列', '自动初始化 owner、导入三组凭证并发布 9 个工作流', '本机图片栈健康后才继续部署 n8n'],
+    bullets: ['宿主机只需要 Windows 10/11，Docker Desktop 缺失时自动下载并安装', '已有 Docker Engine 和镜像直接复用，缺少的镜像自动拉取', '自动部署 Valkey、图片 API、图片 Worker 和持久化队列', '自动初始化 owner、导入三组凭证并发布 9 个工作流'],
   },
   {
     id: 'cloudflare',
@@ -69,7 +69,7 @@ export async function getDistributedN8nWiki() {
   return {
     version: '2026.07.28',
     title: 'n8n 一键部署',
-    subtitle: 'Docker Desktop + 一份可双击运行的 CMD，闭环部署图片队列与 n8n，Cloudflare Tunnel 独立连接',
+    subtitle: '一份可双击运行的 CMD，从空白 Windows 主机闭环部署 Docker、图片队列与 n8n，Cloudflare Tunnel 独立连接',
     script: {
       filename: DISTRIBUTED_N8N_INSTALLER_FILENAME,
       download_url: '/api/admin/wiki/distributed-n8n/script',

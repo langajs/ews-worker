@@ -4,9 +4,12 @@ const RELEASES = Object.freeze([
     date: '2026-07-28',
     status: '已上线',
     title: '分布式 n8n 安装器可靠性修复',
-    summary: '修复 Docker Engine 和管理 API 未就绪时过早失败的问题，并让安装密码校验与 n8n 当前版本保持一致。',
+    summary: '修复 Docker 资源不存在时探测命令提前终止的问题，并让空白 Windows 主机自动补齐 Docker 与运行镜像。',
     changes: [
       'Docker Desktop 未运行时由安装器自动启动，并等待 Linux Docker Engine 就绪后继续。',
+      'Docker Desktop 缺失时从官方地址下载签名安装器并自动安装；系统要求重启时可重跑同一 CMD 继续。',
+      'Docker network、volume、container 和 image 的缺失被视为创建条件，不再因 PowerShell NativeCommandError 提前终止。',
+      'n8n 与 Valkey 镜像存在时直接复用，缺失时自动拉取；失败安装已构建的图片服务镜像也会复用。',
       '本地图片服务改用 docker inspect JSON 解析容器网络，并等待 Docker Desktop 恢复容器，避免瞬时误报不存在。',
       '新主机安装器内嵌图片服务源码，自动构建并部署 Valkey、图片 API、图片 Worker，闭合 n8n 图片处理依赖。',
       '安装器固定使用已验收的 n8n 2.25.7，避免 stable 标签漂移导致安装行为变化。',

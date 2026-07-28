@@ -5,8 +5,8 @@
 宿主机仅需：
 
 - Windows 10/11
-- 已安装 Docker Desktop
 - Windows 自带的 `cmd.exe` 和系统组件
+- 可批准一次 Windows 管理员提示；仅在缺少 Docker Desktop 时需要
 
 执行方式：
 
@@ -14,17 +14,18 @@
 install-ews-node2.cmd
 ```
 
-也可以直接双击该 CMD 文件。用户无需预先启动 Docker Desktop、打开 PowerShell 或处理执行策略；CMD 内部会启动 Docker Desktop，等待 Linux Docker Engine 就绪，再调用 Windows 自带组件运行嵌入的安装逻辑。
+也可以直接双击该 CMD 文件。用户无需预装或预先启动 Docker Desktop、打开 PowerShell 或处理执行策略；安装器会优先复用已经就绪的 Docker Engine。若本机没有 Docker Desktop，则从 Docker 官方地址下载对应 CPU 架构的签名安装器，完成安装后启动并等待 Linux Docker Engine 就绪。Windows 首次启用 WSL 2 若要求重启，重启后重新运行同一 CMD 即可继续。
 
 安装器会自动完成以下操作：
 
-1. 从 CMD 内嵌源码构建图片服务，创建 Valkey 持久化队列、图片 API 和图片 Worker。
-2. 创建节点专属 Docker network、volume 和已验收的 `n8nio/n8n:2.25.7` 容器。
-3. 持久化 `N8N_ENCRYPTION_KEY`，初始化 n8n owner。
-4. 导入三组 `HTTP Header Auth` 凭证。
-5. 导入并发布仓库内 9 个生产工作流。
-6. 将 7 个图片工作流接入本机图片服务，或改写为管理员填写的外部服务地址。
-7. 校验 Valkey、图片服务 `/readyz`、n8n `/healthz` 和工作流发布状态。
+1. 检查 Docker Desktop/CLI，缺失时自动下载官方安装器并安装，未启动时自动启动。
+2. 复用本地镜像；缺少时拉取 `n8nio/n8n:2.25.7` 与 Valkey，并从 CMD 内嵌源码构建图片服务。
+3. 创建 Valkey 持久化队列、图片 API、图片 Worker，以及节点专属 Docker network、volume 和 n8n 容器。
+4. 持久化 `N8N_ENCRYPTION_KEY`，初始化 n8n owner。
+5. 导入三组 `HTTP Header Auth` 凭证。
+6. 导入并发布仓库内 9 个生产工作流。
+7. 将 7 个图片工作流接入本机图片服务，或改写为管理员填写的外部服务地址。
+8. 校验 Valkey、图片服务 `/readyz`、n8n `/healthz` 和工作流发布状态。
 
 节点状态保存在 `%LOCALAPPDATA%\EWS\n8n-nodes\{node}`。重复执行同一节点脚本会复用数据卷和加密密钥，并重新导入当前工作流。
 
