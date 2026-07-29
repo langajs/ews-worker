@@ -32,6 +32,16 @@ const GLOBAL_ATTRIBUTE_TOKEN = /^ps_product_global_attribute\.(\d+)$/;
 
 export const SHOPEE_TEMPLATE_SEMANTIC_KEYS = Object.freeze([...TOKEN_SEMANTICS].sort());
 
+export function shopeeParentSku(parentSku, subTaskId, setIndex) {
+  const customSku = String(parentSku || '').trim();
+  if (customSku) return `${customSku}-${Number(setIndex) + 1}`;
+  return String(subTaskId || '').slice(0, 8);
+}
+
+export function shopeeVariationIntegrationNo(subTaskId, isSingleProduct = false) {
+  return isSingleProduct ? '' : String(subTaskId || '').slice(0, 8);
+}
+
 const parser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: '@_',

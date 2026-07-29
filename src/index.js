@@ -35,7 +35,7 @@ import {
 import { generateToken, hashPassword, verifyPassword, authenticateRequest, DEFAULT_PASSWORD } from './auth.js';
 import {
   buildShopeeWorkbook, compareShopeeTemplateSemantics, parseShopeeTemplate, sha256Hex,
-  SHOPEE_TEMPLATE_SEMANTIC_KEYS,
+  shopeeParentSku, shopeeVariationIntegrationNo, SHOPEE_TEMPLATE_SEMANTIC_KEYS,
 } from './shopee-template.js';
 import {
   annotateShopeeShippingChannels,
@@ -1222,6 +1222,7 @@ const SKU_RANDOM_ID_LENGTH = 8;
 const SKU_PREFIX_LENGTH = SKU_RANDOM_ID_LENGTH + 1;
 const JST_SKU_MAX_LENGTH = 80;
 const SHOPEE_SKU_MAX_LENGTH = 99;
+const SHOPEE_PARENT_SKU_MAX_LENGTH = 95;
 const JST_USER_SKU_MAX_LENGTH = JST_SKU_MAX_LENGTH - SKU_PREFIX_LENGTH;
 const SHOPEE_USER_SKU_MAX_LENGTH = SHOPEE_SKU_MAX_LENGTH - SKU_PREFIX_LENGTH;
 const SHOPEE_DESCRIPTION_MIN_LENGTH = 100;
@@ -1658,7 +1659,7 @@ async function handleUpdateTask(request, env, path, idx) {
   const body = await parseBody(request);
 
   if (idx.platform === 'shopee') {
-    const { template_profile_id, store_id, name, source_brief, product_type, main_description, reference_title, reference_image, auxiliary_images, generate_count, mode, category_id, cover_image, images, length_cm, width_cm, height_cm, dimension_mode, gtin, variation_name1, variation_name2, variation_image_mode, size_chart_template_id, size_chart_image, pre_order_enabled, pre_order_dts, shipping_channels, variations } = body || {};
+    const { template_profile_id, store_id, name, source_brief, product_type, main_description, reference_title, reference_image, auxiliary_images, generate_count, mode, category_id, parent_sku, cover_image, images, length_cm, width_cm, height_cm, dimension_mode, gtin, variation_name1, variation_name2, variation_image_mode, size_chart_template_id, size_chart_image, pre_order_enabled, pre_order_dts, shipping_channels, variations } = body || {};
     const taskName = String(name || '').trim();
     if (!taskName) return error('任务名称不能为空', 400);
     if (taskName.length > 30) return error('任务名称不能超过30字符', 400);
@@ -1677,6 +1678,8 @@ async function handleUpdateTask(request, env, path, idx) {
     if (sourceBrief.length < 10 || sourceBrief.length > 2000) return error('商品事实必须为10~2000字符', 400);
     const shopeeGenerateCount = parseInt(generate_count);
     if (!Number.isInteger(shopeeGenerateCount) || shopeeGenerateCount < 1 || shopeeGenerateCount > MAX_GENERATE_COUNT) return error(`生成套数必须为1~${MAX_GENERATE_COUNT}`, 400);
+    const parentSku = String(parent_sku || '').trim();
+    if (parentSku.length > SHOPEE_PARENT_SKU_MAX_LENGTH) return error(`Parent SKU 不能超过${SHOPEE_PARENT_SKU_MAX_LENGTH}字符`, 400);
     if (!Array.isArray(variations) || variations.length < 1 || variations.length > MAX_SHOPEE_VARIATIONS) return error(`Shopee变体数量必须为1~${MAX_SHOPEE_VARIATIONS}`, 400);
     if (!['single','one','two'].includes(product_type)) return error('商品规格结构必须为single、one或two', 400);
     const productType = product_type;
@@ -1805,6 +1808,7 @@ async function handleUpdateTask(request, env, path, idx) {
       generate_count: shopeeGenerateCount,
       mode: mode === 'dedup' ? 'dedup' : 'full',
       main_image_count: 9, detail_image_count: 0,
+      parent_sku: parentSku,
       cover_image: cover_image || '', images: images || '[]',
       weight_kg: 0.2, length_cm: dimensionMode === 'global' ? globalDimensions[0] : null, width_cm: dimensionMode === 'global' ? globalDimensions[1] : null, height_cm: dimensionMode === 'global' ? globalDimensions[2] : null, dimension_mode: dimensionMode, gtin: gtin || '',
       variation_name1: productType === 'single' ? '' : variationName1, variation_name2: productType === 'two' ? variationName2 : '',
@@ -3930,9 +3934,6 @@ async function shopeeHandleExport(env, taskId) {
   function styleCodeFor(subTask, setIdx) {
     return subTask.id ? subTask.id.slice(0, 8) : `${taskId.slice(0, 8)}-S${setIdx + 1}`;
   }
-  function parentSkuFor(subTask, setIdx) {
-    return product.parent_sku ? `${product.parent_sku}-${setIdx + 1}` : styleCodeFor(subTask, setIdx);
-  }
   function skuCodeFor(subTask, setIdx, v, variationsIdx) {
     const randomId = styleCodeFor(subTask, setIdx);
     return v.sku ? `${randomId}-${v.sku}` : `${randomId}-V${variationsIdx + 1}`;
@@ -3986,7 +3987,7 @@ async function shopeeHandleExport(env, taskId) {
       : [product.length_cm, product.width_cm, product.height_cm];
     var images = productImages(setIdx, subTask.id || '');
     var coverImage = getImg(setIdx, subTask.id || '', 'main', 1);
-    var parentSku = parentSkuFor(subTask, setIdx);
+    var parentSku = shopeeParentSku(product.parent_sku, subTask.id, setIdx);
     var option1 = option1For(subTask, v);
     var option2 = option2For(v);
     var skuCode = skuCodeFor(subTask, setIdx, v, variationsIdx);
@@ -3996,7 +3997,7 @@ async function shopeeHandleExport(env, taskId) {
       ps_product_name: subTask.title || '',
       ps_product_description: productDescriptionFor(subTask),
       ps_sku_parent_short: parentSku,
-      et_title_variation_integration_no: isSingleProduct ? '' : parentSku,
+      et_title_variation_integration_no: shopeeVariationIntegrationNo(subTask.id, isSingleProduct),
       et_title_variation_1: isSingleProduct ? '' : product.variation_name1_export || '',
       et_title_option_for_variation_1: option1,
       et_title_image_per_variation: getSkuUrl(setIdx, subTask.id || '', variationsIdx, v),
