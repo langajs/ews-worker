@@ -10,9 +10,12 @@ import {
 } from '../src/shopee-template.js';
 
 test('keeps custom Parent SKU separate from the sub-task integration number', () => {
-  assert.equal(shopeeParentSku('SHOP-PARENT', 'subT1234-full-id', 0), 'SHOP-PARENT-1');
-  assert.equal(shopeeParentSku('SHOP-PARENT', 'subT5678-full-id', 1), 'SHOP-PARENT-2');
+  assert.equal(shopeeParentSku('SHOP-PARENT', 'subT1234-full-id', 0, 'repeat'), 'SHOP-PARENT');
+  assert.equal(shopeeParentSku('SHOP-PARENT', 'subT5678-full-id', 1, 'repeat'), 'SHOP-PARENT');
+  assert.equal(shopeeParentSku('SHOP-PARENT', 'subT1234-full-id', 0, 'numbered'), 'SHOP-PARENT-1');
+  assert.equal(shopeeParentSku('SHOP-PARENT', 'subT5678-full-id', 1, 'numbered'), 'SHOP-PARENT-2');
   assert.equal(shopeeParentSku('', 'subT1234-full-id', 0), 'subT1234');
+  assert.equal(shopeeParentSku('', 'subT1234-full-id', 0, 'repeat'), 'subT1234');
   assert.equal(shopeeVariationIntegrationNo('subT1234-full-id'), 'subT1234');
   assert.equal(shopeeVariationIntegrationNo('subT1234-full-id', true), '');
 });
@@ -33,12 +36,12 @@ test('writes custom Parent SKU and sub-task integration number to separate colum
   };
   const subTaskId = 'subT1234-full-id';
   const output = buildShopeeWorkbook(source, manifest, [{
-    ps_sku_parent_short: shopeeParentSku('SHOP-PARENT', subTaskId, 0),
+    ps_sku_parent_short: shopeeParentSku('SHOP-PARENT', subTaskId, 0, 'repeat'),
     et_title_variation_integration_no: shopeeVariationIntegrationNo(subTaskId),
   }]);
   const xml = strFromU8(unzipSync(output)[sheetPath]);
 
-  assert.match(xml, /<c r="A7" t="inlineStr"><is><t xml:space="preserve">SHOP-PARENT-1<\/t><\/is><\/c>/);
+  assert.match(xml, /<c r="A7" t="inlineStr"><is><t xml:space="preserve">SHOP-PARENT<\/t><\/is><\/c>/);
   assert.match(xml, /<c r="B7" t="inlineStr"><is><t xml:space="preserve">subT1234<\/t><\/is><\/c>/);
 });
 

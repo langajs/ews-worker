@@ -1659,7 +1659,7 @@ async function handleUpdateTask(request, env, path, idx) {
   const body = await parseBody(request);
 
   if (idx.platform === 'shopee') {
-    const { template_profile_id, store_id, name, source_brief, product_type, main_description, reference_title, reference_image, auxiliary_images, generate_count, mode, category_id, parent_sku, cover_image, images, length_cm, width_cm, height_cm, dimension_mode, gtin, variation_name1, variation_name2, variation_image_mode, size_chart_template_id, size_chart_image, pre_order_enabled, pre_order_dts, shipping_channels, variations } = body || {};
+    const { template_profile_id, store_id, name, source_brief, product_type, main_description, reference_title, reference_image, auxiliary_images, generate_count, mode, category_id, parent_sku, parent_sku_mode, cover_image, images, length_cm, width_cm, height_cm, dimension_mode, gtin, variation_name1, variation_name2, variation_image_mode, size_chart_template_id, size_chart_image, pre_order_enabled, pre_order_dts, shipping_channels, variations } = body || {};
     const taskName = String(name || '').trim();
     if (!taskName) return error('任务名称不能为空', 400);
     if (taskName.length > 30) return error('任务名称不能超过30字符', 400);
@@ -1680,6 +1680,8 @@ async function handleUpdateTask(request, env, path, idx) {
     if (!Number.isInteger(shopeeGenerateCount) || shopeeGenerateCount < 1 || shopeeGenerateCount > MAX_GENERATE_COUNT) return error(`生成套数必须为1~${MAX_GENERATE_COUNT}`, 400);
     const parentSku = String(parent_sku || '').trim();
     if (parentSku.length > SHOPEE_PARENT_SKU_MAX_LENGTH) return error(`Parent SKU 不能超过${SHOPEE_PARENT_SKU_MAX_LENGTH}字符`, 400);
+    const parentSkuMode = parent_sku_mode === undefined ? 'numbered' : String(parent_sku_mode);
+    if (!['repeat', 'numbered'].includes(parentSkuMode)) return error('Parent SKU 模式无效', 400);
     if (!Array.isArray(variations) || variations.length < 1 || variations.length > MAX_SHOPEE_VARIATIONS) return error(`Shopee变体数量必须为1~${MAX_SHOPEE_VARIATIONS}`, 400);
     if (!['single','one','two'].includes(product_type)) return error('商品规格结构必须为single、one或two', 400);
     const productType = product_type;
@@ -1808,7 +1810,7 @@ async function handleUpdateTask(request, env, path, idx) {
       generate_count: shopeeGenerateCount,
       mode: mode === 'dedup' ? 'dedup' : 'full',
       main_image_count: 9, detail_image_count: 0,
-      parent_sku: parentSku,
+      parent_sku: parentSku, parent_sku_mode: parentSkuMode,
       cover_image: cover_image || '', images: images || '[]',
       weight_kg: 0.2, length_cm: dimensionMode === 'global' ? globalDimensions[0] : null, width_cm: dimensionMode === 'global' ? globalDimensions[1] : null, height_cm: dimensionMode === 'global' ? globalDimensions[2] : null, dimension_mode: dimensionMode, gtin: gtin || '',
       variation_name1: productType === 'single' ? '' : variationName1, variation_name2: productType === 'two' ? variationName2 : '',
@@ -3987,7 +3989,7 @@ async function shopeeHandleExport(env, taskId) {
       : [product.length_cm, product.width_cm, product.height_cm];
     var images = productImages(setIdx, subTask.id || '');
     var coverImage = getImg(setIdx, subTask.id || '', 'main', 1);
-    var parentSku = shopeeParentSku(product.parent_sku, subTask.id, setIdx);
+    var parentSku = shopeeParentSku(product.parent_sku, subTask.id, setIdx, product.parent_sku_mode);
     var option1 = option1For(subTask, v);
     var option2 = option2For(v);
     var skuCode = skuCodeFor(subTask, setIdx, v, variationsIdx);

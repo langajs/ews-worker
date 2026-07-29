@@ -395,6 +395,7 @@ CREATE TABLE IF NOT EXISTS ews_shopee_products (
   main_image_count INTEGER NOT NULL DEFAULT 9,
   detail_image_count INTEGER NOT NULL DEFAULT 0,
   parent_sku TEXT NOT NULL DEFAULT '',
+  parent_sku_mode TEXT NOT NULL DEFAULT 'numbered', -- repeat / numbered
   cover_image TEXT NOT NULL DEFAULT '',
   images TEXT NOT NULL DEFAULT '[]',         -- JSON: 商品图片 URL 数组
   weight_kg REAL NOT NULL DEFAULT 0,

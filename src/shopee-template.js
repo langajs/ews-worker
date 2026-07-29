@@ -32,9 +32,9 @@ const GLOBAL_ATTRIBUTE_TOKEN = /^ps_product_global_attribute\.(\d+)$/;
 
 export const SHOPEE_TEMPLATE_SEMANTIC_KEYS = Object.freeze([...TOKEN_SEMANTICS].sort());
 
-export function shopeeParentSku(parentSku, subTaskId, setIndex) {
+export function shopeeParentSku(parentSku, subTaskId, setIndex, mode = 'numbered') {
   const customSku = String(parentSku || '').trim();
-  if (customSku) return `${customSku}-${Number(setIndex) + 1}`;
+  if (customSku) return mode === 'repeat' ? customSku : `${customSku}-${Number(setIndex) + 1}`;
   return String(subTaskId || '').slice(0, 8);
 }
 
