@@ -1,7 +1,8 @@
 {
   "type": "module",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "deploy": "npx wrangler d1 migrations apply baseapac --remote && npx wrangler deploy"
   },
   "dependencies": {
     "aws4fetch": "^1.0.20",

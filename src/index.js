@@ -33,6 +33,7 @@ import {
   shopeeSaveImage, shopeeCheckParentCompletion, shopeeRefundCredits, shopeeUpdateVariationExports,
 } from './db.js';
 import { generateToken, hashPassword, verifyPassword, authenticateRequest, DEFAULT_PASSWORD } from './auth.js';
+import { runAuthenticatedRoute } from './route-auth.js';
 import {
   buildShopeeWorkbook, compareShopeeTemplateSemantics, parseShopeeTemplate, sha256Hex,
   shopeeParentSku, shopeeVariationIntegrationNo, SHOPEE_TEMPLATE_SEMANTIC_KEYS,
@@ -216,10 +217,13 @@ function exportPriceForVariant(variant, taskId, setIdx, variantIdx) {
 }
 
 async function requireAuth(request, env, handler) {
-  const auth = await authenticateRequest(request, env);
-  if (!auth.valid) return error('未登录或登录已过期', 401);
-  request.auth = auth;
-  return await handler();
+  return runAuthenticatedRoute(request, env, handler, authenticateRequest, {
+    unauthorized: () => error('未登录或登录已过期', 401),
+    failed: err => {
+      console.error('Authenticated route error:', err);
+      return error(err.message || 'Internal Server Error', 500);
+    },
+  });
 }
 
 async function requireTaskAccess(request, env, path, handler) {
