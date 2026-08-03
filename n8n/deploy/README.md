@@ -19,7 +19,7 @@ install-ews-node2.cmd
 安装器会自动完成以下操作：
 
 1. 检查 Docker Desktop/CLI，缺失时自动下载官方安装器并安装，未启动时自动启动。
-2. 复用本地镜像；缺少时拉取 `n8nio/n8n:2.25.7` 与 Valkey，并从 CMD 内嵌源码构建图片服务。
+2. 始终拉取最新 `n8nio/n8n:2.25.7` 与 Valkey 镜像，并从 CMD 内嵌源码重新构建图片服务（已部署节点也会更新到最新）。
 3. 创建 Valkey 持久化队列、图片 API、图片 Worker，以及节点专属 Docker network、volume 和 n8n 容器。
 4. 持久化 `N8N_ENCRYPTION_KEY`，初始化 n8n owner。
 5. 导入三组 `HTTP Header Auth` 凭证。
@@ -31,7 +31,7 @@ install-ews-node2.cmd
 
 n8n owner 密码必须为 8-64 位，并至少包含一个大写字母和一个数字。安装器会等待管理 API 完整就绪，并在导入工作流前确认 owner 已初始化；中断后可直接重新执行同一脚本。
 
-默认图片服务地址 `http://ews-image-sidecar:3000` 会触发闭环部署：安装器内嵌固定版本源码，在新主机构建 `ews-image-service:2026.07.28`，创建 `ews-image-valkey`、`ews-image-sidecar`、`ews-image-worker` 和具名 Valkey volume。重复执行时会复用健康服务；只有明确填写外部 HTTP/HTTPS 端点时才跳过本机图片栈。
+默认图片服务地址 `http://ews-image-sidecar:3000` 会触发闭环部署：安装器内嵌固定版本源码，在新主机构建 `ews-image-service:2026.07.28`，创建 `ews-image-valkey`、`ews-image-sidecar`、`ews-image-worker` 和具名 Valkey volume。重复执行时会用内嵌源码重建最新镜像并重新初始化；只有明确填写外部 HTTP/HTTPS 端点时才跳过本机图片栈。
 
 ## Cloudflare Tunnel
 
@@ -48,7 +48,7 @@ http://n8n:5678
 ## 安全边界
 
 - 密钥只在浏览器本地注入下载脚本，不通过 EWS API 上传。
-- 下载脚本包含 Base64 编码的敏感信息，不等于加密。部署后必须删除。
+- 下载脚本包含明文敏感信息（密码、模型密钥和回调密钥）。部署后必须删除。
 - 模型密钥导入 n8n 后，安装器会删除宿主机和容器内的临时凭证文件。
 - 不要将生成的安装器提交到 Git、网盘或聊天工具。
 - 原始安装器模板不包含真实密钥，下载接口与 Wiki 接口均要求管理员鉴权。

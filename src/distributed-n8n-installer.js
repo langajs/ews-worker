@@ -25,7 +25,9 @@ import sidecarWorker from '../n8n/image-sidecar/src/worker.js';
 
 const WORKFLOW_PLACEHOLDER = '__EWS_WORKFLOW_BUNDLE_B64__';
 const IMAGE_SIDECAR_PLACEHOLDER = '__EWS_IMAGE_SIDECAR_BUNDLE_B64__';
-const PAYLOAD_PLACEHOLDER = '__EWS_POWERSHELL_PAYLOAD_LINES__';
+const PAYLOAD_PLACEHOLDER = '__EWS_POWERSHELL_PAYLOAD__';
+const PS1_BEGIN_MARKER = '__EWS_PS1_BEGIN__';
+const PS1_END_MARKER = '__EWS_PS1_END__';
 
 function workflowEntry(name, content) {
   const parsed = JSON.parse(content);
@@ -81,6 +83,14 @@ function utf8ToBase64(value) {
   return btoa(binary);
 }
 
+function bundleAssignmentLines(variable, value) {
+  const chunks = value.match(/.{1,4000}/g) || [''];
+  return [
+    `$${variable} = ''`,
+    ...chunks.map(chunk => `$${variable} += '${chunk}'`),
+  ].join('\r\n');
+}
+
 export function getDistributedN8nInstallerScript() {
   if (!INSTALLER_TEMPLATE.includes(WORKFLOW_PLACEHOLDER)) {
     throw new Error('Distributed n8n installer workflow placeholder is missing');
@@ -94,13 +104,12 @@ export function getDistributedN8nInstallerScript() {
   const workflowBundle = utf8ToBase64(JSON.stringify(WORKFLOWS));
   const imageSidecarBundle = utf8ToBase64(JSON.stringify(IMAGE_SIDECAR_FILES));
   const powershellPayload = INSTALLER_TEMPLATE
-    .replace(WORKFLOW_PLACEHOLDER, workflowBundle)
-    .replace(IMAGE_SIDECAR_PLACEHOLDER, imageSidecarBundle);
-  const payloadBase64 = utf8ToBase64(powershellPayload);
-  const payloadLines = payloadBase64.match(/.{1,7000}/g).map((line, index) => (
-    `${index === 0 ? '>' : '>>'} "%EWS_PAYLOAD_B64%" echo ${line}`
-  )).join('\r\n');
-  return CMD_TEMPLATE.replace(PAYLOAD_PLACEHOLDER, payloadLines);
+    .replace(WORKFLOW_PLACEHOLDER, () => bundleAssignmentLines('WorkflowBundleJson', workflowBundle))
+    .replace(IMAGE_SIDECAR_PLACEHOLDER, () => bundleAssignmentLines('ImageServiceBundleJson', imageSidecarBundle));
+  const payload = `${PS1_BEGIN_MARKER}\n${powershellPayload.trim()}\n${PS1_END_MARKER}`;
+  const generated = CMD_TEMPLATE.replace(PAYLOAD_PLACEHOLDER, () => payload);
+  // cmd.exe 对 LF-only 批处理文件的 goto 标签扫描存在缺陷，统一输出 CRLF
+  return generated.replace(/\r?\n/g, '\r\n');
 }
 
 export const DISTRIBUTED_N8N_INSTALLER_FILENAME = 'install-ews-node.cmd';

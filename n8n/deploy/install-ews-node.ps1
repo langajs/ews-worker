@@ -6,13 +6,6 @@ $N8nImage = 'n8nio/n8n:2.25.7'
 $ImageServiceImage = 'ews-image-service:2026.07.28'
 $ValkeyImage = 'valkey/valkey:8-alpine'
 
-function Decode-Value([string]$Value) {
-  if (-not $Value -or $Value.StartsWith('__EWS_')) {
-    throw 'Installer parameters are incomplete. Generate this script from the EWS admin deployment page.'
-  }
-  return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Value))
-}
-
 function Find-DockerCli {
   $command = Get-Command docker.exe -ErrorAction SilentlyContinue
   if ($command) { return [string]$command.Source }
@@ -152,11 +145,8 @@ function Wait-DockerDesktop([int]$Attempts = 90) {
 }
 
 function Ensure-DockerImage([string]$Image) {
-  if (Test-DockerCommand -Arguments @('image', 'inspect', $Image)) {
-    Write-Host "Using local Docker image: $Image"
-    return
-  }
-  Write-Host "Pulling Docker image: $Image" -ForegroundColor Yellow
+  # 始终拉取最新镜像：已部署过的节点重新执行脚本时也会更新到最新版本
+  Write-Host "Updating Docker image: $Image" -ForegroundColor Yellow
   & docker pull $Image | Out-Host
   if ($LASTEXITCODE -ne 0) { throw "Failed to pull Docker image: $Image" }
 }
@@ -270,14 +260,11 @@ function Install-LocalImageService([string]$BundleJson, [string]$CallbackSecret,
   $workerContainer = 'ews-image-worker'
 
   New-Item -ItemType Directory -Path $serviceRoot -Force | Out-Null
-  if (Test-DockerCommand -Arguments @('image', 'inspect', $ImageServiceImage)) {
-    Write-Host "Using local Docker image: $ImageServiceImage"
-  } else {
-    Write-Host 'Preparing the bundled EWS image service...' -ForegroundColor Yellow
-    Write-ImageServiceSource $BundleJson $sourceRoot
-    & docker build --tag $ImageServiceImage $sourceRoot | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw 'Failed to build the EWS image service.' }
-  }
+  # 始终用内嵌源码重新构建：已部署过的节点也会更新到最新镜像
+  Write-Host 'Preparing the bundled EWS image service...' -ForegroundColor Yellow
+  Write-ImageServiceSource $BundleJson $sourceRoot
+  & docker build --tag $ImageServiceImage $sourceRoot | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw 'Failed to build the EWS image service.' }
   Ensure-DockerImage $ValkeyImage
 
   if (-not (Test-DockerCommand -Arguments @('network', 'inspect', $networkName))) {
@@ -354,36 +341,24 @@ function Install-LocalImageService([string]$BundleJson, [string]$CallbackSecret,
 }
 
 function Ensure-LocalImageService([string]$BundleJson, [string]$CallbackSecret, [string]$TicketOrigin) {
-  $containerName = 'ews-image-sidecar'
-  $networkName = Wait-DockerContainerNetwork $containerName 3
-  if ($networkName) {
-    foreach ($container in @('ews-image-valkey', $containerName, 'ews-image-worker')) {
-      if (Test-DockerCommand -Arguments @('container', 'inspect', $container)) {
-        Test-DockerCommand -Arguments @('start', $container) | Out-Null
-      }
-    }
-    if (Wait-LocalImageService $containerName $CallbackSecret 30) {
-      Write-Host "Reusing the local image service on Docker network: $networkName" -ForegroundColor Green
-      return $networkName
-    }
-    Write-Host 'The existing image service is not healthy and will be replaced.' -ForegroundColor Yellow
-  }
+  # 已部署过的节点也始终重新构建并初始化，确保使用最新镜像
+  Write-Host 'The local image service will be rebuilt with the latest bundled source.' -ForegroundColor Yellow
   return Install-LocalImageService $BundleJson $CallbackSecret $TicketOrigin
 }
 
-$NodeName = Decode-Value $env:EWS_NODE_NAME_B64
-$Domain = Decode-Value $env:EWS_DOMAIN_B64
-$OwnerEmail = Decode-Value $env:EWS_OWNER_EMAIL_B64
-$OwnerPassword = Decode-Value $env:EWS_OWNER_PASSWORD_B64
-$GrsaiKey = (Decode-Value $env:EWS_GRSAI_KEY_B64).Trim()
-$DeepseekKey = (Decode-Value $env:EWS_DEEPSEEK_KEY_B64).Trim()
-$BackupKey = (Decode-Value $env:EWS_BACKUP_KEY_B64).Trim()
-$ImageServiceInput = (Decode-Value $env:EWS_IMAGE_SERVICE_URL_B64).Trim()
-$CallbackSecret = (Decode-Value $env:EWS_CALLBACK_SECRET_B64).Trim()
-$TicketOriginInput = (Decode-Value $env:EWS_TICKET_ORIGIN_B64).Trim()
-$WorkflowBundleJson = Decode-Value '__EWS_WORKFLOW_BUNDLE_B64__'
-$ImageServiceBundleJson = Decode-Value '__EWS_IMAGE_SIDECAR_BUNDLE_B64__'
-$Port = [int]$env:EWS_PORT
+$NodeName = '__EWS_NODE_NAME__'
+$Domain = '__EWS_DOMAIN__'
+$OwnerEmail = '__EWS_OWNER_EMAIL__'
+$OwnerPassword = '__EWS_OWNER_PASSWORD__'
+$GrsaiKey = '__EWS_GRSAI_KEY__'.Trim()
+$DeepseekKey = '__EWS_DEEPSEEK_KEY__'.Trim()
+$BackupKey = '__EWS_BACKUP_KEY__'.Trim()
+$ImageServiceInput = '__EWS_IMAGE_SERVICE_URL__'.Trim()
+$CallbackSecret = '__EWS_CALLBACK_SECRET__'.Trim()
+$TicketOriginInput = '__EWS_TICKET_ORIGIN__'.Trim()
+$WorkflowBundleJson = __EWS_WORKFLOW_BUNDLE_B64__
+$ImageServiceBundleJson = __EWS_IMAGE_SIDECAR_BUNDLE_B64__
+$Port = [int]'__EWS_PORT__'
 
 if ($NodeName -notmatch '^[a-z0-9][a-z0-9-]{0,31}$') { throw 'Node name must contain only lowercase letters, numbers, and hyphens.' }
 if ($Domain -notmatch '^[A-Za-z0-9.-]+$' -or $Domain.Contains('..')) { throw 'Public domain is invalid.' }

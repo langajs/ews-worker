@@ -34,7 +34,7 @@ const SECTIONS = Object.freeze([
     number: '01',
     title: '生成安装脚本',
     body: '填写页面中的节点信息、n8n 管理员账号和三组模型密钥，下载 CMD 后直接双击执行。回调密钥由管理员配置自动注入。',
-    bullets: ['宿主机只需要 Windows 10/11，Docker Desktop 缺失时自动下载并安装', '已有 Docker Engine 和镜像直接复用，缺少的镜像自动拉取', '自动部署 Valkey、图片 API、图片 Worker 和持久化队列', '自动初始化 owner、导入三组凭证并发布 9 个工作流'],
+    bullets: ['宿主机只需要 Windows 10/11，Docker Desktop 缺失时自动下载并安装', '始终拉取最新 n8n 与 Valkey 镜像，并重建图片服务', '自动部署 Valkey、图片 API、图片 Worker 和持久化队列', '自动初始化 owner、导入三组凭证并发布 9 个工作流'],
   },
   {
     id: 'cloudflare',
@@ -55,7 +55,7 @@ const SECTIONS = Object.freeze([
     number: '04',
     title: '验收与清理',
     body: '访问节点域名确认 n8n 可用，再创建最小 Shopee 与聚水潭任务验证回调。成功后删除下载的安装脚本。',
-    bullets: ['安装脚本包含经过 Base64 编码的模型密钥、回调密钥和 owner 密码', '模型密钥最终只保存在 n8n 加密凭证库', 'n8n 状态位于 %LOCALAPPDATA%\\EWS\\n8n-nodes，图片服务构建源位于 %LOCALAPPDATA%\\EWS\\image-service'],
+    bullets: ['安装脚本包含明文模型密钥、回调密钥和 owner 密码', '模型密钥最终只保存在 n8n 加密凭证库', 'n8n 状态位于 %LOCALAPPDATA%\\EWS\\n8n-nodes，图片服务构建源位于 %LOCALAPPDATA%\\EWS\\image-service'],
   },
 ]);
 
