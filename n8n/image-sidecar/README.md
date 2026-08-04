@@ -89,13 +89,13 @@ docker compose down
 | `JOB_ATTEMPTS` | `4` | 图片处理重试次数 |
 | `CALLBACK_ATTEMPTS` | `5` | 每次任务内的 Worker callback 重试次数 |
 | `SOURCE_HOST_ALLOWLIST` | 空 | 可选逗号分隔的图片源域名白名单 |
-| `ALLOW_BENCHMARK_DNS` | `false` | 出口代理将公网 DNS 映射到 198.18.0.0/15 时才启用 |
+| `ALLOW_BENCHMARK_DNS` | `false` | 出口代理将公网 DNS 映射到 `198.18.0.0/15` 或 `fdfe:dcba:9876::/48` 时才启用 |
 | `MAX_SOURCE_BYTES` | `16777216` | 最大源文件大小 |
 | `MAX_OUTPUT_BYTES` | `1900000` | 最大输出文件大小 |
 
 单机可接收 100～200 个并发 HTTP 请求，但不要把 `WORKER_CONCURRENCY` 设置为 100～200。`8 vCPU / 16GB RAM` 建议从 `8` 开始，根据 CPU、RSS、下载带宽和队列积压压测调整。
 
-Docker Desktop 或透明出口代理可能把公网域名解析为 `198.18.0.0/15`。只有确认该网段由宿主机代理接管时才设置 `ALLOW_BENCHMARK_DNS=true`；该开关只放行公网域名的 DNS 结果，直接使用 `198.18.*` URL 仍会被拒绝。
+Docker Desktop 或透明出口代理可能把公网域名解析为 `198.18.0.0/15` 或 `fdfe:dcba:9876::/48`。只有确认这些网段由宿主机代理接管时才设置 `ALLOW_BENCHMARK_DNS=true`；该开关只放行公网域名的 DNS 结果，直接使用这些 fake-IP 的 URL 仍会被拒绝。
 
 ## 故障恢复
 

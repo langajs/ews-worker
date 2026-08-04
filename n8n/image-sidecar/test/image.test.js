@@ -3,7 +3,7 @@ import test from 'node:test';
 import sharp from 'sharp';
 import { loadConfig } from '../src/config.js';
 import { encodeJpeg } from '../src/image.js';
-import { parsePublicSourceUrl, secretsEqual, validateImageJob } from '../src/security.js';
+import { assertPublicResolution, parsePublicSourceUrl, secretsEqual, validateImageJob } from '../src/security.js';
 
 const config = {
   jpegQuality: 88,
@@ -47,9 +47,27 @@ test('拒绝内网图片源', () => {
   assert.throws(() => parsePublicSourceUrl('http://192.168.1.2/image.png', config), /不允许访问内网/);
   assert.throws(() => parsePublicSourceUrl('http://[::1]/image.png', config), /不允许访问内网/);
   assert.throws(() => parsePublicSourceUrl('http://198.18.1.30/image.png', { ...config, allowBenchmarkDns: true }), /不允许访问内网/);
+  assert.throws(() => parsePublicSourceUrl('http://[fdfe:dcba:9876::168]/image.png', { ...config, allowBenchmarkDns: true }), /不允许访问内网/);
 });
 
 test('代理DNS网段必须显式启用', () => {
   assert.equal(loadConfig({ IMAGE_SERVICE_SECRET: 'secret' }).allowBenchmarkDns, false);
   assert.equal(loadConfig({ IMAGE_SERVICE_SECRET: 'secret', ALLOW_BENCHMARK_DNS: 'true' }).allowBenchmarkDns, true);
+});
+
+test('代理DNS兼容fake IPv4和IPv6，但不放行真实内网', async () => {
+  const proxyConfig = { ...config, allowBenchmarkDns: true };
+  await assert.rejects(() => assertPublicResolution(new URL('https://example.com/image.png'), config,
+    async () => [{ address: 'fdfe:dcba:9876::168', family: 6 }]), /fdfe:dcba:9876::168/);
+  await assert.doesNotReject(() => assertPublicResolution(new URL('https://example.com/image.png'), proxyConfig,
+    async () => [
+      { address: '198.18.1.105', family: 4 },
+      { address: 'fdfe:dcba:9876::168', family: 6 },
+    ]));
+  await assert.doesNotReject(() => assertPublicResolution(new URL('https://example.com/image.png'), proxyConfig,
+    async () => [{ address: '::ffff:198.18.1.30', family: 6 }]));
+  await assert.rejects(() => assertPublicResolution(new URL('https://example.com/image.png'), proxyConfig,
+    async () => [{ address: '192.168.1.30', family: 4 }]), /192\.168\.1\.30/);
+  await assert.rejects(() => assertPublicResolution(new URL('https://example.com/image.png'), proxyConfig,
+    async () => [{ address: 'fd00::1', family: 6 }]), /fd00::1/);
 });

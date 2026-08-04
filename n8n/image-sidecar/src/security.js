@@ -25,9 +25,10 @@ function isPrivateAddress(address, options = {}) {
   const family = isIP(normalized);
   if (family === 4) return isPrivateIpv4(normalized, options);
   if (family !== 6) return true;
-  if (normalized === '::' || normalized === '::1' || normalized.startsWith('fc') || normalized.startsWith('fd')) return true;
+  const allowedProxyIpv6 = options.allowBenchmarkDns && normalized.startsWith('fdfe:dcba:9876:');
+  if (normalized === '::' || normalized === '::1' || normalized.startsWith('fc') || (normalized.startsWith('fd') && !allowedProxyIpv6)) return true;
   if (/^fe[89ab]/.test(normalized)) return true;
-  if (normalized.startsWith('::ffff:')) return isPrivateIpv4(normalized.slice(7));
+  if (normalized.startsWith('::ffff:')) return isPrivateIpv4(normalized.slice(7), options);
   return false;
 }
 
@@ -50,16 +51,16 @@ export function parsePublicSourceUrl(value, config) {
   return parsed;
 }
 
-export async function assertPublicResolution(url, config) {
+export async function assertPublicResolution(url, config, resolve = lookup) {
   const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (isIP(hostname)) return;
   let addresses;
-  try { addresses = await lookup(hostname, { all: true, verbatim: true }); }
+  try { addresses = await resolve(hostname, { all: true, verbatim: true }); }
   catch (_) { throw new ProcessingError('图片源域名解析失败', true); }
   const resolutionOptions = { allowBenchmarkDns: config.allowBenchmarkDns === true };
-  if (!addresses.length || addresses.some(item => isPrivateAddress(item.address, resolutionOptions))) {
-    throw new ProcessingError('图片源URL解析到内网地址', false);
-  }
+  if (!addresses.length) throw new ProcessingError('图片源域名没有可用地址', true);
+  const blocked = addresses.find(item => isPrivateAddress(item.address, resolutionOptions));
+  if (blocked) throw new ProcessingError(`图片源URL解析到内网地址: ${blocked.address}`, false);
 }
 
 export function validateImageJob(body, config) {

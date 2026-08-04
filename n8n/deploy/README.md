@@ -43,7 +43,7 @@ install-ews-node2.cmd
 
 默认图片服务地址 `http://ews-image-sidecar:3000` 会触发本机部署：安装器使用内嵌源码构建 `ews-image-service:2026.07.28`，创建 `ews-image-valkey`、`ews-image-sidecar`、`ews-image-worker` 和 Valkey volume。仅在明确填写外部 HTTP/HTTPS 端点时跳过本机图片服务。
 
-一键部署的图片服务允许公网域名经宿主机透明代理解析到 `198.18.0.0/15` fake-IP；直接使用该网段的 URL 以及其他内网、环回和 link-local 地址仍会被拒绝。
+一键部署的图片服务允许公网域名经宿主机透明代理解析到 `198.18.0.0/15` 或 `fdfe:dcba:9876::/48` fake-IP；直接使用这些网段的 URL 以及其他内网、环回和 link-local 地址仍会被拒绝。
 
 ## Cloudflare Tunnel
 
