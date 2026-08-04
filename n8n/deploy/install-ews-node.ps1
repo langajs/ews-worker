@@ -212,13 +212,19 @@ function Wait-LocalImageService([string]$ContainerName, [string]$CallbackSecret,
   return $false
 }
 
-function Write-ImageServiceSource([string]$BundleJson, [string]$SourceRoot) {
+function Write-ImageServiceSource([string]$BundleBase64, [string]$SourceRoot) {
   $expectedFiles = @(
     'Dockerfile', 'package.json', 'package-lock.json',
     'src/app.js', 'src/config.js', 'src/errors.js', 'src/image.js', 'src/pipeline.js',
     'src/queue.js', 'src/security.js', 'src/server.js', 'src/worker-api.js', 'src/worker.js'
   )
-  $parsedEntries = $BundleJson | ConvertFrom-Json
+  try {
+    $bundleBytes = [Convert]::FromBase64String($BundleBase64)
+    $bundleJson = [Text.Encoding]::UTF8.GetString($bundleBytes)
+    $parsedEntries = $bundleJson | ConvertFrom-Json
+  } catch {
+    throw "Image service bundle is invalid: $($_.Exception.Message)"
+  }
   $entries = @($parsedEntries)
   if ($entries.Count -ne $expectedFiles.Count) {
     throw "Image service bundle is incomplete: expected $($expectedFiles.Count) files, found $($entries.Count)."
@@ -249,7 +255,7 @@ function Write-ImageServiceSource([string]$BundleJson, [string]$SourceRoot) {
   }
 }
 
-function Install-LocalImageService([string]$BundleJson, [string]$CallbackSecret, [string]$TicketOrigin) {
+function Install-LocalImageService([string]$BundleBase64, [string]$CallbackSecret, [string]$TicketOrigin) {
   $serviceRoot = Join-Path (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'EWS') 'image-service'
   $sourceRoot = Join-Path $serviceRoot 'source'
   $envFile = Join-Path $serviceRoot 'image-service.env'
@@ -262,7 +268,7 @@ function Install-LocalImageService([string]$BundleJson, [string]$CallbackSecret,
   New-Item -ItemType Directory -Path $serviceRoot -Force | Out-Null
   # 始终用内嵌源码重新构建：已部署过的节点也会更新到最新镜像
   Write-Host 'Preparing the bundled EWS image service...' -ForegroundColor Yellow
-  Write-ImageServiceSource $BundleJson $sourceRoot
+  Write-ImageServiceSource $BundleBase64 $sourceRoot
   & docker build --tag $ImageServiceImage $sourceRoot | Out-Host
   if ($LASTEXITCODE -ne 0) { throw 'Failed to build the EWS image service.' }
   Ensure-DockerImage $ValkeyImage
@@ -340,10 +346,10 @@ function Install-LocalImageService([string]$BundleJson, [string]$CallbackSecret,
   return $networkName
 }
 
-function Ensure-LocalImageService([string]$BundleJson, [string]$CallbackSecret, [string]$TicketOrigin) {
+function Ensure-LocalImageService([string]$BundleBase64, [string]$CallbackSecret, [string]$TicketOrigin) {
   # 已部署过的节点也始终重新构建并初始化，确保使用最新镜像
   Write-Host 'The local image service will be rebuilt with the latest bundled source.' -ForegroundColor Yellow
-  return Install-LocalImageService $BundleJson $CallbackSecret $TicketOrigin
+  return Install-LocalImageService $BundleBase64 $CallbackSecret $TicketOrigin
 }
 
 $NodeName = '__EWS_NODE_NAME__'
@@ -353,7 +359,7 @@ $OwnerPassword = '__EWS_OWNER_PASSWORD__'
 $ImageServiceInput = '__EWS_IMAGE_SERVICE_URL__'.Trim()
 $CallbackSecret = '__EWS_CALLBACK_SECRET__'.Trim()
 $TicketOriginInput = '__EWS_TICKET_ORIGIN__'.Trim()
-$ImageServiceBundleJson = __EWS_IMAGE_SIDECAR_BUNDLE_B64__
+$ImageServiceBundleBase64 = __EWS_IMAGE_SIDECAR_BUNDLE_B64__
 $Port = [int]'__EWS_PORT__'
 
 if ($NodeName -notmatch '^[a-z0-9][a-z0-9-]{0,31}$') { throw 'Node name must contain only lowercase letters, numbers, and hyphens.' }
@@ -392,10 +398,10 @@ Ensure-DockerImage $N8nImage
 $ImageDockerNetwork = ''
 if ($imageUri.Host -eq 'ews-image-sidecar') {
   if (-not $CallbackSecret) { throw 'EWS callback secret is required to deploy the local image service.' }
-  $ImageDockerNetwork = Ensure-LocalImageService $ImageServiceBundleJson $CallbackSecret $TicketOrigin
+  $ImageDockerNetwork = Ensure-LocalImageService $ImageServiceBundleBase64 $CallbackSecret $TicketOrigin
 }
 $CallbackSecret = $null
-$ImageServiceBundleJson = $null
+$ImageServiceBundleBase64 = $null
 
 $StateRoot = Join-Path (Join-Path (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'EWS') 'n8n-nodes') $NodeName
 $EncryptionKeyFile = Join-Path $StateRoot 'encryption.key'

@@ -69,7 +69,7 @@ export function getDistributedN8nInstallerScript() {
   }
   const imageSidecarBundle = utf8ToBase64(JSON.stringify(IMAGE_SIDECAR_FILES));
   const powershellPayload = INSTALLER_TEMPLATE
-    .replace(IMAGE_SIDECAR_PLACEHOLDER, () => bundleAssignmentLines('ImageServiceBundleJson', imageSidecarBundle));
+    .replace(IMAGE_SIDECAR_PLACEHOLDER, () => bundleAssignmentLines('ImageServiceBundleBase64', imageSidecarBundle));
   const payload = `${PS1_BEGIN_MARKER}\n${powershellPayload.trim()}\n${PS1_END_MARKER}`;
   const generated = CMD_TEMPLATE.replace(PAYLOAD_PLACEHOLDER, () => payload);
   // cmd.exe 对 LF-only 批处理文件的 goto 标签扫描存在缺陷，统一输出 CRLF

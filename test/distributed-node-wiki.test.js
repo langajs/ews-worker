@@ -53,7 +53,7 @@ function buildInstaller() {
   const cmdTemplate = read('n8n/deploy/install-ews-node.cmd');
   const imageSidecar = imageSidecarFiles.map(name => ({ name, content: read(`n8n/image-sidecar/${name}`) }));
   const powershell = powershellTemplate
-    .replace('__EWS_IMAGE_SIDECAR_BUNDLE_B64__', () => bundleAssignmentLines('ImageServiceBundleJson', base64(JSON.stringify(imageSidecar))));
+    .replace('__EWS_IMAGE_SIDECAR_BUNDLE_B64__', () => bundleAssignmentLines('ImageServiceBundleBase64', base64(JSON.stringify(imageSidecar))));
   const payload = `__EWS_PS1_BEGIN__\n${powershell.trim()}\n__EWS_PS1_END__`;
   const generated = cmdTemplate.replace('__EWS_POWERSHELL_PAYLOAD__', () => payload);
   return generated.replace(/\r?\n/g, '\r\n');
@@ -93,6 +93,10 @@ test('one-click CMD deploys the runtime without workflows or model credentials',
   assert.doesNotMatch(powershellTemplate, /Reusing the local image service/);
   assert.match(powershellTemplate, /function Wait-DockerContainerNetwork/);
   assert.match(powershellTemplate, /function Write-ImageServiceSource/);
+  assert.match(powershellTemplate, /\[Convert\]::FromBase64String\(\$BundleBase64\)/);
+  assert.match(powershellTemplate, /\[Text\.Encoding\]::UTF8\.GetString\(\$bundleBytes\)/);
+  assert.match(powershellTemplate, /\$parsedEntries = \$bundleJson \| ConvertFrom-Json/);
+  assert.doesNotMatch(powershellTemplate, /\$BundleBase64 \| ConvertFrom-Json/);
   assert.match(powershellTemplate, /function Install-LocalImageService/);
   assert.match(powershellTemplate, /function Ensure-LocalImageService/);
   assert.match(powershellTemplate, /Get-Command docker\.exe/);
@@ -113,7 +117,7 @@ test('one-click CMD deploys the runtime without workflows or model credentials',
   assert.doesNotMatch(powershellTemplate, /WorkflowBundleJson|WorkflowDirectory|CredentialDirectory/);
   assert.doesNotMatch(powershellTemplate, /GrsaiKey|DeepseekKey|BackupKey|Ua1TBIbDcAu3z8pU|11xE3AjgQ1iUHDdR|bkpImgApi20260722/);
   assert.match(powershellTemplate, /docker network connect \$ImageDockerNetwork \$ContainerName/);
-  assert.match(powershellTemplate, /\$ImageDockerNetwork = Ensure-LocalImageService \$ImageServiceBundleJson \$CallbackSecret \$TicketOrigin/);
+  assert.match(powershellTemplate, /\$ImageDockerNetwork = Ensure-LocalImageService \$ImageServiceBundleBase64 \$CallbackSecret \$TicketOrigin/);
   assert.doesNotMatch(powershellTemplate, /range \$name, \$_ := \.NetworkSettings\.Networks/);
   assert.match(powershellTemplate, /docker network ls --filter/);
   assert.match(powershellTemplate, /docker volume ls --filter/);
@@ -136,7 +140,7 @@ test('one-click CMD deploys the runtime without workflows or model credentials',
 
   const payload = rebuildPayload(generated);
   assert.doesNotMatch(payload, /WorkflowBundleJson|import:credentials|import:workflow|publish:workflow|list:workflow/);
-  assert.match(payload, /\$ImageServiceBundleJson = ''/);
+  assert.match(payload, /\$ImageServiceBundleBase64 = ''/);
   assert.match(payload, /^function Install-DockerDesktop/m);
   assert.doesNotMatch(payload, /Ua1TBIbDcAu3z8pU|11xE3AjgQ1iUHDdR|bkpImgApi20260722/);
 });
@@ -162,11 +166,22 @@ test('browser parameter injection embeds plaintext values', () => {
   assert.match(payload, /\$OwnerPassword = 'Owner-password-2026'/);
   assert.doesNotMatch(payload, /GrsaiKey|DeepseekKey|BackupKey/);
   assert.match(payload, /\$Port = \[int\]'5692'/);
-  const sidecarBundleBase64 = joinBundle(payload, 'ImageServiceBundleJson');
+  const sidecarBundleBase64 = joinBundle(payload, 'ImageServiceBundleBase64');
   const sidecarBundle = JSON.parse(Buffer.from(sidecarBundleBase64, 'base64').toString('utf8'));
   assert.deepEqual(sidecarBundle.map(entry => entry.name), imageSidecarFiles);
   assert.match(sidecarBundle.find(entry => entry.name === 'src/app.js').content, /from 'fastify'/);
   assert.match(payload, /\$ImageServiceInput = 'http:\/\/ews-image-sidecar:3000'\.Trim\(\)/);
+});
+
+test('Windows PowerShell decodes the generated image service bundle', { skip: process.platform !== 'win32' }, () => {
+  const payload = rebuildPayload(buildInstaller());
+  const sidecarBundleBase64 = joinBundle(payload, 'ImageServiceBundleBase64');
+  const command = "$base64 = [Console]::In.ReadToEnd(); $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($base64)); $parsed = $json | ConvertFrom-Json; @($parsed).Count";
+  const count = execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], {
+    input: sidecarBundleBase64,
+    encoding: 'utf8',
+  }).trim();
+  assert.equal(count, String(imageSidecarFiles.length));
 });
 
 test('special characters in injected values survive the plaintext payload extraction', { skip: process.platform !== 'win32' }, () => {
