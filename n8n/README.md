@@ -53,7 +53,7 @@ $env:IMAGE_SERVICE_URL='https://images.example.com'
 node n8n/update-image-workflows.mjs
 ```
 
-所有工作流均使用 `Respond to Webhook` 显式响应：密钥正确时立即返回 HTTP `202` 和 `{"success":true,"status":"accepted","plan_id":"原始计划ID"}`，随后继续执行生成流程；密钥错误时立即返回 HTTP `401` 和 `{"success":false,"retryable":false}`。Worker 只接受 HTTP `202`、`success=true`、`status=accepted` 且 `plan_id` 与推送体一致的 ACK；ACK 超时、格式错误或计划ID不一致会按临时错误重试，HTTP `400/401/403/404` 等明确拒绝则直接失败。更新 JSON 后需要重新导入或同步到 n8n 中，仓库文件不会自动覆盖线上工作流。
+所有工作流均使用 `Respond to Webhook` 显式响应：密钥正确时立即返回 HTTP `202` 和 `{"success":true,"status":"accepted","plan_id":"原始计划ID"}`，随后继续执行生成流程；密钥错误时立即返回 HTTP `401` 和 `{"success":false,"retryable":false}`。Worker 只接受 HTTP `202`、`success=true`、`status=accepted` 且 `plan_id` 与推送体一致的 ACK；ACK 等待上限为 300 秒。达到该上限时无法判断 n8n 是否已经执行，因此计划会停止且不会自动重投；原工作流若稍后成功回调，系统仍会按 `plan_id` 接纳。ACK 格式错误或计划ID不一致仍按临时错误重试，HTTP `400/401/403/404` 等明确拒绝直接失败。Webhook 投递通过独立的 `PUSH_DISPATCH_EVENTS` Cloudflare Queue 执行，避免 HTTP 请求返回后 `waitUntil()` 的 30 秒存活限制，也不会阻塞 R2 callback 队列；投递消息绑定 `processing_at + retry_count`，过期消息不会执行新一轮计划。更新 JSON 后需要重新导入或同步到 n8n 中，仓库文件不会自动覆盖线上工作流。
 
 Shopee 商品标题按“主关键词 + 副关键词 + 长尾词 + 属性词”生成，但最终标题不会包含字段括号。Shopee 商品元数据工作流一次返回每套商品的 `products` 和全任务的 `variation_labels`，规格标签按变体 `id` 映射。JST 元数据按最多 10 套商品、最多 100 个 SKU 标题动态分批，每次推送和回调都必须原样携带 `plan_id`。JST 与 Shopee 的 SKU 图只按一级规格推送一次，推送体只包含该规格的 `sku_image`、可选 `sku_description` 和回调定位字段，不包含规格名、商品事实或核心参考图。`sku_description` 非空时原样作为图片提示词，留空时使用工作流内置的产品一致性提示词；二级规格不会增加图片工作流数量。
 

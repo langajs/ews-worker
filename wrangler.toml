@@ -31,10 +31,22 @@ bucket_name = "ossapac"
 binding = "CALLBACK_EVENTS"
 queue = "ews-callback-events"
 
+[[queues.producers]]
+binding = "PUSH_DISPATCH_EVENTS"
+queue = "ews-push-dispatch-events"
+
 [[queues.consumers]]
 queue = "ews-callback-events"
 max_batch_size = 1
 max_batch_timeout = 1
 max_retries = 5
 dead_letter_queue = "ews-callback-events-dlq"
+max_concurrency = 20
+
+[[queues.consumers]]
+queue = "ews-push-dispatch-events"
+max_batch_size = 1
+max_batch_timeout = 1
+max_retries = 5
+dead_letter_queue = "ews-push-dispatch-events-dlq"
 max_concurrency = 20

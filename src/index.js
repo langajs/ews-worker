@@ -2268,8 +2268,8 @@ const MAX_QUEUE_DISPATCHES_PER_RUN = 100;
 const QUEUE_USER_TURN_SIZE = 10;
 const PUSH_PLAN_MAX_RETRIES = 3;
 const PUSH_PLAN_RETRY_DELAYS_SECONDS = [30, 120, 300];
-const PUSH_WEBHOOK_TIMEOUT_MS = 15_000;
-const PUSH_PLAN_DISPATCH_TIMEOUT_SECONDS = 90;
+const PUSH_WEBHOOK_TIMEOUT_MS = 300_000;
+const PUSH_PLAN_DISPATCH_TIMEOUT_SECONDS = (PUSH_WEBHOOK_TIMEOUT_MS / 1000) + 60;
 
 async function getPendingPlansForRelease(env, planTable, taskId, imageLimit, metadataLimit, flags, dispatchBudget) {
   const safeTable = normalizePushPlanTable(planTable);
@@ -2343,7 +2343,7 @@ async function pushToWebhook(url, data) {
   } catch (err) {
     if (err?.name === 'AbortError') {
       const timeout = new Error(`Webhook请求超过${PUSH_WEBHOOK_TIMEOUT_MS / 1000}秒未确认接收`);
-      timeout.retryable = true;
+      timeout.retryable = false;
       throw timeout;
     }
     if (err.retryable === undefined) err.retryable = true;
@@ -2485,11 +2485,12 @@ async function dispatchPushPlan(env, planTable, taskId, plan) {
     await pushToWebhook(plan.webhook_url, payload);
     await env.DB.prepare(`UPDATE ${normalizePushPlanTable(planTable)}
       SET status='processing', processing_at=datetime('now'), updated_at=datetime('now')
-      WHERE id=? AND task_id=? AND status='dispatching'`).bind(plan.id, taskId).run();
+      WHERE id=? AND task_id=? AND status='processing' AND processing_at=? AND retry_count=?`)
+      .bind(plan.id, taskId, plan.processing_at, plan.retry_count).run();
   } catch (err) {
     if (err.retryable !== false && await schedulePushPlanRetry(env, planTable, plan.id, taskId, plan.retry_count, err.message)) return;
     const terminalMessage = err.retryable === false ? err.message : `${err.message}；已达到自动重试上限`;
-    const failed = await markPushPlanFailed(env, planTable, plan.id, terminalMessage, 'dispatching');
+    const failed = await markPushPlanFailed(env, planTable, plan.id, terminalMessage);
     if (!failed) return;
     await refundTaskCredit(env, taskId);
   }
@@ -2522,8 +2523,24 @@ async function releaseTaskPlans(env, planTable, platform, taskId, ctx, dispatchB
       await markPushPlanFailed(env, planTable, plan.id, '算力不足', 'dispatching');
       continue;
     }
-    dispatched++;
-    ctx.waitUntil(dispatchPushPlan(env, planTable, taskId, plan));
+    try {
+      const dispatchClaim = await getOne(env, `SELECT processing_at, retry_count FROM ${normalizePushPlanTable(planTable)} WHERE id=? AND task_id=? AND status='dispatching'`, [plan.id, taskId]);
+      if (!dispatchClaim?.processing_at) throw new Error('Webhook投递状态丢失');
+      await env.PUSH_DISPATCH_EVENTS.send({
+        kind: 'push_plan_dispatch',
+        platform,
+        task_id: taskId,
+        plan_id: plan.id,
+        dispatch_started_at: dispatchClaim.processing_at,
+        retry_count: parseInt(dispatchClaim.retry_count) || 0,
+      });
+      dispatched++;
+    } catch (err) {
+      const message = `Webhook投递入队失败: ${err.message || 'Queue send failed'}`;
+      if (await schedulePushPlanRetry(env, planTable, plan.id, taskId, plan.retry_count, message)) continue;
+      const failed = await markPushPlanFailed(env, planTable, plan.id, `${message}；已达到自动重试上限`, 'dispatching');
+      if (failed) await refundTaskCredit(env, taskId);
+    }
   }
   return dispatched;
 }
@@ -2981,6 +2998,32 @@ async function deleteNativeCallbackPayload(env, value) {
 async function processNativeCallbackQueue(batch, env, ctx) {
   for (const message of batch.messages) {
     const item = message.body || {};
+    if (item.kind === 'push_plan_dispatch') {
+      try {
+        const planTable = item.platform === 'jst'
+          ? 'ews_jst_push_plans'
+          : item.platform === 'shopee'
+            ? 'ews_shopee_push_plans'
+            : '';
+        if (!planTable || !item.task_id || !item.plan_id || !item.dispatch_started_at || !Number.isInteger(item.retry_count)) {
+          throw callbackPermanentError('Webhook投递消息无效');
+        }
+        const plan = await getOne(env, `SELECT * FROM ${planTable}
+          WHERE id=? AND task_id=? AND status='dispatching' AND processing_at=? AND retry_count=?`,
+        [item.plan_id, item.task_id, item.dispatch_started_at, item.retry_count]);
+        const claimed = plan ? await env.DB.prepare(`UPDATE ${planTable}
+          SET status='processing', updated_at=datetime('now')
+          WHERE id=? AND task_id=? AND status='dispatching' AND processing_at=? AND retry_count=?`)
+          .bind(item.plan_id, item.task_id, item.dispatch_started_at, item.retry_count).run() : null;
+        if (d1Changes(claimed) > 0) await dispatchPushPlan(env, planTable, item.task_id, plan);
+        message.ack();
+      } catch (err) {
+        if (err.permanent === true || message.attempts >= CALLBACK_QUEUE_MAX_ATTEMPTS) message.ack();
+        else message.retry({ delaySeconds: Math.min(300, 30 * message.attempts) });
+        console.error('native push dispatch queue item failed:', message.id, err.message);
+      }
+      continue;
+    }
     let payload;
     try {
       payload = await loadNativeCallbackPayload(env, item);
