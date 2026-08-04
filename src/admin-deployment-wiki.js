@@ -4,10 +4,9 @@ import {
 } from './distributed-n8n-installer.js';
 
 const CREDENTIALS = Object.freeze([
-  { name: 'GRSAI API Key', usage: '双平台主图、附图、详情图和 SKU 图主模型' },
-  { name: 'DeepSeek API Key', usage: '双平台商品元数据工作流' },
-  { name: '备用图片 API Key', usage: 'Shopee 图片备用模型' },
-  { name: 'EWS callback_secret', usage: '本机图片服务、上传票据和 Worker 回调鉴权' },
+  { name: 'GrsaiApp', usage: '双平台主图、附图、详情图和 SKU 图主模型' },
+  { name: 'deepseek', usage: '双平台商品元数据工作流' },
+  { name: 'EWS Backup Image API', usage: 'Shopee 图片备用模型' },
 ]);
 
 const WEBHOOKS = Object.freeze([
@@ -32,9 +31,9 @@ const SECTIONS = Object.freeze([
   {
     id: 'installer',
     number: '01',
-    title: '生成安装脚本',
-    body: '填写页面中的节点信息、n8n 管理员账号和三组模型密钥，下载 CMD 后直接双击执行。回调密钥由管理员配置自动注入。',
-    bullets: ['宿主机只需要 Windows 10/11，Docker Desktop 缺失时自动下载并安装', '始终拉取最新 n8n 与 Valkey 镜像，并重建图片服务', '自动部署 Valkey、图片 API、图片 Worker 和持久化队列', '自动初始化 owner、导入三组凭证并发布 9 个工作流'],
+    title: '部署节点环境',
+    body: '填写节点信息与 n8n 管理员账号，下载 CMD 后直接双击执行。脚本只部署 Docker、n8n、Valkey 和图片服务环境。',
+    bullets: ['宿主机只需要 Windows 10/11，Docker Desktop 缺失时自动下载并安装', '始终拉取最新 n8n 与 Valkey 镜像，并重建图片服务', '自动部署 Valkey、图片 API、图片 Worker 和持久化队列', '不会导入工作流或创建模型凭证'],
   },
   {
     id: 'cloudflare',
@@ -46,16 +45,16 @@ const SECTIONS = Object.freeze([
   {
     id: 'routing',
     number: '03',
-    title: '绑定用户工作流',
-    body: '进入系统配置 -> 用户管理 -> 工作流地址，将目标用户需要的 webhook 切换到新域名。未填写的字段继续继承系统默认节点。',
-    bullets: ['先切换一个测试用户', '商品元数据、主图、附图和 SKU 图可以分别分流', '确认回调与 R2 图片正常后再迁移其他用户'],
+    title: '人工迁移工作流',
+    body: '登录新 n8n，人工导入 9 个 workflow JSON，创建模型凭证并绑定到对应节点，检查配置后再逐个发布。',
+    bullets: ['创建 GrsaiApp、deepseek 和 EWS Backup Image API 凭证', '使用外部图片服务时人工修改工作流中的图片服务地址', '安装器不会覆盖已有工作流和凭证'],
   },
   {
     id: 'validation',
     number: '04',
-    title: '验收与清理',
-    body: '访问节点域名确认 n8n 可用，再创建最小 Shopee 与聚水潭任务验证回调。成功后删除下载的安装脚本。',
-    bullets: ['安装脚本包含明文模型密钥、回调密钥和 owner 密码', '模型密钥最终只保存在 n8n 加密凭证库', 'n8n 状态位于 %LOCALAPPDATA%\\EWS\\n8n-nodes，图片服务构建源位于 %LOCALAPPDATA%\\EWS\\image-service'],
+    title: '绑定与验收',
+    body: '工作流发布后，先为一个测试用户切换 webhook 地址并验证回调；确认正常后再迁移其他用户，最后删除安装脚本。',
+    bullets: ['安装脚本仅包含回调密钥和 owner 密码', '模型密钥由管理员直接保存到 n8n 加密凭证库', 'n8n 状态位于 %LOCALAPPDATA%\\EWS\\n8n-nodes，图片服务构建源位于 %LOCALAPPDATA%\\EWS\\image-service'],
   },
 ]);
 
@@ -67,9 +66,9 @@ async function sha256(value) {
 export async function getDistributedN8nWiki() {
   const installer = getDistributedN8nInstallerScript();
   return {
-    version: '2026.07.28',
-    title: 'n8n 一键部署',
-    subtitle: '一份可双击运行的 CMD，从空白 Windows 主机闭环部署 Docker、图片队列与 n8n，Cloudflare Tunnel 独立连接',
+    version: '2026.08.04',
+    title: 'n8n 节点环境一键部署',
+    subtitle: '一份可双击运行的 CMD，只部署 Docker、图片队列与 n8n 环境；工作流 JSON 和模型凭证由管理员人工迁移',
     script: {
       filename: DISTRIBUTED_N8N_INSTALLER_FILENAME,
       download_url: '/api/admin/wiki/distributed-n8n/script',

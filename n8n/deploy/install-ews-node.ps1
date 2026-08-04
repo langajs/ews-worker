@@ -350,13 +350,9 @@ $NodeName = '__EWS_NODE_NAME__'
 $Domain = '__EWS_DOMAIN__'
 $OwnerEmail = '__EWS_OWNER_EMAIL__'
 $OwnerPassword = '__EWS_OWNER_PASSWORD__'
-$GrsaiKey = '__EWS_GRSAI_KEY__'.Trim()
-$DeepseekKey = '__EWS_DEEPSEEK_KEY__'.Trim()
-$BackupKey = '__EWS_BACKUP_KEY__'.Trim()
 $ImageServiceInput = '__EWS_IMAGE_SERVICE_URL__'.Trim()
 $CallbackSecret = '__EWS_CALLBACK_SECRET__'.Trim()
 $TicketOriginInput = '__EWS_TICKET_ORIGIN__'.Trim()
-$WorkflowBundleJson = __EWS_WORKFLOW_BUNDLE_B64__
 $ImageServiceBundleJson = __EWS_IMAGE_SIDECAR_BUNDLE_B64__
 $Port = [int]'__EWS_PORT__'
 
@@ -367,7 +363,6 @@ if ($OwnerEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') { throw 'n8n owner email
 if ($OwnerPassword.Length -lt 8 -or $OwnerPassword.Length -gt 64) { throw 'n8n owner password must contain 8 to 64 characters.' }
 if ($OwnerPassword -notmatch '[A-Z]') { throw 'n8n owner password must contain at least one uppercase letter.' }
 if ($OwnerPassword -notmatch '\d') { throw 'n8n owner password must contain at least one number.' }
-if (-not $GrsaiKey -or -not $DeepseekKey -or -not $BackupKey) { throw 'All three model API keys are required.' }
 if ($CallbackSecret -match '[\r\n]') { throw 'EWS callback secret is invalid.' }
 
 try {
@@ -387,10 +382,8 @@ if ($imageUri.Scheme -notin @('http', 'https')) { throw 'Image service URL must 
 $ImageServiceUrl = $ImageServiceInput.TrimEnd('/')
 if ($ImageServiceUrl.EndsWith('/v1/image-jobs')) {
   $ImageServiceBaseUrl = $ImageServiceUrl.Substring(0, $ImageServiceUrl.Length - '/v1/image-jobs'.Length)
-  $ImageJobUrl = $ImageServiceUrl
 } else {
   $ImageServiceBaseUrl = $ImageServiceUrl
-  $ImageJobUrl = "$ImageServiceUrl/v1/image-jobs"
 }
 
 Wait-DockerDesktop
@@ -405,8 +398,6 @@ $CallbackSecret = $null
 $ImageServiceBundleJson = $null
 
 $StateRoot = Join-Path (Join-Path (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'EWS') 'n8n-nodes') $NodeName
-$WorkflowDirectory = Join-Path $StateRoot 'workflows'
-$CredentialDirectory = Join-Path $StateRoot 'credentials-import'
 $EncryptionKeyFile = Join-Path $StateRoot 'encryption.key'
 $EnvFile = Join-Path $StateRoot 'n8n.env'
 $ContainerName = "ews-n8n-$NodeName"
@@ -446,49 +437,6 @@ $envLines = @(
 )
 [IO.File]::WriteAllLines($EnvFile, $envLines, (New-Object Text.UTF8Encoding($false)))
 
-$normalizedStateRoot = [IO.Path]::GetFullPath($StateRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
-foreach ($directory in @($WorkflowDirectory, $CredentialDirectory)) {
-  $normalizedDirectory = [IO.Path]::GetFullPath($directory)
-  if (-not $normalizedDirectory.StartsWith($normalizedStateRoot, [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'Installer working directory escaped the node state directory.'
-  }
-  if (Test-Path -LiteralPath $directory) { [IO.Directory]::Delete($directory, $true) }
-  New-Item -ItemType Directory -Path $directory -Force | Out-Null
-}
-
-$workflowEntries = $WorkflowBundleJson | ConvertFrom-Json
-$workflowIds = New-Object Collections.Generic.List[string]
-$imageWorkflowCount = 0
-$workflowIndex = 0
-foreach ($entry in $workflowEntries) {
-  $workflowIndex++
-  $workflow = [string]$entry.content
-  if (-not $entry.id -or -not $workflow) { throw "Workflow bundle entry $workflowIndex is invalid." }
-  $workflowIds.Add([string]$entry.id)
-  if ($workflow.Contains('http://ews-image-sidecar:3000/v1/image-jobs')) {
-    $workflow = $workflow.Replace('http://ews-image-sidecar:3000/v1/image-jobs', $ImageJobUrl)
-    $imageWorkflowCount++
-  }
-  Write-Utf8NoBom (Join-Path $WorkflowDirectory ('workflow-{0:d2}.json' -f $workflowIndex)) $workflow
-}
-if ($workflowIds.Count -ne 9) { throw "Expected 9 workflows, found $($workflowIds.Count)." }
-if ($imageWorkflowCount -ne 7) { throw "Expected 7 image workflows, rewrote $imageWorkflowCount." }
-
-$credentials = @(
-  @{ id = 'Ua1TBIbDcAu3z8pU'; name = 'GrsaiApp'; type = 'httpHeaderAuth'; data = @{ name = 'Authorization'; value = "Bearer $GrsaiKey" } }
-  @{ id = '11xE3AjgQ1iUHDdR'; name = 'deepseek'; type = 'httpHeaderAuth'; data = @{ name = 'Authorization'; value = "Bearer $DeepseekKey" } }
-  @{ id = 'bkpImgApi20260722'; name = 'EWS Backup Image API'; type = 'httpHeaderAuth'; data = @{ name = 'Authorization'; value = "Bearer $BackupKey" } }
-)
-$credentialIndex = 0
-foreach ($credential in $credentials) {
-  $credentialIndex++
-  $credentialJson = ConvertTo-Json -InputObject @($credential) -Depth 10 -Compress
-  Write-Utf8NoBom (Join-Path $CredentialDirectory ('credential-{0:d2}.json' -f $credentialIndex)) $credentialJson
-}
-$GrsaiKey = $null
-$DeepseekKey = $null
-$BackupKey = $null
-
 $networkExists = & docker network ls --filter "name=^$NetworkName`$" --format '{{.Name}}'
 if ($LASTEXITCODE -ne 0) { throw 'Failed to inspect Docker networks.' }
 if (-not ($networkExists -contains $NetworkName)) {
@@ -508,7 +456,6 @@ if ($containerExists -contains $ContainerName) {
   if ($LASTEXITCODE -ne 0) { throw 'Failed to replace the existing n8n container.' }
 }
 
-$workflowMount = $WorkflowDirectory.Replace('\', '/')
 $dockerArgs = @(
   'run', '-d'
   '--name', $ContainerName
@@ -518,7 +465,6 @@ $dockerArgs = @(
   '-p', "127.0.0.1:$($Port):5678"
   '--env-file', $EnvFile
   '-v', "$VolumeName`:/home/node/.n8n"
-  '-v', "$workflowMount`:/workflows:ro"
   $N8nImage
 )
 & docker @dockerArgs | Out-Null
@@ -548,36 +494,6 @@ if ($settings.data.userManagement.showSetupOnFirstLoad) {
 & docker exec -e "IMAGE_SERVICE_URL=$ImageServiceBaseUrl" $ContainerName node -e "const base=process.env.IMAGE_SERVICE_URL.replace(/\/+$/,'');fetch(base+'/readyz').then(async r=>{if(!r.ok){console.error(await r.text());process.exit(1)}}).catch(e=>{console.error(e.message);process.exit(1)})"
 if ($LASTEXITCODE -ne 0) { throw "Image service is not ready: $ImageServiceBaseUrl/readyz" }
 
-try {
-  & docker cp "$CredentialDirectory/." "$($ContainerName):/tmp/ews-credentials"
-  if ($LASTEXITCODE -ne 0) { throw 'Failed to copy credentials into n8n.' }
-  & docker exec $ContainerName n8n import:credentials --separate --input=/tmp/ews-credentials
-  if ($LASTEXITCODE -ne 0) { throw 'Credential import failed.' }
-} finally {
-  try {
-    & docker exec -u 0 $ContainerName node -e "require('fs').rmSync('/tmp/ews-credentials',{recursive:true,force:true})" 2>$null | Out-Null
-  } catch {}
-  if (Test-Path -LiteralPath $CredentialDirectory) { [IO.Directory]::Delete($CredentialDirectory, $true) }
-}
-
-& docker exec $ContainerName n8n import:workflow --separate --input=/workflows
-if ($LASTEXITCODE -ne 0) { throw 'Workflow import failed.' }
-foreach ($workflowId in $workflowIds) {
-  & docker exec $ContainerName n8n publish:workflow --id=$workflowId
-  if ($LASTEXITCODE -ne 0) { throw "Workflow publish failed: $workflowId" }
-}
-& docker restart $ContainerName | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'Failed to restart n8n.' }
-Wait-N8n $Port
-
-$activeWorkflows = & docker exec $ContainerName n8n list:workflow --active=true
-if ($LASTEXITCODE -ne 0) { throw 'Failed to verify active workflows.' }
-foreach ($workflowId in $workflowIds) {
-  if (-not ($activeWorkflows -match ([regex]::Escape("$workflowId|")))) {
-    throw "Workflow is not active after deployment: $workflowId"
-  }
-}
-
 Write-Host ''
 Write-Host 'EWS n8n node deployed successfully.' -ForegroundColor Green
 Write-Host "Public URL: $PublicUrl"
@@ -586,4 +502,5 @@ Write-Host "Docker network: $NetworkName"
 Write-Host 'Cloudflare origin service: http://n8n:5678'
 Write-Host "Image service: $ImageServiceBaseUrl"
 Write-Host ''
-Write-Host 'This generated installer contains encoded API keys. Delete it after deployment.' -ForegroundColor Yellow
+Write-Host 'Import workflow JSON files, configure credentials, and publish workflows manually in n8n.' -ForegroundColor Yellow
+Write-Host 'This generated installer contains the owner password and callback secret. Delete it after deployment.' -ForegroundColor Yellow

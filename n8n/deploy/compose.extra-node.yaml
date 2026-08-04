@@ -27,7 +27,6 @@ services:
       N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
     volumes:
       - n8n_data:/home/node/.n8n
-      - "${WORKFLOW_DIRECTORY}:/workflows:ro"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5678/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
@@ -38,4 +37,3 @@ services:
 volumes:
   n8n_data:
     name: ews_n8n_${NODE_NAME}_data
-

@@ -7,17 +7,6 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const workflowFiles = [
-  '聚水潭SKU图.json',
-  '聚水潭主图.json',
-  '聚水潭商品元数据.json',
-  '聚水潭详情图.json',
-  '聚水潭附图.json',
-  '虾皮sku图.json',
-  '虾皮主图.json',
-  '虾皮商品元数据.json',
-  '虾皮附图.json',
-];
 const imageSidecarFiles = [
   'Dockerfile',
   'package.json',
@@ -62,15 +51,8 @@ function joinBundle(payload, variable) {
 function buildInstaller() {
   const powershellTemplate = read('n8n/deploy/install-ews-node.ps1');
   const cmdTemplate = read('n8n/deploy/install-ews-node.cmd');
-  const workflows = workflowFiles.map(name => {
-    const content = read(`n8n/${name}`);
-    const parsed = JSON.parse(content);
-    const workflow = Array.isArray(parsed) ? parsed[0] : parsed;
-    return { name, id: workflow.id, content: JSON.stringify(workflow) };
-  });
   const imageSidecar = imageSidecarFiles.map(name => ({ name, content: read(`n8n/image-sidecar/${name}`) }));
   const powershell = powershellTemplate
-    .replace('__EWS_WORKFLOW_BUNDLE_B64__', () => bundleAssignmentLines('WorkflowBundleJson', base64(JSON.stringify(workflows))))
     .replace('__EWS_IMAGE_SIDECAR_BUNDLE_B64__', () => bundleAssignmentLines('ImageServiceBundleJson', base64(JSON.stringify(imageSidecar))));
   const payload = `__EWS_PS1_BEGIN__\n${powershell.trim()}\n__EWS_PS1_END__`;
   const generated = cmdTemplate.replace('__EWS_POWERSHELL_PAYLOAD__', () => payload);
@@ -82,7 +64,7 @@ function rebuildPayload(generated) {
   return match ? match[1] : '';
 }
 
-test('one-click CMD embeds the complete production workflow bundle', () => {
+test('one-click CMD deploys the runtime without workflows or model credentials', () => {
   const cmdTemplate = read('n8n/deploy/install-ews-node.cmd');
   const powershellTemplate = read('n8n/deploy/install-ews-node.ps1');
   const installerModule = read('src/distributed-n8n-installer.js');
@@ -127,13 +109,9 @@ test('one-click CMD embeds the complete production workflow bundle', () => {
   assert.match(powershellTemplate, /owner setup did not complete/);
   assert.match(powershellTemplate, /OwnerPassword -notmatch '\[A-Z\]'/);
   assert.match(powershellTemplate, /OwnerPassword -notmatch '\\d'/);
-  assert.match(powershellTemplate, /import:credentials --separate --input=\/tmp\/ews-credentials/);
-  assert.match(powershellTemplate, /docker exec -u 0 \$ContainerName node -e/);
-  assert.match(powershellTemplate, /n8n import:workflow --separate --input=\/workflows/);
-  assert.match(powershellTemplate, /Expected 9 workflows/);
-  assert.match(powershellTemplate, /Expected 7 image workflows/);
-  assert.match(powershellTemplate, /\$workflowEntries = \$WorkflowBundleJson \| ConvertFrom-Json/);
-  assert.doesNotMatch(powershellTemplate, /\$workflowEntries = @\(/);
+  assert.doesNotMatch(powershellTemplate, /import:credentials|import:workflow|publish:workflow|list:workflow/);
+  assert.doesNotMatch(powershellTemplate, /WorkflowBundleJson|WorkflowDirectory|CredentialDirectory/);
+  assert.doesNotMatch(powershellTemplate, /GrsaiKey|DeepseekKey|BackupKey|Ua1TBIbDcAu3z8pU|11xE3AjgQ1iUHDdR|bkpImgApi20260722/);
   assert.match(powershellTemplate, /docker network connect \$ImageDockerNetwork \$ContainerName/);
   assert.match(powershellTemplate, /\$ImageDockerNetwork = Ensure-LocalImageService \$ImageServiceBundleJson \$CallbackSecret \$TicketOrigin/);
   assert.doesNotMatch(powershellTemplate, /range \$name, \$_ := \.NetworkSettings\.Networks/);
@@ -146,8 +124,7 @@ test('one-click CMD embeds the complete production workflow bundle', () => {
   assert.match(powershellTemplate, /Ensure-DockerImage \$ValkeyImage/);
   assert.ok(powershellTemplate.lastIndexOf('Wait-DockerDesktop') < powershellTemplate.lastIndexOf('Ensure-LocalImageService'));
   assert.match(installerModule, /install-ews-node\.cmd/);
-  assert.match(installerModule, /workflowEntry\('聚水潭SKU图\.json'/);
-  assert.match(installerModule, /content: JSON\.stringify\(workflow\)/);
+  assert.doesNotMatch(installerModule, /workflowEntry|WORKFLOWS|WORKFLOW_PLACEHOLDER|from '\.\.\/n8n\/[^/]+\.json'/);
   assert.match(installerModule, /sidecarEntry\('Dockerfile', sidecarDockerfile\)/);
   assert.match(installerModule, /sidecarEntry\('src\/worker\.js', sidecarWorker\)/);
   assert.match(installerModule, /IMAGE_SIDECAR_PLACEHOLDER/);
@@ -158,20 +135,10 @@ test('one-click CMD embeds the complete production workflow bundle', () => {
   assert.doesNotMatch(generated, /sk-[A-Za-z0-9_-]{16,}/);
 
   const payload = rebuildPayload(generated);
-  assert.match(payload, /\$WorkflowBundleJson = ''/);
-  assert.match(payload, /\$WorkflowBundleJson \+= '[A-Za-z0-9+/=]+'/);
+  assert.doesNotMatch(payload, /WorkflowBundleJson|import:credentials|import:workflow|publish:workflow|list:workflow/);
   assert.match(payload, /\$ImageServiceBundleJson = ''/);
   assert.match(payload, /^function Install-DockerDesktop/m);
-  assert.match(payload, /import:credentials --separate --input=\/tmp\/ews-credentials/);
-
-  const imageWorkflowCount = workflowFiles.filter(name => read(`n8n/${name}`).includes('http://ews-image-sidecar:3000/v1/image-jobs')).length;
-  assert.equal(imageWorkflowCount, 7);
-  const expectedWorkflowBundle = base64(JSON.stringify(workflowFiles.map(name => {
-    const parsed = JSON.parse(read(`n8n/${name}`));
-    const workflow = Array.isArray(parsed) ? parsed[0] : parsed;
-    return { name, id: workflow.id, content: JSON.stringify(workflow) };
-  })));
-  assert.equal(joinBundle(payload, 'WorkflowBundleJson'), expectedWorkflowBundle);
+  assert.doesNotMatch(payload, /Ua1TBIbDcAu3z8pU|11xE3AjgQ1iUHDdR|bkpImgApi20260722/);
 });
 
 test('browser parameter injection embeds plaintext values', () => {
@@ -180,9 +147,6 @@ test('browser parameter injection embeds plaintext values', () => {
     '__EWS_DOMAIN__': 'test-node.example.com',
     '__EWS_OWNER_EMAIL__': 'owner@example.com',
     '__EWS_OWNER_PASSWORD__': 'Owner-password-2026',
-    '__EWS_GRSAI_KEY__': 'grsai-secret-value',
-    '__EWS_DEEPSEEK_KEY__': 'deepseek-secret-value',
-    '__EWS_BACKUP_KEY__': 'backup-secret-value',
     '__EWS_IMAGE_SERVICE_URL__': 'http://ews-image-sidecar:3000',
     '__EWS_CALLBACK_SECRET__': 'callback-secret-value',
     '__EWS_TICKET_ORIGIN__': 'https://ewsz.langaj.cc',
@@ -191,18 +155,18 @@ test('browser parameter injection embeds plaintext values', () => {
   let generated = buildInstaller();
   for (const [token, value] of Object.entries(values)) generated = generated.split(token).join(injectInstallerValue(value));
 
-  assert.doesNotMatch(generated, /__EWS_(?:NODE_NAME|DOMAIN|OWNER_EMAIL|OWNER_PASSWORD|GRSAI_KEY|DEEPSEEK_KEY|BACKUP_KEY|IMAGE_SERVICE_URL|CALLBACK_SECRET|TICKET_ORIGIN|PORT)__/);
+  assert.doesNotMatch(generated, /__EWS_(?:NODE_NAME|DOMAIN|OWNER_EMAIL|OWNER_PASSWORD|IMAGE_SERVICE_URL|CALLBACK_SECRET|TICKET_ORIGIN|PORT)__/);
 
   const payload = rebuildPayload(generated);
   assert.match(payload, /\$NodeName = 'test-node'/);
   assert.match(payload, /\$OwnerPassword = 'Owner-password-2026'/);
-  assert.match(payload, /\$GrsaiKey = 'grsai-secret-value'\.Trim\(\)/);
+  assert.doesNotMatch(payload, /GrsaiKey|DeepseekKey|BackupKey/);
   assert.match(payload, /\$Port = \[int\]'5692'/);
   const sidecarBundleBase64 = joinBundle(payload, 'ImageServiceBundleJson');
   const sidecarBundle = JSON.parse(Buffer.from(sidecarBundleBase64, 'base64').toString('utf8'));
   assert.deepEqual(sidecarBundle.map(entry => entry.name), imageSidecarFiles);
   assert.match(sidecarBundle.find(entry => entry.name === 'src/app.js').content, /from 'fastify'/);
-  assert.match(payload, /http:\/\/ews-image-sidecar:3000\/v1\/image-jobs/);
+  assert.match(payload, /\$ImageServiceInput = 'http:\/\/ews-image-sidecar:3000'\.Trim\(\)/);
 });
 
 test('special characters in injected values survive the plaintext payload extraction', { skip: process.platform !== 'win32' }, () => {
@@ -212,7 +176,7 @@ test('special characters in injected values survive the plaintext payload extrac
   const dataRows = [
     'function Test {',
     "  $OwnerPassword = 'Owner''s-pw&<2026|>%x%'",
-    "  $GrsaiKey = 'grsai^secret-value'.Trim()",
+    "  $CallbackSecret = 'callback^secret-value'.Trim()",
     "  if ($x -notmatch '^[a-z0-9]{0,31}$') { throw }",
     '}',
   ];
@@ -247,7 +211,7 @@ test('admin deployment wiki protects installer details and uses CMD flow', () =>
   const frontendShell = fs.readFileSync(path.join(root, '../ews-frontend/admin-deployment-wiki.html'), 'utf8');
   const frontendApi = fs.readFileSync(path.join(root, '../ews-frontend/js/api.js'), 'utf8');
 
-  assert.match(workerWiki, /可双击运行的 CMD/);
+  assert.match(workerWiki, /一份可双击运行的 CMD/);
   assert.match(workerWiki, /Docker Desktop 缺失时自动下载并安装/);
   assert.match(workerWiki, /始终拉取最新 n8n 与 Valkey 镜像/);
   assert.match(workerWiki, /Cloudflare Tunnel/);
@@ -256,10 +220,12 @@ test('admin deployment wiki protects installer details and uses CMD flow', () =>
   assert.match(workerEntry, /request\.auth\?\.role === 'admin'/);
   assert.match(workerEntry, /'Cache-Control': 'private, no-store, max-age=0'/);
   assert.match(frontendShell, /生成一键部署脚本/);
-  assert.match(frontendShell, /只在当前浏览器内注入/);
+  assert.match(frontendShell, /模型凭证不写入安装脚本/);
   assert.match(frontendShell, /API\.getConfig\(\)/);
   assert.match(frontendShell, /id="callbackSecret"/);
   assert.match(frontendShell, /默认地址会在本机自动部署/);
+  assert.match(frontendShell, /人工导入 9 个 workflow JSON/);
+  assert.match(frontendShell, /不会导入、修改或发布任何工作流/);
   assert.match(frontendShell, /ownerPassword\.length < 8 \|\| values\.ownerPassword\.length > 64/);
   assert.match(frontendShell, /!\/\[A-Z\]\/\.test\(values\.ownerPassword\)/);
   assert.match(frontendShell, /!\/\\d\/\.test\(values\.ownerPassword\)/);
@@ -268,4 +234,5 @@ test('admin deployment wiki protects installer details and uses CMD flow', () =>
   assert.match(frontendShell, /getDistributedN8nWiki\(\)/);
   assert.match(frontendApi, /install-ews-node\.cmd/);
   assert.doesNotMatch(frontendShell, /Ua1TBIbDcAu3z8pU|11xE3AjgQ1iUHDdR|bkpImgApi20260722/);
+  assert.doesNotMatch(frontendShell, /id="(?:grsaiKey|deepseekKey|backupKey)"/);
 });

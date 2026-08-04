@@ -1,12 +1,14 @@
-# EWS n8n 一键部署
+# EWS n8n 节点环境一键部署
 
-生产部署入口位于管理员导航的“部署 Wiki”。管理员填写节点信息、n8n owner 和三组模型 API Key 后，浏览器会下载一份完整的 `install-ews-{node}.cmd`。
+生产部署入口位于管理员导航的“部署 Wiki”。管理员填写节点信息和 n8n owner 后，浏览器会下载一份 `install-ews-{node}.cmd`。
 
-宿主机仅需：
+安装器只负责运行环境，不导入或发布 workflow JSON，也不创建或覆盖 n8n credentials。工作流和模型凭证必须在环境就绪后由管理员人工迁移。
+
+宿主机要求：
 
 - Windows 10/11
 - Windows 自带的 `cmd.exe` 和系统组件
-- 可批准一次 Windows 管理员提示；仅在缺少 Docker Desktop 时需要
+- 仅在缺少 Docker Desktop 时批准一次 Windows 管理员提示
 
 执行方式：
 
@@ -14,24 +16,32 @@
 install-ews-node2.cmd
 ```
 
-也可以直接双击该 CMD 文件。用户无需预装或预先启动 Docker Desktop、打开 PowerShell 或处理执行策略；安装器会优先复用已经就绪的 Docker Engine。若本机没有 Docker Desktop，则从 Docker 官方地址下载对应 CPU 架构的签名安装器，完成安装后启动并等待 Linux Docker Engine 就绪。Windows 首次启用 WSL 2 若要求重启，重启后重新运行同一 CMD 即可继续。
+也可以直接双击 CMD。安装器会优先复用已经就绪的 Docker Engine；若未安装 Docker Desktop，则从 Docker 官方地址下载对应 CPU 架构的签名安装器。Windows 首次启用 WSL 2 如果要求重启，重启后再次运行同一 CMD 即可继续。
 
-安装器会自动完成以下操作：
+安装器会自动完成：
 
-1. 检查 Docker Desktop/CLI，缺失时自动下载官方安装器并安装，未启动时自动启动。
-2. 始终拉取最新 `n8nio/n8n:2.25.7` 与 Valkey 镜像，并从 CMD 内嵌源码重新构建图片服务（已部署节点也会更新到最新）。
-3. 创建 Valkey 持久化队列、图片 API、图片 Worker，以及节点专属 Docker network、volume 和 n8n 容器。
+1. 检查并启动 Docker Desktop/CLI，缺失时自动下载安装。
+2. 拉取固定版本的 `n8nio/n8n:2.25.7` 和 Valkey 镜像，并从 CMD 内嵌源码重新构建图片服务。
+3. 创建 Valkey 持久化队列、图片 API、图片 Worker、节点 Docker network、volume 和 n8n 容器。
 4. 持久化 `N8N_ENCRYPTION_KEY`，初始化 n8n owner。
-5. 导入三组 `HTTP Header Auth` 凭证。
-6. 导入并发布仓库内 9 个生产工作流。
-7. 将 7 个图片工作流接入本机图片服务，或改写为管理员填写的外部服务地址。
-8. 校验 Valkey、图片服务 `/readyz`、n8n `/healthz` 和工作流发布状态。
+5. 校验 Valkey、图片服务 `/readyz` 和 n8n `/healthz`。
 
-节点状态保存在 `%LOCALAPPDATA%\EWS\n8n-nodes\{node}`。重复执行同一节点脚本会复用数据卷和加密密钥，并重新导入当前工作流。
+安装器明确不会执行：
 
-n8n owner 密码必须为 8-64 位，并至少包含一个大写字母和一个数字。安装器会等待管理 API 完整就绪，并在导入工作流前确认 owner 已初始化；中断后可直接重新执行同一脚本。
+- 打包、复制、导入或发布任何 workflow JSON
+- 创建、导入或覆盖任何 n8n credential
+- 将 GRSAI、DeepSeek 或备用图片 API Key 写入下载脚本
 
-默认图片服务地址 `http://ews-image-sidecar:3000` 会触发闭环部署：安装器内嵌固定版本源码，在新主机构建 `ews-image-service:2026.07.28`，创建 `ews-image-valkey`、`ews-image-sidecar`、`ews-image-worker` 和具名 Valkey volume。重复执行时会用内嵌源码重建最新镜像并重新初始化；只有明确填写外部 HTTP/HTTPS 端点时才跳过本机图片栈。
+环境部署完成后，管理员需要登录 n8n 并人工完成：
+
+1. 导入仓库 `n8n/` 目录中的 9 个生产 workflow JSON。
+2. 创建 `GrsaiApp`、`deepseek` 和 `EWS Backup Image API` 三组 `HTTP Header Auth` credential。
+3. 将 credentials 绑定到对应节点；使用外部图片服务时，同时检查工作流的图片服务地址。
+4. 逐个检查并发布工作流，再用最小 Shopee 与聚水潭任务验证回调。
+
+节点状态保存在 `%LOCALAPPDATA%\EWS\n8n-nodes\{node}`。重复执行同一节点脚本会复用数据卷和加密密钥，并重建运行容器，但不会改动 n8n 中已有的工作流和凭证。
+
+默认图片服务地址 `http://ews-image-sidecar:3000` 会触发本机部署：安装器使用内嵌源码构建 `ews-image-service:2026.07.28`，创建 `ews-image-valkey`、`ews-image-sidecar`、`ews-image-worker` 和 Valkey volume。仅在明确填写外部 HTTP/HTTPS 端点时跳过本机图片服务。
 
 ## Cloudflare Tunnel
 
@@ -47,8 +57,8 @@ http://n8n:5678
 
 ## 安全边界
 
-- 密钥只在浏览器本地注入下载脚本，不通过 EWS API 上传。
-- 下载脚本包含明文敏感信息（密码、模型密钥和回调密钥）。部署后必须删除。
-- 模型密钥导入 n8n 后，安装器会删除宿主机和容器内的临时凭证文件。
+- owner 密码和回调密钥只在浏览器本地注入下载脚本，不通过 EWS API 上传。
+- 下载脚本包含上述两项明文敏感信息，部署后必须删除。
+- 模型 API Key 只能由管理员直接写入 n8n 加密凭证库。
 - 不要将生成的安装器提交到 Git、网盘或聊天工具。
 - 原始安装器模板不包含真实密钥，下载接口与 Wiki 接口均要求管理员鉴权。
