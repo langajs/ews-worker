@@ -315,7 +315,7 @@ function Install-LocalImageService([string]$BundleBase64, [string]$CallbackSecre
     'MAX_QUEUE_DEPTH=10000'
     'JPEG_QUALITY=88'
     'MAX_OUTPUT_BYTES=1900000'
-    'ALLOW_BENCHMARK_DNS=false'
+    'ALLOW_BENCHMARK_DNS=true'
     'LOG_LEVEL=info'
   )
   [IO.File]::WriteAllLines($envFile, $imageEnv, (New-Object Text.UTF8Encoding($false)))

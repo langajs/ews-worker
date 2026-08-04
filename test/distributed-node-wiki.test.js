@@ -108,6 +108,7 @@ test('one-click CMD deploys the runtime without workflows or model credentials',
   assert.match(powershellTemplate, /'ews-image-sidecar'/);
   assert.match(powershellTemplate, /'ews-image-worker'/);
   assert.match(powershellTemplate, /Wait-LocalImageService \$apiContainer \$CallbackSecret/);
+  assert.match(powershellTemplate, /'ALLOW_BENCHMARK_DNS=true'/);
   assert.match(powershellTemplate, /\/v1\/stats/);
   assert.match(powershellTemplate, /\$null -ne \$setupFlag/);
   assert.match(powershellTemplate, /owner setup did not complete/);
