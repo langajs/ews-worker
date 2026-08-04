@@ -8,7 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const workerSource = fs.readFileSync(path.join(root, 'src/index.js'), 'utf8');
 const wranglerSource = fs.readFileSync(path.join(root, 'wrangler.toml'), 'utf8');
 
-test('webhook delivery waits 300 seconds before retrying', () => {
+test('webhook delivery waits 300 seconds without retrying an ambiguous timeout', () => {
   assert.match(workerSource, /const PUSH_WEBHOOK_TIMEOUT_MS = 300_000;/);
   assert.match(workerSource,
     /const PUSH_PLAN_DISPATCH_TIMEOUT_SECONDS = \(PUSH_WEBHOOK_TIMEOUT_MS \/ 1000\) \+ 60;/);
