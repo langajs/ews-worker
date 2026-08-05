@@ -47,8 +47,8 @@ async function createGroup(env, group) {
   await env.DB.prepare("INSERT INTO ews_groups (id,name,status,created_by,created_at,updated_at) VALUES (?,?,'active',?,datetime('now'),datetime('now'))")
     .bind(group.id, group.name, group.created_by || '').run();
 }
-async function updateGroup(env, groupId, name, status, callbackSecret) {
-  await env.DB.prepare("UPDATE ews_groups SET name=?,status=?,callback_secret=?,updated_at=datetime('now') WHERE id=?").bind(name, status, callbackSecret, groupId).run();
+async function updateGroup(env, groupId, name, status, callbackSecret, workflowConfig) {
+  await env.DB.prepare("UPDATE ews_groups SET name=?,status=?,callback_secret=?,workflow_config=?,updated_at=datetime('now') WHERE id=?").bind(name, status, callbackSecret, workflowConfig || '{}', groupId).run();
 }
 async function createUser(env, user) { await env.DB.prepare("INSERT INTO ews_users (id, username, password_hash, role, display_name, platform_access, group_id, image_concurrency_limit, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(user.id, user.username, user.password_hash, user.role || 'user', user.display_name || '', normalizePlatformAccess(user.platform_access), user.group_id || 'default', normalizeUserImageConcurrencyLimit(user.image_concurrency_limit), user.created_by || '').run(); }
 async function getUserByUsername(env, username) { return await getOne(env, "SELECT u.*,g.name AS group_name,g.status AS group_status,g.callback_secret AS group_callback_secret FROM ews_users u LEFT JOIN ews_groups g ON g.id=u.group_id WHERE u.username = ?", [username]); }
@@ -106,19 +106,21 @@ function isTaskExpired(task, now = Date.now()) {
 async function createTaskIndex(env, id, platform, name, userId, groupId) { await env.DB.prepare("INSERT INTO ews_tasks (id, platform, name, status, user_id, group_id, created_at, updated_at) VALUES (?, ?, ?, 'init', ?, ?, datetime('now'), datetime('now'))").bind(id, platform, name || '', userId || '', groupId || 'default').run(); }
 async function updateTaskIndexStatus(env, id, status) { await env.DB.prepare("UPDATE ews_tasks SET status = ?, updated_at = datetime('now'), completed_at = CASE WHEN ? = 'completed' THEN COALESCE(completed_at, datetime('now')) ELSE NULL END WHERE id = ?").bind(status, status, id).run(); }
 async function getTaskIndex(env, id) { return await getOne(env, "SELECT * FROM ews_tasks WHERE id = ?", [id]); }
-async function getTaskList(env, platform, userId, role, limit = 0, offset = 0) {
+async function getTaskList(env, platform, userId, role, groupId, limit = 0, offset = 0) {
   let sql = "SELECT * FROM ews_tasks"; const params = []; const ws = [TASK_VISIBLE_SQL];
   if (platform) { ws.push("platform = ?"); params.push(platform); }
-  if (role !== 'admin') { ws.push("user_id = ?"); params.push(userId); }
+  if (role === 'group_admin') { ws.push("group_id = ?"); params.push(groupId); }
+  else if (role !== 'admin') { ws.push("user_id = ?"); params.push(userId); }
   if (ws.length) sql += " WHERE " + ws.join(" AND ");
   sql += " ORDER BY created_at DESC";
   if (limit > 0) { sql += " LIMIT ? OFFSET ?"; params.push(limit, Math.max(0, offset)); }
   return await query(env, sql, params);
 }
-async function getTaskCount(env, platform, userId, role) {
+async function getTaskCount(env, platform, userId, role, groupId) {
   let sql = "SELECT COUNT(*) AS cnt FROM ews_tasks"; const params = []; const ws = [TASK_VISIBLE_SQL];
   if (platform) { ws.push("platform = ?"); params.push(platform); }
-  if (role !== 'admin') { ws.push("user_id = ?"); params.push(userId); }
+  if (role === 'group_admin') { ws.push("group_id = ?"); params.push(groupId); }
+  else if (role !== 'admin') { ws.push("user_id = ?"); params.push(userId); }
   if (ws.length) sql += " WHERE " + ws.join(" AND ");
   const row = await getOne(env, sql, params);
   return row?.cnt || 0;

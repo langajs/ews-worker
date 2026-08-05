@@ -22,6 +22,17 @@ function canManageUser(auth, user) {
     && user.group_id === auth.group_id;
 }
 
+function canAccessTask(auth, task) {
+  if (!task) return false;
+  if (isSystemAdmin(auth)) return true;
+  if (isGroupAdmin(auth)) return task.group_id === auth.group_id;
+  return task.user_id === auth?.username;
+}
+
+function canControlTask(auth, task) {
+  return Boolean(task) && (isSystemAdmin(auth) || task.user_id === auth?.username);
+}
+
 function canGrantPlatformAccess(auth, requestedAccess) {
   if (isSystemAdmin(auth)) return true;
   if (!isGroupAdmin(auth)) return false;
@@ -36,6 +47,8 @@ function manageablePlatforms(auth) {
 }
 
 export {
+  canAccessTask,
+  canControlTask,
   canGrantPlatformAccess,
   canManageUser,
   isGroupAdmin,

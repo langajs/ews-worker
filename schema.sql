@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS ews_groups (
   name TEXT NOT NULL COLLATE NOCASE UNIQUE,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
   callback_secret TEXT NOT NULL DEFAULT '',
+  workflow_config TEXT NOT NULL DEFAULT '{}', -- JSON: {"jst":{...}, "shopee":{...}}
   created_by TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))

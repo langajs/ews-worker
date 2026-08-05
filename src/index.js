@@ -35,6 +35,8 @@ import {
 import { generateToken, hashPassword, verifyPassword, authenticateRequest, DEFAULT_PASSWORD } from './auth.js';
 import { runAuthenticatedRoute } from './route-auth.js';
 import {
+  canAccessTask,
+  canControlTask,
   canGrantPlatformAccess,
   canManageUser,
   isGroupAdmin,
@@ -42,6 +44,7 @@ import {
   isUserManager,
   manageablePlatforms,
 } from './admin-access.js';
+import { applyWorkflowOverrides, normalizeWorkflowConfig } from './workflow-config.js';
 import {
   buildShopeeWorkbook, compareShopeeTemplateSemantics, parseShopeeTemplate, sha256Hex,
   shopeeParentSku, shopeeVariationIntegrationNo, SHOPEE_TEMPLATE_SEMANTIC_KEYS,
@@ -96,11 +99,6 @@ function isEnabled(value) {
   return value === true || value === 1 || value === '1' || value === 'true';
 }
 
-const USER_WORKFLOW_SWITCH_KEYS = new Set([
-  'n8n_title_enabled',
-  'n8n_sku_image_enabled',
-]);
-
 function isWorkflowEnabled(config, key) {
   const value = config?.[key];
   return value === undefined || value === null || value === '' ? true : isEnabled(value);
@@ -116,49 +114,27 @@ function workflowExecutionFlags(config) {
   };
 }
 
-function applyUserWorkflowOverrides(config, rawConfig, platform) {
-  if (!rawConfig) return;
-  try {
-    const platformConfig = JSON.parse(rawConfig)?.[platform];
-    if (!platformConfig || typeof platformConfig !== 'object' || Array.isArray(platformConfig)) return;
-    for (const [key, value] of Object.entries(platformConfig)) {
-      if (value === undefined || value === null || value === '' || value === 'inherit') continue;
-      config[key] = value;
-    }
-  } catch (_) {}
-}
-
-function normalizeUserWorkflowConfig(body) {
-  const normalized = {};
-  for (const platform of ['jst', 'shopee']) {
-    const source = body?.[platform];
-    if (!source || typeof source !== 'object' || Array.isArray(source)) continue;
-    const target = {};
-    for (const [key, value] of Object.entries(source)) {
-      if (USER_WORKFLOW_SWITCH_KEYS.has(key)) {
-        if (typeof value === 'boolean') target[key] = value;
-        else if (value === 'true' || value === 'false') target[key] = value === 'true';
-      } else if (typeof value === 'string' && value.trim()) {
-        target[key] = value.trim();
-      } else if (typeof value === 'number' || typeof value === 'boolean') {
-        target[key] = value;
-      }
-    }
-    normalized[platform] = target;
-  }
-  return normalized;
-}
-
 function mergeManagedWorkflowConfig(rawConfig, body, auth) {
   let currentSource = rawConfig || {};
   if (typeof currentSource === 'string') {
     try { currentSource = JSON.parse(currentSource); }
     catch (_) { currentSource = {}; }
   }
-  const current = normalizeUserWorkflowConfig(currentSource);
-  const updates = normalizeUserWorkflowConfig(body);
+  const current = normalizeWorkflowConfig(currentSource);
+  const updates = normalizeWorkflowConfig(body);
   for (const platform of manageablePlatforms(auth)) current[platform] = updates[platform] || {};
   return current;
+}
+
+async function effectiveWorkflowConfig(env, platform, ownerId, groupId) {
+  const [config, owner, group] = await Promise.all([
+    getConfig(env, platform),
+    getUserByUsername(env, ownerId || 'admin'),
+    getGroupById(env, groupId || 'default'),
+  ]);
+  applyWorkflowOverrides(config, group?.workflow_config, platform);
+  applyWorkflowOverrides(config, owner?.webhook_config, platform);
+  return { config, owner };
 }
 
 function clampPricePrecision(value) {
@@ -246,11 +222,11 @@ async function requireAuth(request, env, handler) {
   });
 }
 
-async function requireTaskAccess(request, env, path, handler) {
+async function requireTaskAccess(request, env, path, handler, control = false) {
   const taskId = getTaskId(path);
   const task = await getTaskIndex(env, taskId);
   if (!task) return error('任务不存在', 404);
-  if (!isSystemAdmin(request.auth) && task.user_id !== request.auth?.username) {
+  if (!(control ? canControlTask(request.auth, task) : canAccessTask(request.auth, task))) {
     return error('无权访问该任务', 403);
   }
   if (isTaskExpired(task)) return error('任务缓存已过期并等待自动清理', 410);
@@ -354,19 +330,19 @@ export default {
       if (path.match(/^\/api\/tasks\/[^\/]+$/) && method === 'GET')
         return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleGetTaskDetail(request, env, ctx, path, task)));
       if (path.match(/^\/api\/tasks\/[^\/]+$/) && method === 'PUT')
-        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleUpdateTask(request, env, path, task)));
+        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleUpdateTask(request, env, path, task), true));
       if (path.match(/^\/api\/tasks\/[^\/]+$/) && method === 'DELETE')
-        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleDeleteTask(env, path, task)));
+        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleDeleteTask(env, path, task), true));
       if (path.match(/^\/api\/tasks\/[^\/]+\/status$/) && method === 'PUT')
-        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleUpdateTaskStatus(request, env, path, task)));
+        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleUpdateTaskStatus(request, env, path, task), true));
       if (path.match(/^\/api\/tasks\/[^\/]+\/template$/) && method === 'PUT')
-        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleSwitchShopeeTaskTemplate(request, env, path, task)));
+        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleSwitchShopeeTaskTemplate(request, env, path, task), true));
       if (path.match(/^\/api\/tasks\/[^\/]+\/push$/) && method === 'POST')
-        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handlePushTask(env, ctx, path, request, task)));
+        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handlePushTask(env, ctx, path, request, task), true));
       if (path.match(/^\/api\/tasks\/[^\/]+\/plans$/) && method === 'GET')
         return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleGetPlans(env, path, task)));
       if (path.match(/^\/api\/tasks\/[^\/]+\/plans\/[^\/]+\/retry$/) && method === 'POST')
-        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleRetryPlan(env, path, request, ctx, task)));
+        return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleRetryPlan(env, path, request, ctx, task), true));
       if (path.match(/^\/api\/tasks\/[^\/]+\/export$/) && method === 'GET')
         return requireAuth(request, env, () => requireTaskAccess(request, env, path, task => handleExportTask(env, path, task)));
 
@@ -605,6 +581,7 @@ function serializeGroup(group) {
     name: group.name,
     status: group.status,
     callback_secret: group.callback_secret || '',
+    workflow_config: normalizeWorkflowConfig(group.workflow_config),
     user_count: Number(group.user_count || 0),
     template_count: Number(group.template_count || 0),
     created_by: group.created_by || '',
@@ -617,7 +594,10 @@ async function handleGetGroups(request, env) {
   if (!isUserManager(request.auth)) return error('无权访问', 403);
   const result = await getGroupList(env, isGroupAdmin(request.auth) ? request.auth.group_id : '');
   const groups = (result?.results || []).map(serializeGroup);
-  if (isGroupAdmin(request.auth)) groups.forEach(group => { delete group.callback_secret; });
+  if (isGroupAdmin(request.auth)) groups.forEach(group => {
+    delete group.callback_secret;
+    delete group.workflow_config;
+  });
   return json({ success: true, groups });
 }
 
@@ -647,9 +627,13 @@ async function handleUpdateGroup(request, env, path) {
   if (!['active', 'disabled'].includes(status)) return error('分组状态仅支持 active 或 disabled', 400);
   const callbackSecret = String(body.callback_secret ?? group.callback_secret ?? '').trim();
   if (callbackSecret.length > 256) return error('回调密钥不能超过256字符', 400);
+  const workflowConfig = body.workflow_config === undefined
+    ? String(group.workflow_config || '{}')
+    : JSON.stringify(normalizeWorkflowConfig(body.workflow_config));
+  if (workflowConfig.length > 16000) return error('分组工作流配置过大', 400);
   const duplicate = await getOne(env, "SELECT id FROM ews_groups WHERE name=? COLLATE NOCASE AND id<>?", [name, groupId]);
   if (duplicate) return error('分组名称已存在', 409);
-  await updateGroup(env, groupId, name, status, callbackSecret);
+  await updateGroup(env, groupId, name, status, callbackSecret, workflowConfig);
   const refreshed = await getGroupById(env, groupId);
   return json({ success: true, group: serializeGroup(refreshed), message: status === 'disabled' ? '分组已停用，组内用户将无法登录' : '分组设置已更新' });
 }
@@ -1568,12 +1552,12 @@ async function handleGetTasks(env, ctx, auth, url) {
   const platform = ['jst','shopee'].includes(url.searchParams.get('platform')) ? url.searchParams.get('platform') : '';
   const page = Math.max(parseInt(url.searchParams.get('page')) || 1, 1);
   const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit')) || 10, 1), 100);
+  const taskRole = isSystemAdmin(auth) ? 'admin' : (isGroupAdmin(auth) ? 'group_admin' : 'user');
   const [result, total] = await Promise.all([
-    getTaskList(env, platform, auth.username, isSystemAdmin(auth) ? 'admin' : 'user', limit, (page - 1) * limit),
-    getTaskCount(env, platform, auth.username, isSystemAdmin(auth) ? 'admin' : 'user'),
+    getTaskList(env, platform, auth.username, taskRole, auth.group_id || '', limit, (page - 1) * limit),
+    getTaskCount(env, platform, auth.username, taskRole, auth.group_id || ''),
   ]);
   let tasks = result.results || [];
-  if (!isSystemAdmin(auth)) tasks = tasks.filter(t => t.user_id === auth.username);
 
   const jstIds = tasks.filter(t => t.platform === 'jst').map(t => t.id);
   const shopeeIds = tasks.filter(t => t.platform === 'shopee').map(t => t.id);
@@ -2072,11 +2056,9 @@ async function jstHandlePush(env, taskId, ctx, request) {
   const detail = await jstGetTask(env, taskId);
   if (!detail) return error('任务不存在', 404);
   if (detail.status !== 'pending') return error('只能推送等待中的任务', 400);
-  const config = await getConfig(env, 'jst');
   const taskOwner = await getOne(env, "SELECT user_id,group_id FROM ews_tasks WHERE id=?", [taskId]);
   const ownerId = taskOwner?.user_id || request.auth?.username || '';
-  const pushUser = await getUserByUsername(env, ownerId);
-  applyUserWorkflowOverrides(config, pushUser?.webhook_config, 'jst');
+  const { config, owner: pushUser } = await effectiveWorkflowConfig(env, 'jst', ownerId, taskOwner?.group_id);
   const workflowFlags = workflowExecutionFlags(config);
   const callbackSecret = await callbackSecretForTask(env, taskOwner);
   const baseUrl = `${new URL(request.url).origin}/api/callback`;
@@ -2194,11 +2176,9 @@ async function jstHandlePush(env, taskId, ctx, request) {
 async function shopeeHandlePush(env, taskId, ctx, request) {
   const body = await parseBody(request).catch(() => ({}));
   const testMode = body?.test_mode === true;
-  const config = await getConfig(env, 'shopee');
   const taskOwner = await getOne(env, "SELECT user_id,group_id FROM ews_tasks WHERE id=?", [taskId]);
   const ownerId = taskOwner?.user_id || request.auth?.username || '';
-  const pushUser = await getUserByUsername(env, ownerId);
-  applyUserWorkflowOverrides(config, pushUser?.webhook_config, 'shopee');
+  const { config, owner: pushUser } = await effectiveWorkflowConfig(env, 'shopee', ownerId, taskOwner?.group_id);
   const workflowFlags = workflowExecutionFlags(config);
   const detail = await shopeeGetProduct(env, taskId);
   if (!detail) return error('商品不存在', 404);
@@ -2554,11 +2534,9 @@ async function dispatchPushPlan(env, planTable, taskId, plan) {
 }
 
 async function releaseTaskPlans(env, planTable, platform, taskId, ctx, dispatchBudget) {
-  const config = await getConfig(env, platform);
-  const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
+  const taskOwner = await getOne(env, "SELECT user_id,group_id FROM ews_tasks WHERE id=?", [taskId]);
   const ownerId = taskOwner?.user_id || '';
-  const workflowUser = await getUserByUsername(env, ownerId || 'admin');
-  applyUserWorkflowOverrides(config, workflowUser?.webhook_config, platform);
+  const { config, owner: workflowUser } = await effectiveWorkflowConfig(env, platform, ownerId, taskOwner?.group_id);
   const workflowFlags = workflowExecutionFlags(config);
   const imageConcurrencyLimit = normalizeUserImageConcurrencyLimit(workflowUser?.image_concurrency_limit);
   const imageActive = await getUserImageActiveCount(env, ownerId);
