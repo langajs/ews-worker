@@ -7,6 +7,7 @@ import {
   getTaskList,
   shopeeReplaceGroupTemplates,
   shopeeReplaceTemplateGroups,
+  updateUserGroup,
 } from '../src/db.js';
 
 class D1Statement {
@@ -71,6 +72,37 @@ test('task queries expose the full group only to group admins', async () => {
 
     const adminRows = await getTaskList(env, '', 'admin', 'admin', 'default');
     assert.equal(adminRows.results.length, 3);
+  } finally {
+    database.close();
+  }
+});
+
+test('moving a user keeps existing tasks in their creation-time group', async () => {
+  const { database, env } = createEnv(`
+    CREATE TABLE ews_users (id TEXT PRIMARY KEY, group_id TEXT NOT NULL);
+    CREATE TABLE ews_tasks (
+      id TEXT PRIMARY KEY, platform TEXT NOT NULL, status TEXT NOT NULL,
+      user_id TEXT NOT NULL, group_id TEXT NOT NULL,
+      created_at TEXT NOT NULL, completed_at TEXT
+    );
+    INSERT INTO ews_users VALUES ('user-a','group-a');
+    INSERT INTO ews_tasks VALUES
+      ('task-a1','jst','pending','user-a','group-a',datetime('now'),NULL),
+      ('task-a2','shopee','completed','user-a','group-a',datetime('now'),datetime('now'));
+  `);
+  try {
+    await updateUserGroup(env, 'user-a', 'group-b');
+
+    assert.equal(database.prepare('SELECT group_id FROM ews_users WHERE id=?').get('user-a').group_id, 'group-b');
+    assert.deepEqual(database.prepare('SELECT id,group_id FROM ews_tasks ORDER BY id').all().map(row => `${row.id}:${row.group_id}`), [
+      'task-a1:group-a',
+      'task-a2:group-a',
+    ]);
+
+    const ownerRows = await getTaskList(env, '', 'user-a', 'user', 'group-b');
+    assert.deepEqual(ownerRows.results.map(row => row.id).sort(), ['task-a1', 'task-a2']);
+    assert.equal((await getTaskList(env, '', 'manager-a', 'group_admin', 'group-a')).results.length, 2);
+    assert.equal((await getTaskList(env, '', 'manager-b', 'group_admin', 'group-b')).results.length, 0);
   } finally {
     database.close();
   }

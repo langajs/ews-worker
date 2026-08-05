@@ -33,6 +33,7 @@ import {
   shopeeSaveImage, shopeeCheckParentCompletion, shopeeRefundCredits, shopeeUpdateVariationExports,
 } from './db.js';
 import { generateToken, hashPassword, verifyPassword, authenticateRequest, DEFAULT_PASSWORD } from './auth.js';
+import { isValidNewPassword, isValidNewUsername } from './credential-validation.js';
 import { runAuthenticatedRoute } from './route-auth.js';
 import {
   canAccessTask,
@@ -450,7 +451,7 @@ async function handleChangePassword(request, env) {
   const body = await parseBody(request);
   const { old_password, new_password } = body || {};
   if (!old_password || !new_password) return error('请提供旧密码和新密码', 400);
-  if (new_password.length < 6) return error('新密码长度不能少于6个字符', 400);
+  if (!isValidNewPassword(new_password)) return error('新密码至少6位，仅允许英文字母、数字及 . _ @ -', 400);
   const auth = request.auth;
   const user = await getUserByUsername(env, auth.username);
   if (!user) return error('用户不存在', 404);
@@ -1115,9 +1116,10 @@ async function handleCreateUser(request, env) {
   const body = await parseBody(request);
   const { username, password, role } = body || {};
   if (!username || !password) return error('用户名和密码不能为空', 400);
+  if (!isValidNewUsername(username)) return error('用户名仅允许1~16位英文字母或数字', 400);
   if (role === 'admin') return error('默认管理员账号不可新增', 403);
   if (role === 'group_admin' && !isSystemAdmin(request.auth)) return error('只有默认管理员可以创建受限管理员', 403);
-  if (password.length < 6) return error('密码长度不能少于6个字符', 400);
+  if (!isValidNewPassword(password)) return error('密码至少6位，仅允许英文字母、数字及 . _ @ -', 400);
   const existing = await getUserByUsername(env, username);
   if (existing) return error('用户名已存在', 400);
   const pwdHash = await hashPassword(password);
@@ -1179,7 +1181,7 @@ async function handleUpdateUserGroup(request, env, path) {
   if (!user) return error('用户不存在', 404);
   if (!group) return error('分组不存在', 404);
   await updateUserGroup(env, user.id, groupId);
-  return json({ success: true, group_id: groupId, group_name: group.name, group_status: group.status, message: '用户分组已更新' });
+  return json({ success: true, group_id: groupId, group_name: group.name, group_status: group.status, message: '用户分组已更新，历史任务保持原分组归属' });
 }
 
 async function handleGetUserWebhook(request, env, path) {
