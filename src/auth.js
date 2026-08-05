@@ -99,7 +99,8 @@ async function authenticateRequest(request, env) {
     try {
       user = await env.DB.prepare("SELECT u.*,g.name AS group_name,g.status AS group_status FROM ews_users u LEFT JOIN ews_groups g ON g.id=u.group_id WHERE u.username = ?").bind(payload.sub).first();
     } catch (_) {}
-    if (!user || user.is_active === 0 || (user.role !== 'admin' && user.group_status !== 'active')) return { valid: false };
+    const systemAdmin = user?.id === 'admin' && user?.role === 'admin';
+    if (!user || user.is_active === 0 || (!systemAdmin && user.group_status !== 'active')) return { valid: false };
 
     return {
       valid: true,

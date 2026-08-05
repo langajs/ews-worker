@@ -233,11 +233,12 @@ test('admin deployment wiki protects installer details and uses CMD flow', () =>
   assert.match(workerWiki, /Cloudflare Tunnel/);
   assert.match(workerEntry, /requireAuth\(request, env, \(\) => handleGetDistributedN8nWiki\(request\)\)/);
   assert.match(workerEntry, /requireAuth\(request, env, \(\) => handleDownloadDistributedN8nScript\(request\)\)/);
-  assert.match(workerEntry, /request\.auth\?\.role === 'admin'/);
+  assert.match(workerEntry, /isSystemAdmin\(request\.auth\)/);
   assert.match(workerEntry, /'Cache-Control': 'private, no-store, max-age=0'/);
   assert.match(frontendShell, /生成一键部署脚本/);
   assert.match(frontendShell, /模型凭证不写入安装脚本/);
-  assert.match(frontendShell, /API\.getConfig\(\)/);
+  assert.match(frontendShell, /API\.getGroups\(\)/);
+  assert.match(frontendShell, /id="deploymentGroup"/);
   assert.match(frontendShell, /id="callbackSecret"/);
   assert.match(frontendShell, /默认地址会在本机自动部署/);
   assert.match(frontendShell, /人工导入 9 个 workflow JSON/);

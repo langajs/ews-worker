@@ -35,6 +35,14 @@ import {
 import { generateToken, hashPassword, verifyPassword, authenticateRequest, DEFAULT_PASSWORD } from './auth.js';
 import { runAuthenticatedRoute } from './route-auth.js';
 import {
+  canGrantPlatformAccess,
+  canManageUser,
+  isGroupAdmin,
+  isSystemAdmin,
+  isUserManager,
+  manageablePlatforms,
+} from './admin-access.js';
+import {
   buildShopeeWorkbook, compareShopeeTemplateSemantics, parseShopeeTemplate, sha256Hex,
   shopeeParentSku, shopeeVariationIntegrationNo, SHOPEE_TEMPLATE_SEMANTIC_KEYS,
 } from './shopee-template.js';
@@ -141,6 +149,18 @@ function normalizeUserWorkflowConfig(body) {
   return normalized;
 }
 
+function mergeManagedWorkflowConfig(rawConfig, body, auth) {
+  let currentSource = rawConfig || {};
+  if (typeof currentSource === 'string') {
+    try { currentSource = JSON.parse(currentSource); }
+    catch (_) { currentSource = {}; }
+  }
+  const current = normalizeUserWorkflowConfig(currentSource);
+  const updates = normalizeUserWorkflowConfig(body);
+  for (const platform of manageablePlatforms(auth)) current[platform] = updates[platform] || {};
+  return current;
+}
+
 function clampPricePrecision(value) {
   const n = parseInt(value);
   if (Number.isNaN(n)) return 0;
@@ -152,13 +172,13 @@ function normalizePlatformAccess(value) {
 }
 
 function canUsePlatform(auth, platform) {
-  if (auth?.role === 'admin') return true;
+  if (isSystemAdmin(auth)) return true;
   const access = normalizePlatformAccess(auth?.platform_access);
   return access === 'allow' || access === platform;
 }
 
 function templateAccessGroup(auth) {
-  return auth?.role === 'admin' ? '' : String(auth?.group_id || '');
+  return isSystemAdmin(auth) ? '' : String(auth?.group_id || '');
 }
 
 function normalizeVariantPricing(variant, requiredPrice) {
@@ -230,7 +250,7 @@ async function requireTaskAccess(request, env, path, handler) {
   const taskId = getTaskId(path);
   const task = await getTaskIndex(env, taskId);
   if (!task) return error('任务不存在', 404);
-  if (request.auth?.role !== 'admin' && task.user_id !== request.auth?.username) {
+  if (!isSystemAdmin(request.auth) && task.user_id !== request.auth?.username) {
     return error('无权访问该任务', 403);
   }
   if (isTaskExpired(task)) return error('任务缓存已过期并等待自动清理', 410);
@@ -410,7 +430,7 @@ async function handleLogin(request, env) {
 
   const loginName = username || 'admin';
   let user = await getUserByUsername(env, loginName);
-  if (!user) {
+  if (!user && loginName === 'admin') {
     const config = await getConfig(env);
     if (config.admin_password) {
       const valid = await verifyPassword(password, config.admin_password);
@@ -421,7 +441,7 @@ async function handleLogin(request, env) {
       }
     }
   }
-  if (!user || user.is_active === 0 || (user.role !== 'admin' && user.group_status !== 'active')) return recordFail(loginAttempts, record, ip, now);
+  if (!user || user.is_active === 0 || (!isSystemAdmin(user) && user.group_status !== 'active')) return recordFail(loginAttempts, record, ip, now);
   const valid = await verifyPassword(password, user.password_hash);
   if (!valid) return recordFail(loginAttempts, record, ip, now);
 
@@ -429,7 +449,7 @@ async function handleLogin(request, env) {
   const token = await generateToken(env, user.username, user.role);
   return json({
     success: true, token,
-    user: { username: user.username, role: user.role, display_name: user.display_name, platform_access: user.role === 'admin' ? 'allow' : normalizePlatformAccess(user.platform_access), group_id: user.group_id || '', group_name: user.group_name || '' },
+    user: { username: user.username, role: user.role, display_name: user.display_name, platform_access: isSystemAdmin(user) ? 'allow' : normalizePlatformAccess(user.platform_access), group_id: user.group_id || '', group_name: user.group_name || '' },
     is_default_password: password === DEFAULT_PASSWORD,
     message: password === DEFAULT_PASSWORD ? '请及时修改默认密码' : '登录成功',
   });
@@ -447,7 +467,7 @@ async function handleLogin(request, env) {
 
 async function handleVerify(request, env) {
   const auth = await authenticateRequest(request, env);
-  return json({ success: auth.valid, username: auth.username || null, role: auth.role || null, platform_access: auth.role === 'admin' ? 'allow' : normalizePlatformAccess(auth.platform_access), group_id: auth.group_id || '', group_name: auth.group_name || '' });
+  return json({ success: auth.valid, username: auth.username || null, role: auth.role || null, platform_access: isSystemAdmin(auth) ? 'allow' : normalizePlatformAccess(auth.platform_access), group_id: auth.group_id || '', group_name: auth.group_name || '' });
 }
 
 async function handleChangePassword(request, env) {
@@ -466,7 +486,7 @@ async function handleChangePassword(request, env) {
 }
 
 function adminWikiError(request) {
-  return request.auth?.role === 'admin' ? null : error('无权访问', 403);
+  return isSystemAdmin(request.auth) ? null : error('无权访问', 403);
 }
 
 async function handleGetDistributedN8nWiki(request) {
@@ -537,22 +557,24 @@ const RETIRED_CONCURRENCY_CONFIG_KEYS = new Set([
 ]);
 
 async function handleGetConfig(request, env, url) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isSystemAdmin(request.auth)) return error('无权访问', 403);
   const platform = url.searchParams.get('platform') || '';
   const config = await getConfig(env, platform);
   const safe = { ...config };
   delete safe.admin_password;
   delete safe.jwt_secret_name;
+  delete safe.callback_secret;
   for (const key of RETIRED_CONCURRENCY_CONFIG_KEYS) delete safe[key];
   return json({ success: true, config: safe, platform });
 }
 
 async function handleUpdateConfig(request, env) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isSystemAdmin(request.auth)) return error('无权访问', 403);
   const body = await parseBody(request);
   if (!body || typeof body !== 'object') return error('无效的配置数据', 400);
   const platform = body._platform || '';
   delete body._platform;
+  delete body.callback_secret;
   if (body.push_plan_timeout_minutes !== undefined) {
     const timeoutMinutes = Number(body.push_plan_timeout_minutes);
     if (!Number.isInteger(timeoutMinutes) || timeoutMinutes < MIN_PUSH_PLAN_TIMEOUT_MINUTES || timeoutMinutes > MAX_PUSH_PLAN_TIMEOUT_MINUTES) {
@@ -582,6 +604,7 @@ function serializeGroup(group) {
     id: group.id,
     name: group.name,
     status: group.status,
+    callback_secret: group.callback_secret || '',
     user_count: Number(group.user_count || 0),
     template_count: Number(group.template_count || 0),
     created_by: group.created_by || '',
@@ -591,13 +614,15 @@ function serializeGroup(group) {
 }
 
 async function handleGetGroups(request, env) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
-  const result = await getGroupList(env);
-  return json({ success: true, groups: (result?.results || []).map(serializeGroup) });
+  if (!isUserManager(request.auth)) return error('无权访问', 403);
+  const result = await getGroupList(env, isGroupAdmin(request.auth) ? request.auth.group_id : '');
+  const groups = (result?.results || []).map(serializeGroup);
+  if (isGroupAdmin(request.auth)) groups.forEach(group => { delete group.callback_secret; });
+  return json({ success: true, groups });
 }
 
 async function handleCreateGroup(request, env) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isSystemAdmin(request.auth)) return error('无权访问', 403);
   const body = await parseBody(request) || {};
   let name;
   try { name = normalizeGroupName(body.name); }
@@ -610,7 +635,7 @@ async function handleCreateGroup(request, env) {
 }
 
 async function handleUpdateGroup(request, env, path) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isSystemAdmin(request.auth)) return error('无权访问', 403);
   const groupId = decodeURIComponent(path.split('/')[3] || '');
   const group = await getGroupById(env, groupId);
   if (!group) return error('分组不存在', 404);
@@ -620,15 +645,17 @@ async function handleUpdateGroup(request, env, path) {
   catch (err) { return error(err.message, 400); }
   const status = String(body.status ?? group.status);
   if (!['active', 'disabled'].includes(status)) return error('分组状态仅支持 active 或 disabled', 400);
+  const callbackSecret = String(body.callback_secret ?? group.callback_secret ?? '').trim();
+  if (callbackSecret.length > 256) return error('回调密钥不能超过256字符', 400);
   const duplicate = await getOne(env, "SELECT id FROM ews_groups WHERE name=? COLLATE NOCASE AND id<>?", [name, groupId]);
   if (duplicate) return error('分组名称已存在', 409);
-  await updateGroup(env, groupId, name, status);
+  await updateGroup(env, groupId, name, status, callbackSecret);
   const refreshed = await getGroupById(env, groupId);
-  return json({ success: true, group: serializeGroup(refreshed), message: status === 'disabled' ? '分组已停用，组内普通用户将无法登录' : '分组设置已更新' });
+  return json({ success: true, group: serializeGroup(refreshed), message: status === 'disabled' ? '分组已停用，组内用户将无法登录' : '分组设置已更新' });
 }
 
 async function handleUpdateGroupTemplates(request, env, path) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isSystemAdmin(request.auth)) return error('无权访问', 403);
   const groupId = decodeURIComponent(path.split('/')[3] || '');
   if (!await getGroupById(env, groupId)) return error('分组不存在', 404);
   const body = await parseBody(request) || {};
@@ -744,7 +771,7 @@ function shopeeTemplateProfileIdFromPath(path) {
 }
 
 async function handleGetShopeeTemplateProfiles(request, env) {
-  const result = await shopeeListTemplateProfiles(env, request.auth.username, request.auth.role === 'admin', templateAccessGroup(request.auth));
+  const result = await shopeeListTemplateProfiles(env, request.auth.username, isSystemAdmin(request.auth), templateAccessGroup(request.auth));
   const profiles = (result?.results || []).map(row => serializeShopeeTemplateProfile(row));
   return json({ success: true, profiles, stores: profiles });
 }
@@ -752,9 +779,9 @@ async function handleGetShopeeTemplateProfiles(request, env) {
 async function handleGetShopeeTemplateProfile(request, env, path) {
   const profileId = shopeeTemplateProfileIdFromPath(path);
   const profile = await shopeeGetTemplateProfile(env, profileId, request.auth.username, templateAccessGroup(request.auth));
-  if (!profile || (request.auth.role !== 'admin' && (profile.status !== 'active' || profile.deleted_at))) return error('模板档案不存在或不可用', 404);
+  if (!profile || (!isSystemAdmin(request.auth) && (profile.status !== 'active' || profile.deleted_at))) return error('模板档案不存在或不可用', 404);
   const currentVersion = profile.current_version_id ? await shopeeGetCurrentTemplateVersion(env, profileId) : null;
-  const latestVersion = request.auth.role === 'admin' ? await shopeeGetLatestTemplateVersion(env, profileId) : currentVersion;
+  const latestVersion = isSystemAdmin(request.auth) ? await shopeeGetLatestTemplateVersion(env, profileId) : currentVersion;
   const dataVersion = currentVersion || latestVersion;
   const categories = dataVersion ? (await shopeeGetTemplateCategories(env, dataVersion.id))?.results || [] : [];
   const manifest = parseJson(dataVersion?.manifest_json, {});
@@ -766,7 +793,7 @@ async function handleGetShopeeTemplateProfile(request, env, path) {
     categories,
     shipping_channels: annotateShopeeShippingChannels(manifest.shipping_channels),
   };
-  if (request.auth.role === 'admin') {
+  if (isSystemAdmin(request.auth)) {
     const versions = (await shopeeGetTemplateProfileVersions(env, profileId))?.results || [];
     const fields = latestVersion ? (await shopeeGetTemplateFields(env, latestVersion.id))?.results || [] : [];
     response.versions = versions.map(version => ({
@@ -1000,7 +1027,7 @@ async function handleUpdateShopeeTemplateMeta(request, env, path) {
 }
 
 async function handleUpdateShopeeTemplateGroups(request, env, path) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isSystemAdmin(request.auth)) return error('无权访问', 403);
   const profileId = shopeeTemplateProfileIdFromPath(path);
   const profile = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
   if (!profile) return error('模板档案不存在', 404);
@@ -1018,7 +1045,7 @@ async function handleUpdateShopeeTemplateGroups(request, env, path) {
 }
 
 async function handleMapShopeeTemplateField(request, env, path) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isSystemAdmin(request.auth)) return error('无权访问', 403);
   const parts = path.split('/');
   const profileId = decodeURIComponent(parts[4] || '');
   const versionId = decodeURIComponent(parts[6] || '');
@@ -1035,7 +1062,7 @@ async function handleMapShopeeTemplateField(request, env, path) {
 }
 
 async function handleAdminUpdateShopeeTemplateProfile(request, env, path) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isSystemAdmin(request.auth)) return error('无权访问', 403);
   const profileId = shopeeTemplateProfileIdFromPath(path);
   const profile = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
   if (!profile) return error('模板档案不存在', 404);
@@ -1061,7 +1088,7 @@ async function handleAdminUpdateShopeeTemplateProfile(request, env, path) {
 }
 
 async function handleDeleteShopeeTemplateProfile(request, env, path, url) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isSystemAdmin(request.auth)) return error('无权访问', 403);
   const profileId = shopeeTemplateProfileIdFromPath(path);
   const profile = await shopeeGetTemplateProfile(env, profileId, request.auth.username);
   if (!profile) return error('模板档案不存在', 404);
@@ -1083,8 +1110,8 @@ async function handleDeleteShopeeTemplateProfile(request, env, path, url) {
 // ========== 用户管理 ==========
 
 async function handleGetUsers(request, env) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
-  const result = await getUserList(env);
+  if (!isUserManager(request.auth)) return error('无权访问', 403);
+  const result = await getUserList(env, isGroupAdmin(request.auth) ? request.auth.group_id : '');
   return json({ success: true, users: (result?.results || []).map(u => ({
     id: u.id, username: u.username, role: u.role, display_name: u.display_name,
     platform_access: u.role === 'admin' ? 'allow' : normalizePlatformAccess(u.platform_access),
@@ -1092,61 +1119,74 @@ async function handleGetUsers(request, env) {
     image_concurrency_limit: normalizeUserImageConcurrencyLimit(u.image_concurrency_limit),
     is_active: u.is_active, login_enabled: u.role === 'admin' ? Number(u.is_active) === 1 : Number(u.is_active) === 1 && u.group_status === 'active',
     credits: u.credits ?? 0, created_at: u.created_at
-  })) });
+  })), management: {
+    system_admin: isSystemAdmin(request.auth),
+    group_id: request.auth.group_id || '',
+    platforms: manageablePlatforms(request.auth),
+  } });
 }
 
 async function handleCreateUser(request, env) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isUserManager(request.auth)) return error('无权访问', 403);
   const body = await parseBody(request);
   const { username, password, role } = body || {};
   if (!username || !password) return error('用户名和密码不能为空', 400);
+  if (role === 'admin') return error('默认管理员账号不可新增', 403);
+  if (role === 'group_admin' && !isSystemAdmin(request.auth)) return error('只有默认管理员可以创建受限管理员', 403);
   if (password.length < 6) return error('密码长度不能少于6个字符', 400);
   const existing = await getUserByUsername(env, username);
   if (existing) return error('用户名已存在', 400);
   const pwdHash = await hashPassword(password);
-  const groupId = String(body?.group_id || 'default');
+  const groupId = isGroupAdmin(request.auth) ? request.auth.group_id : String(body?.group_id || 'default');
   if (!await getGroupById(env, groupId)) return error('所选分组不存在', 400);
+  const platformAccess = normalizePlatformAccess(body?.platform_access);
+  if (!canGrantPlatformAccess(request.auth, platformAccess)) return error('不能授予超出自身范围的平台能力', 403);
+  const userRole = role === 'group_admin' ? 'group_admin' : 'user';
   const requestedConcurrency = body?.image_concurrency_limit;
   if (requestedConcurrency !== undefined && (!Number.isInteger(Number(requestedConcurrency)) || Number(requestedConcurrency) < 1 || Number(requestedConcurrency) > 20)) return error('图片并发上限必须为1~20', 400);
-  await createUser(env, { id: username, username, password_hash: pwdHash, role: role === 'admin' ? 'admin' : 'user', platform_access: normalizePlatformAccess(body?.platform_access), group_id: groupId, image_concurrency_limit: requestedConcurrency, created_by: request.auth.username });
+  await createUser(env, { id: username, username, password_hash: pwdHash, role: userRole, platform_access: platformAccess, group_id: groupId, image_concurrency_limit: requestedConcurrency, created_by: request.auth.username });
   return json({ success: true, message: '用户创建成功' }, 201);
 }
 
 async function handleToggleUser(request, env, path) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isUserManager(request.auth)) return error('无权访问', 403);
   const userId = path.split('/')[3];
   const user = await getUserByUsername(env, userId);
   if (!user) return error('用户不存在', 404);
+  if (!canManageUser(request.auth, user)) return error('无权管理该用户', 403);
   if (user.id === 'admin') return error('不能禁用管理员', 400);
   await toggleUserActive(env, user.id, !user.is_active);
   return json({ success: true, message: user.is_active ? '用户已禁用' : '用户已启用' });
 }
 
 async function handleUpdateUserPlatform(request, env, path) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isUserManager(request.auth)) return error('无权访问', 403);
   const userId = path.split('/')[3];
   const body = await parseBody(request);
   const user = await getUserByUsername(env, userId);
   if (!user) return error('用户不存在', 404);
+  if (!canManageUser(request.auth, user)) return error('无权管理该用户', 403);
   const access = normalizePlatformAccess(body?.platform_access);
+  if (!canGrantPlatformAccess(request.auth, access)) return error('不能授予超出自身范围的平台能力', 403);
   await updateUserPlatformAccess(env, user.id, user.role === 'admin' ? 'allow' : access);
   return json({ success: true, platform_access: user.role === 'admin' ? 'allow' : access, message: '平台权限已更新' });
 }
 
 async function handleUpdateUserConcurrency(request, env, path) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isUserManager(request.auth)) return error('无权访问', 403);
   const userId = path.split('/')[3];
   const body = await parseBody(request);
   const limit = Number(body?.image_concurrency_limit);
   if (!Number.isInteger(limit) || limit < 1 || limit > 20) return error('图片并发上限必须为1~20', 400);
   const user = await getUserByUsername(env, userId);
   if (!user) return error('用户不存在', 404);
+  if (!canManageUser(request.auth, user)) return error('无权管理该用户', 403);
   await updateUserImageConcurrencyLimit(env, user.id, limit);
   return json({ success: true, image_concurrency_limit: limit, message: '用户图片并发上限已更新' });
 }
 
 async function handleUpdateUserGroup(request, env, path) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isSystemAdmin(request.auth)) return error('受限管理员不能切换用户分组', 403);
   const userId = path.split('/')[3];
   const body = await parseBody(request) || {};
   const groupId = String(body.group_id || '').trim();
@@ -1159,21 +1199,24 @@ async function handleUpdateUserGroup(request, env, path) {
 }
 
 async function handleGetUserWebhook(request, env, path) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isUserManager(request.auth)) return error('无权访问', 403);
   const userId = path.split('/')[3];
   const user = await getUserByUsername(env, userId);
   if (!user) return error('用户不存在', 404);
+  if (!canManageUser(request.auth, user)) return error('无权管理该用户', 403);
   let wh = {}; try { wh = JSON.parse(user.webhook_config || '{}'); } catch (_) {}
-  return json({ success: true, webhook: wh });
+  const platforms = manageablePlatforms(request.auth);
+  return json({ success: true, webhook: Object.fromEntries(platforms.map(platform => [platform, wh[platform] || {}])), platforms });
 }
 
 async function handleUpdateUserWebhook(request, env, path) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isUserManager(request.auth)) return error('无权访问', 403);
   const userId = path.split('/')[3];
   const body = await parseBody(request);
   const user = await getUserByUsername(env, userId);
   if (!user) return error('用户不存在', 404);
-  await updateUserWebhook(env, user.id, JSON.stringify(normalizeUserWorkflowConfig(body)));
+  if (!canManageUser(request.auth, user)) return error('无权管理该用户', 403);
+  await updateUserWebhook(env, user.id, JSON.stringify(mergeManagedWorkflowConfig(user.webhook_config, body, request.auth)));
   return json({ success: true, message: '用户工作流配置已更新' });
 }
 
@@ -1183,33 +1226,36 @@ async function handleGetMyCredits(request, env) {
 }
 
 async function handleUpdateUserCredits(request, env, path) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isUserManager(request.auth)) return error('无权访问', 403);
   const userId = path.split('/')[3];
   const body = await parseBody(request);
   const { action, amount } = body || {};
   if (!action || amount === undefined || amount < 0 || !['set','add','subtract'].includes(action)) return error('参数无效', 400);
   const user = await getUserByUsername(env, userId);
   if (!user) return error('用户不存在', 404);
+  if (!canManageUser(request.auth, user)) return error('无权管理该用户', 403);
   await updateUserCredits(env, userId, amount, action);
   return json({ success: true, credits: await getUserCredits(env, userId), message: '算力已更新' });
 }
 
 async function handleResetUserPassword(request, env, path) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isUserManager(request.auth)) return error('无权访问', 403);
   const userId = path.split('/')[3];
   const user = await getUserByUsername(env, userId);
   if (!user) return error('用户不存在', 404);
+  if (!canManageUser(request.auth, user)) return error('无权管理该用户', 403);
   const defaultHash = await hashPassword('user123');
   await updateUserPassword(env, user.id, defaultHash);
   return json({ success: true, message: `用户 ${user.username} 密码已重置为 user123` });
 }
 
 async function handleDeleteUser(request, env, path) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isUserManager(request.auth)) return error('无权访问', 403);
   const userId = path.split('/')[3];
   if (userId === 'admin' || userId === request.auth.username) return error('不能删除管理员或当前登录用户', 400);
   const user = await getUserByUsername(env, userId);
   if (!user) return error('用户不存在', 404);
+  if (!canManageUser(request.auth, user)) return error('无权管理该用户', 403);
   await deleteUser(env, user.id);
   return json({ success: true, message: `用户 ${user.username} 已删除` });
 }
@@ -1499,7 +1545,7 @@ async function runScheduledTaskCleanup(env) {
 }
 
 async function handleAdminTaskCleanup(request, env) {
-  if (request.auth?.role !== 'admin') return error('无权访问', 403);
+  if (!isSystemAdmin(request.auth)) return error('无权访问', 403);
   const body = await parseBody(request) || {};
   const execute = body.execute === true;
   const result = await runTaskCleanup(env, { execute, force: execute, limit: body.limit });
@@ -1523,11 +1569,11 @@ async function handleGetTasks(env, ctx, auth, url) {
   const page = Math.max(parseInt(url.searchParams.get('page')) || 1, 1);
   const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit')) || 10, 1), 100);
   const [result, total] = await Promise.all([
-    getTaskList(env, platform, auth.username, auth.role, limit, (page - 1) * limit),
-    getTaskCount(env, platform, auth.username, auth.role),
+    getTaskList(env, platform, auth.username, isSystemAdmin(auth) ? 'admin' : 'user', limit, (page - 1) * limit),
+    getTaskCount(env, platform, auth.username, isSystemAdmin(auth) ? 'admin' : 'user'),
   ]);
   let tasks = result.results || [];
-  if (auth.role !== 'admin') tasks = tasks.filter(t => t.user_id === auth.username);
+  if (!isSystemAdmin(auth)) tasks = tasks.filter(t => t.user_id === auth.username);
 
   const jstIds = tasks.filter(t => t.platform === 'jst').map(t => t.id);
   const shopeeIds = tasks.filter(t => t.platform === 'shopee').map(t => t.id);
@@ -1561,7 +1607,7 @@ async function handleInitTask(request, env) {
   if (!['jst','shopee'].includes(platform)) return error('不支持的平台', 400);
   if (!canUsePlatform(request.auth, platform)) return error('当前用户无权创建该平台任务', 403);
   const taskId = uuid();
-  await createTaskIndex(env, taskId, platform, '', request.auth?.username || '');
+  await createTaskIndex(env, taskId, platform, '', request.auth?.username || '', request.auth?.group_id || 'default');
   // 初始化平台数据
   if (platform === 'jst') {
     await env.DB.prepare(
@@ -2008,6 +2054,17 @@ async function pushCreditPreflightError(env, ownerId, requiredCredits) {
   return `算力不足：本次预计需要${requiredCredits}点，当前可用${availableCredits}点`;
 }
 
+function callbackSecretForUser(user) {
+  return String(user?.group_callback_secret || '');
+}
+
+async function callbackSecretForTask(env, task) {
+  const group = await getGroupById(env, task?.group_id || 'default');
+  if (group) return String(group.callback_secret || '');
+  const owner = await getUserByUsername(env, task?.user_id || 'admin');
+  return callbackSecretForUser(owner);
+}
+
 async function jstHandlePush(env, taskId, ctx, request) {
   // [从原 index.js handlePushTask 移入，逻辑保持一致]
   const pushBody = await parseBody(request).catch(() => ({}));
@@ -2016,12 +2073,12 @@ async function jstHandlePush(env, taskId, ctx, request) {
   if (!detail) return error('任务不存在', 404);
   if (detail.status !== 'pending') return error('只能推送等待中的任务', 400);
   const config = await getConfig(env, 'jst');
-  const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
+  const taskOwner = await getOne(env, "SELECT user_id,group_id FROM ews_tasks WHERE id=?", [taskId]);
   const ownerId = taskOwner?.user_id || request.auth?.username || '';
   const pushUser = await getUserByUsername(env, ownerId);
   applyUserWorkflowOverrides(config, pushUser?.webhook_config, 'jst');
   const workflowFlags = workflowExecutionFlags(config);
-  const callbackSecret = config.callback_secret || '';
+  const callbackSecret = await callbackSecretForTask(env, taskOwner);
   const baseUrl = `${new URL(request.url).origin}/api/callback`;
   const metadataWebhookUrl = workflowFlags.title ? config.n8n_title_webhook || '' : '';
   const skuImageWebhookUrl = workflowFlags.skuImage ? config.n8n_sku_image_webhook || '' : '';
@@ -2138,7 +2195,7 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
   const body = await parseBody(request).catch(() => ({}));
   const testMode = body?.test_mode === true;
   const config = await getConfig(env, 'shopee');
-  const taskOwner = await getOne(env, "SELECT user_id FROM ews_tasks WHERE id=?", [taskId]);
+  const taskOwner = await getOne(env, "SELECT user_id,group_id FROM ews_tasks WHERE id=?", [taskId]);
   const ownerId = taskOwner?.user_id || request.auth?.username || '';
   const pushUser = await getUserByUsername(env, ownerId);
   applyUserWorkflowOverrides(config, pushUser?.webhook_config, 'shopee');
@@ -2179,7 +2236,7 @@ async function shopeeHandlePush(env, taskId, ctx, request) {
 
   await resetGeneratedTaskArtifacts(env, taskId, 'shopee');
 
-  const callbackSecret = config.callback_secret || '';
+  const callbackSecret = await callbackSecretForTask(env, taskOwner);
   const baseUrl = new URL(request.url).origin + '/api/callback';
   const refImg = detail.reference_image || '';
   const auxImgs = detail.auxiliary_images || '';
@@ -2895,9 +2952,9 @@ async function handleR2UploadTicket(request, env) {
   if (!taskId) return error('缺少 task_id', 400);
   const idx = await getTaskIndex(env, taskId);
   if (!idx) return error('任务不存在', 404);
-  const config = await getConfig(env, idx.platform || '');
+  const callbackSecret = await callbackSecretForTask(env, idx);
   const receivedSecret = body.secret ?? body.callback_secret;
-  if (config.callback_secret && receivedSecret !== config.callback_secret) return error('上传票据密钥无效', 403);
+  if (callbackSecret && receivedSecret !== callbackSecret) return error('上传票据密钥无效', 403);
   if (isTaskExpired(idx)) return json({ success: false, retryable: false, error: '任务缓存已过期' }, 410);
   const contentType = String(body.content_type || '').toLowerCase();
   const sizeBytes = parseInt(body.size_bytes);
@@ -2932,9 +2989,9 @@ async function handleCallback(request, env, ctx) {
   if (!task_id) return error('缺少 task_id', 400);
   const idx = await getTaskIndex(env, task_id);
   if (!idx) return error('任务不存在', 404);
-  const config = await getConfig(env, idx.platform || '');
+  const callbackSecret = await callbackSecretForTask(env, idx);
   const receivedSecret = body.secret ?? body.callback_secret;
-  if (config.callback_secret && receivedSecret !== config.callback_secret) return error('回调密钥无效', 403);
+  if (callbackSecret && receivedSecret !== callbackSecret) return error('回调密钥无效', 403);
   if (isTaskExpired(idx)) return json({ success: false, retryable: false, error: '任务缓存已过期' }, 410);
 
   try {
@@ -3285,10 +3342,10 @@ async function processCallbackPayload(env, ctx, body, trustedQueuePayload) {
   if (!idx) throw callbackPermanentError('任务不存在');
   if (isTaskExpired(idx)) throw callbackPermanentError('任务缓存已过期');
 
-  const config = await getConfig(env, idx.platform || '');
   if (!trustedQueuePayload) {
+    const callbackSecret = await callbackSecretForTask(env, idx);
     const receivedSecret = body.secret ?? body.callback_secret;
-    if (config.callback_secret && receivedSecret !== config.callback_secret) throw callbackPermanentError('回调密钥无效');
+    if (callbackSecret && receivedSecret !== callbackSecret) throw callbackPermanentError('回调密钥无效');
   }
 
   const isShopee = idx.platform === 'shopee';
@@ -4137,7 +4194,7 @@ async function handleUpload(request, env) {
   if (requestedUploadId && !/^[a-zA-Z0-9_-]{8,64}$/.test(requestedUploadId)) return error('upload_id 格式无效', 400);
   const task = await getTaskIndex(env, taskId);
   if (!task) return error('任务不存在', 404);
-  if (request.auth?.role !== 'admin' && task.user_id !== request.auth?.username) return error('无权访问该任务', 403);
+  if (!isSystemAdmin(request.auth) && task.user_id !== request.auth?.username) return error('无权访问该任务', 403);
   if (isTaskExpired(task)) return error('任务缓存已过期', 410);
   const maxSize = folder === 'size-chart' ? 2 * 1024 * 1024 : 10 * 1024 * 1024;
   if (file.size > maxSize) return error(folder === 'size-chart' ? '尺码表文件不能超过 2MB' : '文件大小不能超过 10MB', 400);

@@ -17,7 +17,6 @@ CREATE TABLE IF NOT EXISTS ews_config (
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('jwt_secret_name', 'ews_jwt_secret_v1', '');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('r2_public_url', 'https://oss.langaj.work', '');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('admin_password', '$2a$10$EWS_DEFAULT_HASH', '');
-INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('callback_secret', '', '');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_primary_images_only', 'false', '');
 INSERT OR IGNORE INTO ews_config (key, value, platform) VALUES ('push_plan_timeout_minutes', '20', '');
 
@@ -43,6 +42,7 @@ CREATE TABLE IF NOT EXISTS ews_groups (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL COLLATE NOCASE UNIQUE,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+  callback_secret TEXT NOT NULL DEFAULT '',
   created_by TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS ews_users (
   id TEXT PRIMARY KEY,
   username TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'user',      -- admin / user
+  role TEXT NOT NULL DEFAULT 'user',      -- admin / group_admin / user
   display_name TEXT DEFAULT '',
   platform_access TEXT NOT NULL DEFAULT 'allow', -- allow / jst / shopee
   group_id TEXT NOT NULL DEFAULT 'default',
@@ -77,12 +77,14 @@ CREATE TABLE IF NOT EXISTS ews_tasks (
   name TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'init',  -- init / pending / processing / completed / failed
   user_id TEXT NOT NULL DEFAULT '',
+  group_id TEXT NOT NULL DEFAULT 'default',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   completed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_ews_tasks_platform ON ews_tasks(platform);
 CREATE INDEX IF NOT EXISTS idx_ews_tasks_user ON ews_tasks(user_id);
+CREATE INDEX IF NOT EXISTS idx_ews_tasks_group ON ews_tasks(group_id);
 CREATE INDEX IF NOT EXISTS idx_ews_tasks_created ON ews_tasks(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ews_tasks_completed ON ews_tasks(completed_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ews_tasks_user_created ON ews_tasks(user_id, created_at DESC);
