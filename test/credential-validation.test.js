@@ -12,11 +12,11 @@ test('new usernames accept only one to sixteen ASCII letters or digits', () => {
   }
 });
 
-test('new passwords accept the safe character allowlist with a six character minimum', () => {
-  for (const value of ['abc123', 'ABCdef', '123456', 'A1._@-', 'user-2026@test.com']) {
+test('new passwords accept the safe character allowlist from six to thirty-two characters', () => {
+  for (const value of ['abc123', 'ABCdef', '123456', 'A1._@-', 'user-2026@test.com', 'A'.repeat(32)]) {
     assert.equal(isValidNewPassword(value), true, value);
   }
-  for (const value of ['', 'abc12', '密码abc123', 'abc 123', 'abc/123', 'abc\\123', 'abc"123', "abc'123", 123456]) {
+  for (const value of ['', 'abc12', 'A'.repeat(33), '密码abc123', 'abc 123', 'abc/123', 'abc\\123', 'abc"123', "abc'123", 123456]) {
     assert.equal(isValidNewPassword(value), false, String(value));
   }
 });

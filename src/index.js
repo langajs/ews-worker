@@ -451,7 +451,7 @@ async function handleChangePassword(request, env) {
   const body = await parseBody(request);
   const { old_password, new_password } = body || {};
   if (!old_password || !new_password) return error('请提供旧密码和新密码', 400);
-  if (!isValidNewPassword(new_password)) return error('新密码至少6位，仅允许英文字母、数字及 . _ @ -', 400);
+  if (!isValidNewPassword(new_password)) return error('新密码必须为6~32位，仅允许英文字母、数字及 . _ @ -', 400);
   const auth = request.auth;
   const user = await getUserByUsername(env, auth.username);
   if (!user) return error('用户不存在', 404);
@@ -1119,7 +1119,7 @@ async function handleCreateUser(request, env) {
   if (!isValidNewUsername(username)) return error('用户名仅允许1~16位英文字母或数字', 400);
   if (role === 'admin') return error('默认管理员账号不可新增', 403);
   if (role === 'group_admin' && !isSystemAdmin(request.auth)) return error('只有默认管理员可以创建受限管理员', 403);
-  if (!isValidNewPassword(password)) return error('密码至少6位，仅允许英文字母、数字及 . _ @ -', 400);
+  if (!isValidNewPassword(password)) return error('密码必须为6~32位，仅允许英文字母、数字及 . _ @ -', 400);
   const existing = await getUserByUsername(env, username);
   if (existing) return error('用户名已存在', 400);
   const pwdHash = await hashPassword(password);
