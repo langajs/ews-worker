@@ -54,6 +54,12 @@ test('group admins cannot manage their own lifecycle or credits', () => {
   assert.equal(canAdjustUserCredits(systemAdmin, self), true);
 });
 
+test('group admin deletion refunds credits only for ordinary users', () => {
+  const worker = read('src/index.js');
+  assert.match(worker, /handleDeleteUser[\s\S]*if \(isGroupAdmin\(request\.auth\) && user\.role === 'user'\)[\s\S]*deleteUserWithCreditRefund/);
+  assert.match(worker, /handleUpdateUserCredits[\s\S]*if \(isGroupAdmin\(request\.auth\)\)[\s\S]*transferUserCredits/);
+});
+
 test('group admins can access every task in their group and no task outside it', () => {
   assert.equal(canAccessTask(jstAdmin, { user_id: 'user-a', group_id: 'group-a' }), true);
   assert.equal(canAccessTask(jstAdmin, { user_id: 'manager-a', group_id: 'group-a' }), true);

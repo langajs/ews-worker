@@ -76,6 +76,20 @@ async function deleteUser(env, userId) {
     env.DB.prepare("DELETE FROM ews_users WHERE id = ?").bind(userId),
   ]);
 }
+async function deleteUserWithCreditRefund(env, userId, managerId, groupId) {
+  const results = await env.DB.batch([
+    env.DB.prepare(`UPDATE ews_users SET credits=credits+(
+      SELECT credits FROM ews_users WHERE id=? AND role='user' AND group_id=?
+    ) WHERE id=? AND role='group_admin' AND group_id=?
+      AND EXISTS (SELECT 1 FROM ews_users WHERE id=? AND role='user' AND group_id=?)`)
+      .bind(userId, groupId, managerId, groupId, userId, groupId),
+    env.DB.prepare("DELETE FROM ews_users WHERE id=? AND role='user' AND group_id=? AND changes()=1")
+      .bind(userId, groupId),
+    env.DB.prepare("DELETE FROM ews_shopee_template_user_meta WHERE user_id=? AND changes()=1").bind(userId),
+  ]);
+  const result = results?.[1];
+  return Number(result?.meta?.changes ?? result?.changes ?? 0) === 1;
+}
 async function updateUserPlatformAccess(env, userId, access) { await env.DB.prepare("UPDATE ews_users SET platform_access = ? WHERE id = ?").bind(normalizePlatformAccess(access), userId).run(); }
 async function updateUserImageConcurrencyLimit(env, userId, limit) { await env.DB.prepare("UPDATE ews_users SET image_concurrency_limit = ? WHERE id = ?").bind(normalizeUserImageConcurrencyLimit(limit), userId).run(); }
 async function updateUserWebhook(env, userId, cfg) { await env.DB.prepare("UPDATE ews_users SET webhook_config = ? WHERE id = ?").bind(cfg, userId).run(); }
@@ -569,7 +583,7 @@ export {
   query, getOne,
   getConfig, updateConfig, getPlatformConfig,
   getGroupList, getGroupById, createGroup, updateGroup,
-  createUser, createUserWithCreditCharge, getUserByUsername, getUserList, updateUserPassword, toggleUserActive, updateUserGroup, deleteUser, updateUserPlatformAccess, updateUserImageConcurrencyLimit, updateUserWebhook,
+  createUser, createUserWithCreditCharge, getUserByUsername, getUserList, updateUserPassword, toggleUserActive, updateUserGroup, deleteUser, deleteUserWithCreditRefund, updateUserPlatformAccess, updateUserImageConcurrencyLimit, updateUserWebhook,
   normalizeUserImageConcurrencyLimit,
   getUserCredits, updateUserCredits, transferUserCredits, consumeUserCredit,
   TASK_RETENTION_DAYS, isTaskExpired,

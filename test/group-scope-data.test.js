@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import {
   createUserWithCreditCharge,
+  deleteUserWithCreditRefund,
   getTaskCount,
   getTaskList,
   shopeeReplaceGroupTemplates,
@@ -150,6 +151,36 @@ test('group admin user creation atomically charges two hundred credits', async (
     assert.equal(await createUserWithCreditCharge(env, user, 'manager-a', 200), true);
     assert.equal(database.prepare('SELECT credits FROM ews_users WHERE id=?').get('manager-a').credits, 200);
     assert.equal(database.prepare('SELECT credits FROM ews_users WHERE id=?').get('user-a').credits, 200);
+  } finally {
+    database.close();
+  }
+});
+
+test('group admin user deletion atomically refunds remaining credits', async () => {
+  const { database, env } = createEnv(`
+    CREATE TABLE ews_users (
+      id TEXT PRIMARY KEY, role TEXT NOT NULL, group_id TEXT NOT NULL,
+      credits INTEGER NOT NULL
+    );
+    CREATE TABLE ews_shopee_template_user_meta (profile_id TEXT, user_id TEXT);
+    INSERT INTO ews_users VALUES
+      ('manager-a','group_admin','group-a',100),
+      ('manager-b','group_admin','group-b',300),
+      ('user-a','user','group-a',250),
+      ('user-b','user','group-b',400);
+    INSERT INTO ews_shopee_template_user_meta VALUES ('profile-a','user-a'),('profile-b','user-b');
+  `);
+  try {
+    assert.equal(await deleteUserWithCreditRefund(env, 'user-b', 'manager-a', 'group-a'), false);
+    assert.equal(await deleteUserWithCreditRefund(env, 'manager-a', 'manager-a', 'group-a'), false);
+    assert.equal(database.prepare("SELECT credits FROM ews_users WHERE id='manager-a'").get().credits, 100);
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM ews_shopee_template_user_meta WHERE user_id='user-b'").get().count, 1);
+    assert.equal(await deleteUserWithCreditRefund(env, 'user-a', 'manager-a', 'group-a'), true);
+    assert.equal(database.prepare("SELECT credits FROM ews_users WHERE id='manager-a'").get().credits, 350);
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM ews_users WHERE id='user-a'").get().count, 0);
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM ews_shopee_template_user_meta WHERE user_id='user-a'").get().count, 0);
+    assert.equal(await deleteUserWithCreditRefund(env, 'user-a', 'manager-a', 'group-a'), false);
+    assert.equal(database.prepare("SELECT credits FROM ews_users WHERE id='manager-a'").get().credits, 350);
   } finally {
     database.close();
   }

@@ -5,7 +5,7 @@ import {
   query, getOne, getConfig, updateConfig, getPlatformConfig,
   getGroupList, getGroupById, createGroup, updateGroup,
   createUser, createUserWithCreditCharge, getUserByUsername, getUserList, updateUserPassword,
-  toggleUserActive, updateUserGroup, deleteUser, updateUserPlatformAccess, updateUserImageConcurrencyLimit, updateUserWebhook, getUserCredits, updateUserCredits, transferUserCredits, consumeUserCredit,
+  toggleUserActive, updateUserGroup, deleteUser, deleteUserWithCreditRefund, updateUserPlatformAccess, updateUserImageConcurrencyLimit, updateUserWebhook, getUserCredits, updateUserCredits, transferUserCredits, consumeUserCredit,
   normalizeUserImageConcurrencyLimit,
   TASK_RETENTION_DAYS, isTaskExpired,
   createTaskIndex, updateTaskIndexStatus, getTaskIndex, getTaskList, getTaskCount,
@@ -1263,7 +1263,12 @@ async function handleDeleteUser(request, env, path) {
   const user = await getUserByUsername(env, userId);
   if (!user) return error('用户不存在', 404);
   if (!canManageUserLifecycle(request.auth, user)) return error('不能删除当前登录账号', 403);
-  await deleteUser(env, user.id);
+  if (isGroupAdmin(request.auth) && user.role === 'user') {
+    const deleted = await deleteUserWithCreditRefund(env, user.id, request.auth.username, request.auth.group_id);
+    if (!deleted) return error('用户状态已变更，删除失败', 409);
+  } else {
+    await deleteUser(env, user.id);
+  }
   return json({ success: true, message: `用户 ${user.username} 已删除` });
 }
 
