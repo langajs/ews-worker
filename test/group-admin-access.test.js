@@ -5,10 +5,12 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  canAdjustUserCredits,
   canAccessTask,
   canControlTask,
   canGrantPlatformAccess,
   canManageUser,
+  canManageUserLifecycle,
   isGroupAdmin,
   isSystemAdmin,
   isUserManager,
@@ -38,6 +40,18 @@ test('group admins can manage only non-system users in their own group', () => {
   assert.equal(canManageUser(jstAdmin, { id: 'user-b', role: 'user', group_id: 'group-b' }), false);
   assert.equal(canManageUser(jstAdmin, { id: 'admin', role: 'admin', group_id: 'group-a' }), false);
   assert.equal(canManageUser(systemAdmin, { id: 'user-b', role: 'user', group_id: 'group-b' }), true);
+});
+
+test('group admins cannot manage their own lifecycle or credits', () => {
+  const self = { id: 'manager-a', role: 'group_admin', group_id: 'group-a' };
+  const peer = { id: 'manager-peer', role: 'group_admin', group_id: 'group-a' };
+  const user = { id: 'user-a', role: 'user', group_id: 'group-a' };
+  assert.equal(canManageUserLifecycle(jstAdmin, self), false);
+  assert.equal(canAdjustUserCredits(jstAdmin, self), false);
+  assert.equal(canAdjustUserCredits(jstAdmin, peer), false);
+  assert.equal(canManageUserLifecycle(jstAdmin, user), true);
+  assert.equal(canAdjustUserCredits(jstAdmin, user), true);
+  assert.equal(canAdjustUserCredits(systemAdmin, self), true);
 });
 
 test('group admins can access every task in their group and no task outside it', () => {

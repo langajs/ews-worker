@@ -3,10 +3,12 @@ import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import {
+  createUserWithCreditCharge,
   getTaskCount,
   getTaskList,
   shopeeReplaceGroupTemplates,
   shopeeReplaceTemplateGroups,
+  transferUserCredits,
   updateUserGroup,
 } from '../src/db.js';
 
@@ -103,6 +105,51 @@ test('moving a user keeps existing tasks in their creation-time group', async ()
     assert.deepEqual(ownerRows.results.map(row => row.id).sort(), ['task-a1', 'task-a2']);
     assert.equal((await getTaskList(env, '', 'manager-a', 'group_admin', 'group-a')).results.length, 2);
     assert.equal((await getTaskList(env, '', 'manager-b', 'group_admin', 'group-b')).results.length, 0);
+  } finally {
+    database.close();
+  }
+});
+
+test('group admin credit transfers preserve totals and reject overdrafts', async () => {
+  const { database, env } = createEnv(`
+    CREATE TABLE ews_users (id TEXT PRIMARY KEY, credits INTEGER NOT NULL);
+    INSERT INTO ews_users VALUES ('manager-a',300),('user-a',200);
+  `);
+  try {
+    assert.equal(await transferUserCredits(env, 'manager-a', 'user-a', 0), false);
+    assert.equal(await transferUserCredits(env, 'manager-a', 'user-a', 1.5), false);
+    assert.equal(await transferUserCredits(env, 'manager-a', 'user-a', 100), true);
+    assert.deepEqual(database.prepare('SELECT id,credits FROM ews_users ORDER BY id').all().map(row => `${row.id}:${row.credits}`), ['manager-a:200', 'user-a:300']);
+    assert.equal(await transferUserCredits(env, 'manager-a', 'user-a', 201), false);
+    assert.equal(await transferUserCredits(env, 'user-a', 'manager-a', 301), false);
+    assert.deepEqual(database.prepare('SELECT id,credits FROM ews_users ORDER BY id').all().map(row => `${row.id}:${row.credits}`), ['manager-a:200', 'user-a:300']);
+    assert.equal(await transferUserCredits(env, 'user-a', 'manager-a', 300), true);
+    assert.deepEqual(database.prepare('SELECT id,credits FROM ews_users ORDER BY id').all().map(row => `${row.id}:${row.credits}`), ['manager-a:500', 'user-a:0']);
+  } finally {
+    database.close();
+  }
+});
+
+test('group admin user creation atomically charges two hundred credits', async () => {
+  const { database, env } = createEnv(`
+    CREATE TABLE ews_users (
+      id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
+      role TEXT NOT NULL, display_name TEXT, platform_access TEXT NOT NULL,
+      group_id TEXT NOT NULL, image_concurrency_limit INTEGER NOT NULL,
+      credits INTEGER NOT NULL, created_by TEXT
+    );
+    INSERT INTO ews_users VALUES ('manager-a','manager-a','hash','group_admin','','jst','group-a',20,199,'admin');
+  `);
+  const user = { id: 'user-a', username: 'user-a', password_hash: 'hash', role: 'user', platform_access: 'jst', group_id: 'group-a', image_concurrency_limit: 20, created_by: 'manager-a' };
+  try {
+    assert.equal(await createUserWithCreditCharge(env, user, 'manager-a', 0), false);
+    assert.equal(await createUserWithCreditCharge(env, user, 'manager-a', 200), false);
+    assert.equal(database.prepare('SELECT COUNT(*) AS count FROM ews_users').get().count, 1);
+    assert.equal(database.prepare('SELECT credits FROM ews_users WHERE id=?').get('manager-a').credits, 199);
+    database.prepare('UPDATE ews_users SET credits=400 WHERE id=?').run('manager-a');
+    assert.equal(await createUserWithCreditCharge(env, user, 'manager-a', 200), true);
+    assert.equal(database.prepare('SELECT credits FROM ews_users WHERE id=?').get('manager-a').credits, 200);
+    assert.equal(database.prepare('SELECT credits FROM ews_users WHERE id=?').get('user-a').credits, 200);
   } finally {
     database.close();
   }

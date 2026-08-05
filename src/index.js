@@ -4,8 +4,8 @@ import { AwsClient } from 'aws4fetch';
 import {
   query, getOne, getConfig, updateConfig, getPlatformConfig,
   getGroupList, getGroupById, createGroup, updateGroup,
-  createUser, getUserByUsername, getUserList, updateUserPassword,
-  toggleUserActive, updateUserGroup, deleteUser, updateUserPlatformAccess, updateUserImageConcurrencyLimit, updateUserWebhook, getUserCredits, updateUserCredits, consumeUserCredit,
+  createUser, createUserWithCreditCharge, getUserByUsername, getUserList, updateUserPassword,
+  toggleUserActive, updateUserGroup, deleteUser, updateUserPlatformAccess, updateUserImageConcurrencyLimit, updateUserWebhook, getUserCredits, updateUserCredits, transferUserCredits, consumeUserCredit,
   normalizeUserImageConcurrencyLimit,
   TASK_RETENTION_DAYS, isTaskExpired,
   createTaskIndex, updateTaskIndexStatus, getTaskIndex, getTaskList, getTaskCount,
@@ -36,10 +36,12 @@ import { generateToken, hashPassword, verifyPassword, authenticateRequest, DEFAU
 import { isValidNewPassword, isValidNewUsername } from './credential-validation.js';
 import { runAuthenticatedRoute } from './route-auth.js';
 import {
+  canAdjustUserCredits,
   canAccessTask,
   canControlTask,
   canGrantPlatformAccess,
   canManageUser,
+  canManageUserLifecycle,
   isGroupAdmin,
   isSystemAdmin,
   isUserManager,
@@ -153,6 +155,8 @@ function canUsePlatform(auth, platform) {
   const access = normalizePlatformAccess(auth?.platform_access);
   return access === 'allow' || access === platform;
 }
+
+const GROUP_ADMIN_USER_CREATION_COST = 200;
 
 function templateAccessGroup(auth) {
   return isSystemAdmin(auth) ? '' : String(auth?.group_id || '');
@@ -1108,6 +1112,7 @@ async function handleGetUsers(request, env) {
     system_admin: isSystemAdmin(request.auth),
     group_id: request.auth.group_id || '',
     platforms: manageablePlatforms(request.auth),
+    user_creation_credit_cost: isGroupAdmin(request.auth) ? GROUP_ADMIN_USER_CREATION_COST : 0,
   } });
 }
 
@@ -1130,8 +1135,14 @@ async function handleCreateUser(request, env) {
   const userRole = role === 'group_admin' ? 'group_admin' : 'user';
   const requestedConcurrency = body?.image_concurrency_limit;
   if (requestedConcurrency !== undefined && (!Number.isInteger(Number(requestedConcurrency)) || Number(requestedConcurrency) < 1 || Number(requestedConcurrency) > 20)) return error('图片并发上限必须为1~20', 400);
-  await createUser(env, { id: username, username, password_hash: pwdHash, role: userRole, platform_access: platformAccess, group_id: groupId, image_concurrency_limit: requestedConcurrency, created_by: request.auth.username });
-  return json({ success: true, message: '用户创建成功' }, 201);
+  const newUser = { id: username, username, password_hash: pwdHash, role: userRole, platform_access: platformAccess, group_id: groupId, image_concurrency_limit: requestedConcurrency, created_by: request.auth.username };
+  if (isGroupAdmin(request.auth)) {
+    const created = await createUserWithCreditCharge(env, newUser, request.auth.username, GROUP_ADMIN_USER_CREATION_COST);
+    if (!created) return error(`算力不足，创建用户需要${GROUP_ADMIN_USER_CREATION_COST}算力`, 409);
+    return json({ success: true, credits: GROUP_ADMIN_USER_CREATION_COST, message: `用户创建成功，已扣除${GROUP_ADMIN_USER_CREATION_COST}算力` }, 201);
+  }
+  await createUser(env, newUser);
+  return json({ success: true, credits: GROUP_ADMIN_USER_CREATION_COST, message: '用户创建成功' }, 201);
 }
 
 async function handleToggleUser(request, env, path) {
@@ -1139,7 +1150,7 @@ async function handleToggleUser(request, env, path) {
   const userId = path.split('/')[3];
   const user = await getUserByUsername(env, userId);
   if (!user) return error('用户不存在', 404);
-  if (!canManageUser(request.auth, user)) return error('无权管理该用户', 403);
+  if (!canManageUserLifecycle(request.auth, user)) return error('不能管理当前登录账号的启用状态', 403);
   if (user.id === 'admin') return error('不能禁用管理员', 400);
   await toggleUserActive(env, user.id, !user.is_active);
   return json({ success: true, message: user.is_active ? '用户已禁用' : '用户已启用' });
@@ -1215,11 +1226,21 @@ async function handleUpdateUserCredits(request, env, path) {
   if (!isUserManager(request.auth)) return error('无权访问', 403);
   const userId = path.split('/')[3];
   const body = await parseBody(request);
-  const { action, amount } = body || {};
-  if (!action || amount === undefined || amount < 0 || !['set','add','subtract'].includes(action)) return error('参数无效', 400);
+  const action = body?.action;
+  const rawAmount = body?.amount;
+  if (typeof rawAmount !== 'number' || !Number.isSafeInteger(rawAmount) || rawAmount < 0 || !['set','add','subtract'].includes(action)) return error('参数无效', 400);
+  const amount = rawAmount;
   const user = await getUserByUsername(env, userId);
   if (!user) return error('用户不存在', 404);
-  if (!canManageUser(request.auth, user)) return error('无权管理该用户', 403);
+  if (!canAdjustUserCredits(request.auth, user)) return error('无权调整该账号算力', 403);
+  if (isGroupAdmin(request.auth)) {
+    if (amount < 1 || action === 'set') return error('分组管理员只能增加或减少正整数算力', 400);
+    const sourceId = action === 'add' ? request.auth.username : userId;
+    const targetId = action === 'add' ? userId : request.auth.username;
+    const transferred = await transferUserCredits(env, sourceId, targetId, amount);
+    if (!transferred) return error(action === 'add' ? '自身算力不足，无法增加用户算力' : '用户算力不足，无法减少该数值', 409);
+    return json({ success: true, credits: await getUserCredits(env, userId), own_credits: await getUserCredits(env, request.auth.username), message: action === 'add' ? '算力已转给用户' : '算力已收回' });
+  }
   await updateUserCredits(env, userId, amount, action);
   return json({ success: true, credits: await getUserCredits(env, userId), message: '算力已更新' });
 }
@@ -1229,7 +1250,7 @@ async function handleResetUserPassword(request, env, path) {
   const userId = path.split('/')[3];
   const user = await getUserByUsername(env, userId);
   if (!user) return error('用户不存在', 404);
-  if (!canManageUser(request.auth, user)) return error('无权管理该用户', 403);
+  if (!canManageUserLifecycle(request.auth, user)) return error('不能重置当前登录账号密码', 403);
   const defaultHash = await hashPassword('user123');
   await updateUserPassword(env, user.id, defaultHash);
   return json({ success: true, message: `用户 ${user.username} 密码已重置为 user123` });
@@ -1238,10 +1259,10 @@ async function handleResetUserPassword(request, env, path) {
 async function handleDeleteUser(request, env, path) {
   if (!isUserManager(request.auth)) return error('无权访问', 403);
   const userId = path.split('/')[3];
-  if (userId === 'admin' || userId === request.auth.username) return error('不能删除管理员或当前登录用户', 400);
+  if (userId === 'admin') return error('不能删除默认管理员', 400);
   const user = await getUserByUsername(env, userId);
   if (!user) return error('用户不存在', 404);
-  if (!canManageUser(request.auth, user)) return error('无权管理该用户', 403);
+  if (!canManageUserLifecycle(request.auth, user)) return error('不能删除当前登录账号', 403);
   await deleteUser(env, user.id);
   return json({ success: true, message: `用户 ${user.username} 已删除` });
 }

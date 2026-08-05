@@ -51,6 +51,16 @@ async function updateGroup(env, groupId, name, status, callbackSecret, workflowC
   await env.DB.prepare("UPDATE ews_groups SET name=?,status=?,callback_secret=?,workflow_config=?,updated_at=datetime('now') WHERE id=?").bind(name, status, callbackSecret, workflowConfig || '{}', groupId).run();
 }
 async function createUser(env, user) { await env.DB.prepare("INSERT INTO ews_users (id, username, password_hash, role, display_name, platform_access, group_id, image_concurrency_limit, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(user.id, user.username, user.password_hash, user.role || 'user', user.display_name || '', normalizePlatformAccess(user.platform_access), user.group_id || 'default', normalizeUserImageConcurrencyLimit(user.image_concurrency_limit), user.created_by || '').run(); }
+async function createUserWithCreditCharge(env, user, payerId, amount) {
+  if (!Number.isSafeInteger(amount) || amount < 1) return false;
+  const results = await env.DB.batch([
+    env.DB.prepare("UPDATE ews_users SET credits=credits-? WHERE id=? AND credits>=?").bind(amount, payerId, amount),
+    env.DB.prepare("INSERT INTO ews_users (id,username,password_hash,role,display_name,platform_access,group_id,image_concurrency_limit,credits,created_by) SELECT ?,?,?,?,?,?,?,?,?,? WHERE changes()=1")
+      .bind(user.id, user.username, user.password_hash, user.role || 'user', user.display_name || '', normalizePlatformAccess(user.platform_access), user.group_id || 'default', normalizeUserImageConcurrencyLimit(user.image_concurrency_limit), amount, user.created_by || ''),
+  ]);
+  const result = results?.[1];
+  return Number(result?.meta?.changes ?? result?.changes ?? 0) === 1;
+}
 async function getUserByUsername(env, username) { return await getOne(env, "SELECT u.*,g.name AS group_name,g.status AS group_status,g.callback_secret AS group_callback_secret FROM ews_users u LEFT JOIN ews_groups g ON g.id=u.group_id WHERE u.username = ?", [username]); }
 async function getUserList(env, groupId = '') {
   const where = groupId ? "WHERE u.group_id=? AND u.id<>'admin' AND u.role<>'admin'" : '';
@@ -74,6 +84,17 @@ async function updateUserCredits(env, userId, amount, mode) {
   if (mode === 'set') await env.DB.prepare("UPDATE ews_users SET credits = ? WHERE id = ?").bind(Math.max(0, amount), userId).run();
   else if (mode === 'add') await env.DB.prepare("UPDATE ews_users SET credits = credits + ? WHERE id = ?").bind(amount, userId).run();
   else if (mode === 'subtract') await env.DB.prepare("UPDATE ews_users SET credits = MAX(0, credits - ?) WHERE id = ?").bind(amount, userId).run();
+}
+async function transferUserCredits(env, fromUserId, toUserId, amount) {
+  if (fromUserId === toUserId || !Number.isSafeInteger(amount) || amount < 1) return false;
+  const results = await env.DB.batch([
+    env.DB.prepare("UPDATE ews_users SET credits=credits-? WHERE id=? AND credits>=? AND EXISTS (SELECT 1 FROM ews_users WHERE id=?)")
+      .bind(amount, fromUserId, amount, toUserId),
+    env.DB.prepare("UPDATE ews_users SET credits=credits+? WHERE id=? AND changes()=1")
+      .bind(amount, toUserId),
+  ]);
+  const result = results?.[1];
+  return Number(result?.meta?.changes ?? result?.changes ?? 0) === 1;
 }
 async function consumeUserCredit(env, userId) {
   const result = await env.DB.prepare("UPDATE ews_users SET credits = credits - 1 WHERE id = ? AND credits > 0").bind(userId).run();
@@ -548,9 +569,9 @@ export {
   query, getOne,
   getConfig, updateConfig, getPlatformConfig,
   getGroupList, getGroupById, createGroup, updateGroup,
-  createUser, getUserByUsername, getUserList, updateUserPassword, toggleUserActive, updateUserGroup, deleteUser, updateUserPlatformAccess, updateUserImageConcurrencyLimit, updateUserWebhook,
+  createUser, createUserWithCreditCharge, getUserByUsername, getUserList, updateUserPassword, toggleUserActive, updateUserGroup, deleteUser, updateUserPlatformAccess, updateUserImageConcurrencyLimit, updateUserWebhook,
   normalizeUserImageConcurrencyLimit,
-  getUserCredits, updateUserCredits, consumeUserCredit,
+  getUserCredits, updateUserCredits, transferUserCredits, consumeUserCredit,
   TASK_RETENTION_DAYS, isTaskExpired,
   createTaskIndex, updateTaskIndexStatus, getTaskIndex, getTaskList, getTaskCount, deleteTaskIndex,
   jstCreateTask, jstUpdateTask, jstGetTask, jstUpdateTaskStatus,
