@@ -8,7 +8,7 @@ import {
   toggleUserActive, updateUserGroup, deleteUser, deleteUserWithCreditRefund, updateUserPlatformAccess, updateUserImageConcurrencyLimit, updateUserWebhook, getUserCredits, updateUserCredits, transferUserCredits, consumeUserCredit,
   normalizeUserImageConcurrencyLimit,
   TASK_RETENTION_DAYS, isTaskExpired,
-  createTaskIndex, updateTaskIndexStatus, getTaskIndex, getTaskList, getTaskCount,
+  createTaskIndex, updateTaskIndexStatus, getTaskIndex, getTaskList, getTaskCount, getTaskOwners,
   jstCreateTask, jstUpdateTask, jstGetTask, jstUpdateTaskStatus,
   jstReplaceVariants,
   jstCreateSubTask, jstGetSubTasks, jstUpdateSubTask, jstDeleteSubTasks,
@@ -1581,9 +1581,15 @@ async function handleGetTasks(env, ctx, auth, url) {
   const page = Math.max(parseInt(url.searchParams.get('page')) || 1, 1);
   const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit')) || 10, 1), 100);
   const taskRole = isSystemAdmin(auth) ? 'admin' : (isGroupAdmin(auth) ? 'group_admin' : 'user');
-  const [result, total] = await Promise.all([
-    getTaskList(env, platform, auth.username, taskRole, auth.group_id || '', limit, (page - 1) * limit),
-    getTaskCount(env, platform, auth.username, taskRole, auth.group_id || ''),
+  const filters = {
+    userId: String(url.searchParams.get('user_id') || '').trim(),
+    taskOrSubTaskId: String(url.searchParams.get('task_or_subtask_id') || '').trim(),
+    name: String(url.searchParams.get('name') || '').trim(),
+  };
+  const [result, total, ownerResult] = await Promise.all([
+    getTaskList(env, platform, auth.username, taskRole, auth.group_id || '', limit, (page - 1) * limit, filters),
+    getTaskCount(env, platform, auth.username, taskRole, auth.group_id || '', filters),
+    getTaskOwners(env, auth.username, taskRole, auth.group_id || ''),
   ]);
   let tasks = result.results || [];
 
@@ -1610,7 +1616,7 @@ async function handleGetTasks(env, ctx, auth, url) {
     }
   }
   ctx.waitUntil(runQueueStage('task list fallback release', () => releasePendingPushPlans(env, ctx)));
-  return json({ success: true, tasks, total, page, limit, pages: Math.max(1, Math.ceil(total / limit)) });
+  return json({ success: true, tasks, task_users: (ownerResult.results || []).map(row => row.user_id), total, page, limit, pages: Math.max(1, Math.ceil(total / limit)) });
 }
 
 async function handleInitTask(request, env) {

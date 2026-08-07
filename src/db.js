@@ -141,24 +141,39 @@ function isTaskExpired(task, now = Date.now()) {
 async function createTaskIndex(env, id, platform, name, userId, groupId) { await env.DB.prepare("INSERT INTO ews_tasks (id, platform, name, status, user_id, group_id, created_at, updated_at) VALUES (?, ?, ?, 'init', ?, ?, datetime('now'), datetime('now'))").bind(id, platform, name || '', userId || '', groupId || 'default').run(); }
 async function updateTaskIndexStatus(env, id, status) { await env.DB.prepare("UPDATE ews_tasks SET status = ?, updated_at = datetime('now'), completed_at = CASE WHEN ? = 'completed' THEN COALESCE(completed_at, datetime('now')) ELSE NULL END WHERE id = ?").bind(status, status, id).run(); }
 async function getTaskIndex(env, id) { return await getOne(env, "SELECT * FROM ews_tasks WHERE id = ?", [id]); }
-async function getTaskList(env, platform, userId, role, groupId, limit = 0, offset = 0) {
-  let sql = "SELECT * FROM ews_tasks"; const params = []; const ws = [TASK_VISIBLE_SQL];
+function taskQueryWhere(platform, userId, role, groupId, filters = {}) {
+  const params = []; const ws = [TASK_VISIBLE_SQL];
   if (platform) { ws.push("platform = ?"); params.push(platform); }
   if (role === 'group_admin') { ws.push("group_id = ?"); params.push(groupId); }
   else if (role !== 'admin') { ws.push("user_id = ?"); params.push(userId); }
-  if (ws.length) sql += " WHERE " + ws.join(" AND ");
+  if (filters.userId) { ws.push("user_id = ?"); params.push(filters.userId); }
+  if (filters.taskOrSubTaskId) {
+    ws.push(`(ews_tasks.id = ?
+      OR EXISTS (SELECT 1 FROM ews_jst_sub_tasks s WHERE s.parent_task_id=ews_tasks.id AND s.id=?)
+      OR EXISTS (SELECT 1 FROM ews_shopee_sub_tasks s WHERE s.parent_task_id=ews_tasks.id AND s.id=?))`);
+    params.push(filters.taskOrSubTaskId, filters.taskOrSubTaskId, filters.taskOrSubTaskId);
+  }
+  if (filters.name) {
+    ws.push("LOWER(COALESCE(name,'')) LIKE ? ESCAPE '\\'");
+    params.push(`%${filters.name.toLowerCase().replace(/[\\%_]/g, '\\$&')}%`);
+  }
+  return { where: ws.join(" AND "), params };
+}
+async function getTaskList(env, platform, userId, role, groupId, limit = 0, offset = 0, filters = {}) {
+  const taskWhere = taskQueryWhere(platform, userId, role, groupId, filters);
+  let sql = "SELECT * FROM ews_tasks WHERE " + taskWhere.where; const params = [...taskWhere.params];
   sql += " ORDER BY created_at DESC";
   if (limit > 0) { sql += " LIMIT ? OFFSET ?"; params.push(limit, Math.max(0, offset)); }
   return await query(env, sql, params);
 }
-async function getTaskCount(env, platform, userId, role, groupId) {
-  let sql = "SELECT COUNT(*) AS cnt FROM ews_tasks"; const params = []; const ws = [TASK_VISIBLE_SQL];
-  if (platform) { ws.push("platform = ?"); params.push(platform); }
-  if (role === 'group_admin') { ws.push("group_id = ?"); params.push(groupId); }
-  else if (role !== 'admin') { ws.push("user_id = ?"); params.push(userId); }
-  if (ws.length) sql += " WHERE " + ws.join(" AND ");
-  const row = await getOne(env, sql, params);
+async function getTaskCount(env, platform, userId, role, groupId, filters = {}) {
+  const taskWhere = taskQueryWhere(platform, userId, role, groupId, filters);
+  const row = await getOne(env, "SELECT COUNT(*) AS cnt FROM ews_tasks WHERE " + taskWhere.where, taskWhere.params);
   return row?.cnt || 0;
+}
+async function getTaskOwners(env, userId, role, groupId) {
+  const taskWhere = taskQueryWhere('', userId, role, groupId);
+  return await query(env, `SELECT DISTINCT user_id FROM ews_tasks WHERE ${taskWhere.where} AND user_id<>'' ORDER BY user_id COLLATE NOCASE`, taskWhere.params);
 }
 async function deleteTaskIndex(env, id) { await env.DB.prepare("DELETE FROM ews_tasks WHERE id = ?").bind(id).run(); }
 
@@ -587,7 +602,7 @@ export {
   normalizeUserImageConcurrencyLimit,
   getUserCredits, updateUserCredits, transferUserCredits, consumeUserCredit,
   TASK_RETENTION_DAYS, isTaskExpired,
-  createTaskIndex, updateTaskIndexStatus, getTaskIndex, getTaskList, getTaskCount, deleteTaskIndex,
+  createTaskIndex, updateTaskIndexStatus, getTaskIndex, getTaskList, getTaskCount, getTaskOwners, deleteTaskIndex,
   jstCreateTask, jstUpdateTask, jstGetTask, jstUpdateTaskStatus,
   jstCreateVariant, jstClearVariants, jstReplaceVariants,
   jstCreateSubTask, jstGetSubTasks, jstUpdateSubTask, jstDeleteSubTasks,

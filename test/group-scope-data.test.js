@@ -7,6 +7,7 @@ import {
   deleteUserWithCreditRefund,
   getTaskCount,
   getTaskList,
+  getTaskOwners,
   shopeeReplaceGroupTemplates,
   shopeeReplaceTemplateGroups,
   transferUserCredits,
@@ -106,6 +107,37 @@ test('moving a user keeps existing tasks in their creation-time group', async ()
     assert.deepEqual(ownerRows.results.map(row => row.id).sort(), ['task-a1', 'task-a2']);
     assert.equal((await getTaskList(env, '', 'manager-a', 'group_admin', 'group-a')).results.length, 2);
     assert.equal((await getTaskList(env, '', 'manager-b', 'group_admin', 'group-b')).results.length, 0);
+  } finally {
+    database.close();
+  }
+});
+
+test('task filters search visible users, task ids, sub-task ids and names without crossing scope', async () => {
+  const { database, env } = createEnv(`
+    CREATE TABLE ews_tasks (
+      id TEXT PRIMARY KEY, platform TEXT NOT NULL, name TEXT NOT NULL,
+      status TEXT NOT NULL, user_id TEXT NOT NULL, group_id TEXT NOT NULL,
+      created_at TEXT NOT NULL, completed_at TEXT
+    );
+    CREATE TABLE ews_jst_sub_tasks (id TEXT PRIMARY KEY, parent_task_id TEXT NOT NULL);
+    CREATE TABLE ews_shopee_sub_tasks (id TEXT PRIMARY KEY, parent_task_id TEXT NOT NULL);
+    INSERT INTO ews_tasks VALUES
+      ('task-a1','jst','Summer Shirt','pending','user-a','group-a',datetime('now'),NULL),
+      ('task-a2','shopee','Literal 100% Cotton','pending','user-b','group-a',datetime('now'),NULL),
+      ('task-b1','jst','Summer Shoes','pending','user-c','group-b',datetime('now'),NULL);
+    INSERT INTO ews_jst_sub_tasks VALUES ('sub-a1','task-a1'),('sub-b1','task-b1');
+    INSERT INTO ews_shopee_sub_tasks VALUES ('sub-a2','task-a2');
+  `);
+  try {
+    const scope = ['', 'manager-a', 'group_admin', 'group-a'];
+    assert.deepEqual((await getTaskOwners(env, scope[1], scope[2], scope[3])).results.map(row => row.user_id), ['user-a', 'user-b']);
+    assert.deepEqual((await getTaskList(env, ...scope, 0, 0, { userId: 'user-b' })).results.map(row => row.id), ['task-a2']);
+    assert.equal((await getTaskList(env, ...scope, 0, 0, { userId: 'user-c' })).results.length, 0);
+    assert.deepEqual((await getTaskList(env, ...scope, 0, 0, { taskOrSubTaskId: 'sub-a1' })).results.map(row => row.id), ['task-a1']);
+    assert.equal((await getTaskList(env, ...scope, 0, 0, { taskOrSubTaskId: 'sub-b1' })).results.length, 0);
+    assert.deepEqual((await getTaskList(env, ...scope, 0, 0, { name: 'summer' })).results.map(row => row.id), ['task-a1']);
+    assert.deepEqual((await getTaskList(env, ...scope, 0, 0, { name: '100%' })).results.map(row => row.id), ['task-a2']);
+    assert.equal(await getTaskCount(env, ...scope, { taskOrSubTaskId: 'task-b1' }), 0);
   } finally {
     database.close();
   }
