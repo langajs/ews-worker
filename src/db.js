@@ -146,7 +146,11 @@ function taskQueryWhere(platform, userId, role, groupId, filters = {}) {
   if (platform) { ws.push("platform = ?"); params.push(platform); }
   if (role === 'group_admin') { ws.push("group_id = ?"); params.push(groupId); }
   else if (role !== 'admin') { ws.push("user_id = ?"); params.push(userId); }
-  if (filters.userId) { ws.push("user_id = ?"); params.push(filters.userId); }
+  if (filters.groupId) { ws.push("group_id = ?"); params.push(filters.groupId); }
+  if (filters.userIds?.length) {
+    ws.push("user_id IN (SELECT value FROM json_each(?))");
+    params.push(JSON.stringify(filters.userIds));
+  }
   if (filters.taskOrSubTaskId) {
     ws.push(`(ews_tasks.id = ?
       OR EXISTS (SELECT 1 FROM ews_jst_sub_tasks s WHERE s.parent_task_id=ews_tasks.id AND s.id=?)
@@ -171,8 +175,8 @@ async function getTaskCount(env, platform, userId, role, groupId, filters = {}) 
   const row = await getOne(env, "SELECT COUNT(*) AS cnt FROM ews_tasks WHERE " + taskWhere.where, taskWhere.params);
   return row?.cnt || 0;
 }
-async function getTaskOwners(env, userId, role, groupId) {
-  const taskWhere = taskQueryWhere('', userId, role, groupId);
+async function getTaskOwners(env, userId, role, groupId, filters = {}) {
+  const taskWhere = taskQueryWhere('', userId, role, groupId, { groupId: filters.groupId || '' });
   return await query(env, `SELECT DISTINCT user_id FROM ews_tasks WHERE ${taskWhere.where} AND user_id<>'' ORDER BY user_id COLLATE NOCASE`, taskWhere.params);
 }
 async function deleteTaskIndex(env, id) { await env.DB.prepare("DELETE FROM ews_tasks WHERE id = ?").bind(id).run(); }

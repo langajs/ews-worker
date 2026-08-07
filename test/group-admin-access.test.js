@@ -121,6 +121,7 @@ test('group secret and user management integrations remain scoped', () => {
   assert.match(migration, /UPDATE ews_users[\s\S]*role = 'group_admin'[\s\S]*id <> 'admin'/);
   assert.match(worker, /callbackSecretForTask\(env, idx\)/);
   assert.match(worker, /getTaskList\(env, platform, auth\.username, taskRole, auth\.group_id/);
+  assert.match(worker, /groupId: isSystemAdmin\(auth\) \? String\(url\.searchParams\.get\('group_id'\)/);
   assert.match(worker, /applyWorkflowOverrides\(config, group\?\.workflow_config, platform\)[\s\S]*applyWorkflowOverrides\(config, owner\?\.webhook_config, platform\)/);
   assert.match(worker, /if \(!user && loginName === 'admin'\)/);
   assert.match(worker, /delete body\.callback_secret/);

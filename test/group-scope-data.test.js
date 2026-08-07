@@ -131,13 +131,16 @@ test('task filters search visible users, task ids, sub-task ids and names withou
   try {
     const scope = ['', 'manager-a', 'group_admin', 'group-a'];
     assert.deepEqual((await getTaskOwners(env, scope[1], scope[2], scope[3])).results.map(row => row.user_id), ['user-a', 'user-b']);
-    assert.deepEqual((await getTaskList(env, ...scope, 0, 0, { userId: 'user-b' })).results.map(row => row.id), ['task-a2']);
-    assert.equal((await getTaskList(env, ...scope, 0, 0, { userId: 'user-c' })).results.length, 0);
+    assert.deepEqual((await getTaskList(env, ...scope, 0, 0, { userIds: ['user-a', 'user-b'] })).results.map(row => row.id).sort(), ['task-a1', 'task-a2']);
+    assert.equal((await getTaskList(env, ...scope, 0, 0, { userIds: ['user-c'] })).results.length, 0);
+    assert.equal((await getTaskList(env, ...scope, 0, 0, { groupId: 'group-b' })).results.length, 0);
     assert.deepEqual((await getTaskList(env, ...scope, 0, 0, { taskOrSubTaskId: 'sub-a1' })).results.map(row => row.id), ['task-a1']);
     assert.equal((await getTaskList(env, ...scope, 0, 0, { taskOrSubTaskId: 'sub-b1' })).results.length, 0);
     assert.deepEqual((await getTaskList(env, ...scope, 0, 0, { name: 'summer' })).results.map(row => row.id), ['task-a1']);
     assert.deepEqual((await getTaskList(env, ...scope, 0, 0, { name: '100%' })).results.map(row => row.id), ['task-a2']);
     assert.equal(await getTaskCount(env, ...scope, { taskOrSubTaskId: 'task-b1' }), 0);
+    assert.deepEqual((await getTaskList(env, '', 'admin', 'admin', 'default', 0, 0, { groupId: 'group-b' })).results.map(row => row.id), ['task-b1']);
+    assert.deepEqual((await getTaskOwners(env, 'admin', 'admin', 'default', { groupId: 'group-b' })).results.map(row => row.user_id), ['user-c']);
   } finally {
     database.close();
   }
