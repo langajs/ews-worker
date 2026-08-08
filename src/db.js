@@ -161,6 +161,10 @@ function taskQueryWhere(platform, userId, role, groupId, filters = {}) {
     ws.push("LOWER(COALESCE(name,'')) LIKE ? ESCAPE '\\'");
     params.push(`%${filters.name.toLowerCase().replace(/[\\%_]/g, '\\$&')}%`);
   }
+  if (filters.createdDate) {
+    ws.push("created_at >= datetime(?, '-8 hours') AND created_at < datetime(?, '+1 day', '-8 hours')");
+    params.push(filters.createdDate, filters.createdDate);
+  }
   return { where: ws.join(" AND "), params };
 }
 async function getTaskList(env, platform, userId, role, groupId, limit = 0, offset = 0, filters = {}) {

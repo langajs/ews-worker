@@ -124,20 +124,24 @@ test('task filters search visible users, task ids, sub-task ids and names withou
     INSERT INTO ews_tasks VALUES
       ('task-a1','jst','Summer Shirt','pending','user-a','group-a',datetime('now'),NULL),
       ('task-a2','shopee','Literal 100% Cotton','pending','user-b','group-a',datetime('now'),NULL),
+      ('task-a-old','jst','Archived Shirt','completed','user-a','group-a',datetime('now','-1 day'),datetime('now')),
       ('task-b1','jst','Summer Shoes','pending','user-c','group-b',datetime('now'),NULL);
     INSERT INTO ews_jst_sub_tasks VALUES ('sub-a1','task-a1'),('sub-b1','task-b1');
     INSERT INTO ews_shopee_sub_tasks VALUES ('sub-a2','task-a2');
   `);
   try {
+    const dates = database.prepare("SELECT strftime('%Y-%m-%d', datetime('now', '+8 hours')) AS today, strftime('%Y-%m-%d', datetime('now', '-1 day', '+8 hours')) AS yesterday").get();
     const scope = ['', 'manager-a', 'group_admin', 'group-a'];
     assert.deepEqual((await getTaskOwners(env, scope[1], scope[2], scope[3])).results.map(row => row.user_id), ['user-a', 'user-b']);
-    assert.deepEqual((await getTaskList(env, ...scope, 0, 0, { userIds: ['user-a', 'user-b'] })).results.map(row => row.id).sort(), ['task-a1', 'task-a2']);
+    assert.deepEqual((await getTaskList(env, ...scope, 0, 0, { userIds: ['user-a', 'user-b'] })).results.map(row => row.id).sort(), ['task-a-old', 'task-a1', 'task-a2']);
     assert.equal((await getTaskList(env, ...scope, 0, 0, { userIds: ['user-c'] })).results.length, 0);
     assert.equal((await getTaskList(env, ...scope, 0, 0, { groupId: 'group-b' })).results.length, 0);
     assert.deepEqual((await getTaskList(env, ...scope, 0, 0, { taskOrSubTaskId: 'sub-a1' })).results.map(row => row.id), ['task-a1']);
     assert.equal((await getTaskList(env, ...scope, 0, 0, { taskOrSubTaskId: 'sub-b1' })).results.length, 0);
     assert.deepEqual((await getTaskList(env, ...scope, 0, 0, { name: 'summer' })).results.map(row => row.id), ['task-a1']);
     assert.deepEqual((await getTaskList(env, ...scope, 0, 0, { name: '100%' })).results.map(row => row.id), ['task-a2']);
+    assert.deepEqual((await getTaskList(env, ...scope, 0, 0, { createdDate: dates.yesterday })).results.map(row => row.id), ['task-a-old']);
+    assert.deepEqual((await getTaskList(env, ...scope, 0, 0, { createdDate: dates.today })).results.map(row => row.id).sort(), ['task-a1', 'task-a2']);
     assert.equal(await getTaskCount(env, ...scope, { taskOrSubTaskId: 'task-b1' }), 0);
     assert.deepEqual((await getTaskList(env, '', 'admin', 'admin', 'default', 0, 0, { groupId: 'group-b' })).results.map(row => row.id), ['task-b1']);
     assert.deepEqual((await getTaskOwners(env, 'admin', 'admin', 'default', { groupId: 'group-b' })).results.map(row => row.user_id), ['user-c']);

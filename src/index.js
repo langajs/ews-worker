@@ -1582,11 +1582,13 @@ async function handleGetTasks(env, ctx, auth, url) {
   const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit')) || 10, 1), 100);
   const taskRole = isSystemAdmin(auth) ? 'admin' : (isGroupAdmin(auth) ? 'group_admin' : 'user');
   const userIds = [...new Set(url.searchParams.getAll('user_id').map(value => String(value).trim()).filter(Boolean))];
+  const createdDateParam = String(url.searchParams.get('created_date') || '').trim();
   const filters = {
     groupId: isSystemAdmin(auth) ? String(url.searchParams.get('group_id') || '').trim() : '',
     userIds,
     taskOrSubTaskId: String(url.searchParams.get('task_or_subtask_id') || '').trim(),
     name: String(url.searchParams.get('name') || '').trim(),
+    createdDate: /^\d{4}-\d{2}-\d{2}$/.test(createdDateParam) ? createdDateParam : '',
   };
   const [result, total, ownerResult, groupResult] = await Promise.all([
     getTaskList(env, platform, auth.username, taskRole, auth.group_id || '', limit, (page - 1) * limit, filters),
