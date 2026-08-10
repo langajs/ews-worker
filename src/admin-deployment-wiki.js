@@ -32,8 +32,8 @@ const SECTIONS = Object.freeze([
     id: 'installer',
     number: '01',
     title: '部署节点环境',
-    body: '填写节点信息与 n8n 管理员账号，下载 CMD 后直接双击执行。脚本只部署 Docker、n8n、Valkey 和图片服务环境。',
-    bullets: ['宿主机只需要 Windows 10/11，Docker Desktop 缺失时自动下载并安装', '始终拉取最新 n8n 与 Valkey 镜像，并重建图片服务', '自动部署 Valkey、图片 API、图片 Worker 和持久化队列', '不会导入工作流或创建模型凭证'],
+    body: '填写节点信息与 n8n 管理员账号，下载 CMD 后直接双击执行。脚本只部署 Docker、n8n、Valkey 和图片服务环境；使用同一节点名称重跑会覆盖运行配置，但保留工作流、凭证和数据卷。',
+    bullets: ['宿主机只需要 Windows 10/11，Docker Desktop 缺失时自动下载并安装', '始终拉取最新 n8n 与 Valkey 镜像，并重建图片服务', '生产工作流默认不限制并发，只有在 Wiki 显式填写正整数时才限制', '本机图片 Worker 默认并发为 8，高性能设备最大建议 32', '自动部署 Valkey、图片 API、图片 Worker 和持久化队列', '不会导入工作流或创建模型凭证'],
   },
   {
     id: 'cloudflare',
@@ -66,7 +66,7 @@ async function sha256(value) {
 export async function getDistributedN8nWiki() {
   const installer = getDistributedN8nInstallerScript();
   return {
-    version: '2026.08.04',
+    version: '2026.08.10',
     title: 'n8n 节点环境一键部署',
     subtitle: '一份可双击运行的 CMD，只部署 Docker、图片队列与 n8n 环境；工作流 JSON 和模型凭证由管理员人工迁移',
     script: {
@@ -81,7 +81,8 @@ export async function getDistributedN8nWiki() {
       image_service_url: 'http://ews-image-sidecar:3000',
       image_service_version: '2026.07.28',
       n8n_version: '2.25.7',
-      concurrency: 20,
+      concurrency: -1,
+      image_worker_concurrency: 8,
     },
     credentials: CREDENTIALS,
     references: REFERENCES,

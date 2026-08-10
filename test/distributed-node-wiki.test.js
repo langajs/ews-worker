@@ -75,6 +75,12 @@ test('one-click CMD deploys the runtime without workflows or model credentials',
   assert.match(cmdTemplate, /goto :extract_payload/);
   assert.match(cmdTemplate, /if not defined EWS_NO_PAUSE pause/);
   assert.match(powershellTemplate, /\$NodeName = '__EWS_NODE_NAME__'/);
+  assert.match(powershellTemplate, /\$ProductionConcurrencyLimit = \[int\]'__EWS_PRODUCTION_CONCURRENCY_LIMIT__'/);
+  assert.match(powershellTemplate, /"N8N_CONCURRENCY_PRODUCTION_LIMIT=\$ProductionConcurrencyLimit"/);
+  assert.doesNotMatch(powershellTemplate, /N8N_CONCURRENCY_PRODUCTION_LIMIT=20/);
+  assert.match(powershellTemplate, /\$ImageWorkerConcurrency = \[int\]'__EWS_IMAGE_WORKER_CONCURRENCY__'/);
+  assert.match(powershellTemplate, /"WORKER_CONCURRENCY=\$ImageWorkerConcurrency"/);
+  assert.doesNotMatch(powershellTemplate, /'WORKER_CONCURRENCY=8'/);
   assert.doesNotMatch(powershellTemplate, /Decode-Value|EWS_NODE_NAME_B64/);
   assert.match(powershellTemplate, /\$N8nImage = 'n8nio\/n8n:2\.25\.7'/);
   assert.match(powershellTemplate, /function Get-N8nSettings/);
@@ -155,23 +161,36 @@ test('browser parameter injection embeds plaintext values', () => {
     '__EWS_IMAGE_SERVICE_URL__': 'http://ews-image-sidecar:3000',
     '__EWS_CALLBACK_SECRET__': 'callback-secret-value',
     '__EWS_TICKET_ORIGIN__': 'https://ewsz.langaj.cc',
+    '__EWS_PRODUCTION_CONCURRENCY_LIMIT__': '-1',
+    '__EWS_IMAGE_WORKER_CONCURRENCY__': '8',
     '__EWS_PORT__': '5692',
   };
   let generated = buildInstaller();
   for (const [token, value] of Object.entries(values)) generated = generated.split(token).join(injectInstallerValue(value));
 
-  assert.doesNotMatch(generated, /__EWS_(?:NODE_NAME|DOMAIN|OWNER_EMAIL|OWNER_PASSWORD|IMAGE_SERVICE_URL|CALLBACK_SECRET|TICKET_ORIGIN|PORT)__/);
+  assert.doesNotMatch(generated, /__EWS_(?:NODE_NAME|DOMAIN|OWNER_EMAIL|OWNER_PASSWORD|IMAGE_SERVICE_URL|CALLBACK_SECRET|TICKET_ORIGIN|PRODUCTION_CONCURRENCY_LIMIT|IMAGE_WORKER_CONCURRENCY|PORT)__/);
 
   const payload = rebuildPayload(generated);
   assert.match(payload, /\$NodeName = 'test-node'/);
   assert.match(payload, /\$OwnerPassword = 'Owner-password-2026'/);
   assert.doesNotMatch(payload, /GrsaiKey|DeepseekKey|BackupKey/);
   assert.match(payload, /\$Port = \[int\]'5692'/);
+  assert.match(payload, /\$ProductionConcurrencyLimit = \[int\]'-1'/);
+  assert.match(payload, /N8N_CONCURRENCY_PRODUCTION_LIMIT=\$ProductionConcurrencyLimit/);
+  assert.match(payload, /\$ImageWorkerConcurrency = \[int\]'8'/);
+  assert.match(payload, /WORKER_CONCURRENCY=\$ImageWorkerConcurrency/);
   const sidecarBundleBase64 = joinBundle(payload, 'ImageServiceBundleBase64');
   const sidecarBundle = JSON.parse(Buffer.from(sidecarBundleBase64, 'base64').toString('utf8'));
   assert.deepEqual(sidecarBundle.map(entry => entry.name), imageSidecarFiles);
   assert.match(sidecarBundle.find(entry => entry.name === 'src/app.js').content, /from 'fastify'/);
   assert.match(payload, /\$ImageServiceInput = 'http:\/\/ews-image-sidecar:3000'\.Trim\(\)/);
+
+  let limitedGenerated = buildInstaller();
+  const limitedValues = { ...values, '__EWS_PRODUCTION_CONCURRENCY_LIMIT__': '40', '__EWS_IMAGE_WORKER_CONCURRENCY__': '32' };
+  for (const [token, value] of Object.entries(limitedValues)) limitedGenerated = limitedGenerated.split(token).join(injectInstallerValue(value));
+  const limitedPayload = rebuildPayload(limitedGenerated);
+  assert.match(limitedPayload, /\$ProductionConcurrencyLimit = \[int\]'40'/);
+  assert.match(limitedPayload, /\$ImageWorkerConcurrency = \[int\]'32'/);
 });
 
 test('Windows PowerShell decodes the generated image service bundle', { skip: process.platform !== 'win32' }, () => {
@@ -231,6 +250,8 @@ test('admin deployment wiki protects installer details and uses CMD flow', () =>
   assert.match(workerWiki, /Docker Desktop 缺失时自动下载并安装/);
   assert.match(workerWiki, /始终拉取最新 n8n 与 Valkey 镜像/);
   assert.match(workerWiki, /Cloudflare Tunnel/);
+  assert.match(workerWiki, /concurrency: -1/);
+  assert.match(workerWiki, /image_worker_concurrency: 8/);
   assert.match(workerEntry, /requireAuth\(request, env, \(\) => handleGetDistributedN8nWiki\(request\)\)/);
   assert.match(workerEntry, /requireAuth\(request, env, \(\) => handleDownloadDistributedN8nScript\(request\)\)/);
   assert.match(workerEntry, /isSystemAdmin\(request\.auth\)/);
@@ -240,6 +261,12 @@ test('admin deployment wiki protects installer details and uses CMD flow', () =>
   assert.match(frontendShell, /API\.getGroups\(\)/);
   assert.match(frontendShell, /id="deploymentGroup"/);
   assert.match(frontendShell, /id="callbackSecret"/);
+  assert.match(frontendShell, /id="productionConcurrency"/);
+  assert.match(frontendShell, /__EWS_PRODUCTION_CONCURRENCY_LIMIT__/);
+  assert.match(frontendShell, /id="imageWorkerConcurrency"/);
+  assert.match(frontendShell, /__EWS_IMAGE_WORKER_CONCURRENCY__/);
+  assert.match(frontendShell, /最大建议 32/);
+  assert.match(frontendShell, /不限制 \(-1\)/);
   assert.match(frontendShell, /默认地址会在本机自动部署/);
   assert.match(frontendShell, /人工导入 9 个 workflow JSON/);
   assert.match(frontendShell, /不会导入、修改或发布任何工作流/);

@@ -26,6 +26,10 @@ install-ews-node2.cmd
 4. 持久化 `N8N_ENCRYPTION_KEY`，初始化 n8n owner。
 5. 校验 Valkey、图片服务 `/readyz` 和 n8n `/healthz`。
 
+`N8N_CONCURRENCY_PRODUCTION_LIMIT` 默认写入 `-1`，表示不限制生产工作流并发。只有在部署 Wiki 中显式填写正整数时才启用并发上限。
+
+本机图片服务的 `WORKER_CONCURRENCY` 默认写入 `8`，部署 Wiki 允许设置 `1-32`。建议不要超过设备的 CPU 逻辑核心数；多核、高内存设备的最大建议值为 `32`。使用外部图片服务时该配置不生效。
+
 安装器明确不会执行：
 
 - 打包、复制、导入或发布任何 workflow JSON
@@ -39,7 +43,7 @@ install-ews-node2.cmd
 3. 将 credentials 绑定到对应节点；使用外部图片服务时，同时检查工作流的图片服务地址。
 4. 逐个检查并发布工作流，再用最小 Shopee 与聚水潭任务验证回调。
 
-节点状态保存在 `%LOCALAPPDATA%\EWS\n8n-nodes\{node}`。重复执行同一节点脚本会复用数据卷和加密密钥，并重建运行容器，但不会改动 n8n 中已有的工作流和凭证。
+节点状态保存在 `%LOCALAPPDATA%\EWS\n8n-nodes\{node}`。重新下载最新脚本并使用同一节点名称执行，会复用数据卷和加密密钥、覆盖 `n8n.env` 并重建运行容器，因此可将已部署节点的旧并发限制重置为 `-1`；不会改动 n8n 中已有的工作流和凭证。
 
 默认图片服务地址 `http://ews-image-sidecar:3000` 会触发本机部署：安装器使用内嵌源码构建 `ews-image-service:2026.07.28`，创建 `ews-image-valkey`、`ews-image-sidecar`、`ews-image-worker` 和 Valkey volume。仅在明确填写外部 HTTP/HTTPS 端点时跳过本机图片服务。
 

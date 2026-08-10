@@ -311,7 +311,7 @@ function Install-LocalImageService([string]$BundleBase64, [string]$CallbackSecre
     "IMAGE_SERVICE_SECRET=$CallbackSecret"
     'REDIS_URL=redis://valkey:6379'
     "TICKET_ORIGIN=$TicketOrigin"
-    'WORKER_CONCURRENCY=8'
+    "WORKER_CONCURRENCY=$ImageWorkerConcurrency"
     'MAX_QUEUE_DEPTH=10000'
     'JPEG_QUALITY=88'
     'MAX_OUTPUT_BYTES=1900000'
@@ -359,6 +359,8 @@ $OwnerPassword = '__EWS_OWNER_PASSWORD__'
 $ImageServiceInput = '__EWS_IMAGE_SERVICE_URL__'.Trim()
 $CallbackSecret = '__EWS_CALLBACK_SECRET__'.Trim()
 $TicketOriginInput = '__EWS_TICKET_ORIGIN__'.Trim()
+$ProductionConcurrencyLimit = [int]'__EWS_PRODUCTION_CONCURRENCY_LIMIT__'
+$ImageWorkerConcurrency = [int]'__EWS_IMAGE_WORKER_CONCURRENCY__'
 $ImageServiceBundleBase64 = __EWS_IMAGE_SIDECAR_BUNDLE_B64__
 $Port = [int]'__EWS_PORT__'
 
@@ -370,6 +372,8 @@ if ($OwnerPassword.Length -lt 8 -or $OwnerPassword.Length -gt 64) { throw 'n8n o
 if ($OwnerPassword -notmatch '[A-Z]') { throw 'n8n owner password must contain at least one uppercase letter.' }
 if ($OwnerPassword -notmatch '\d') { throw 'n8n owner password must contain at least one number.' }
 if ($CallbackSecret -match '[\r\n]') { throw 'EWS callback secret is invalid.' }
+if ($ProductionConcurrencyLimit -ne -1 -and $ProductionConcurrencyLimit -lt 1) { throw 'Production concurrency limit must be -1 or a positive integer.' }
+if ($ImageWorkerConcurrency -lt 1 -or $ImageWorkerConcurrency -gt 32) { throw 'Image worker concurrency must be between 1 and 32.' }
 
 try {
   $ticketUri = [Uri]$TicketOriginInput
@@ -432,7 +436,7 @@ $envLines = @(
   'TZ=Asia/Shanghai'
   'NODE_ENV=production'
   'DB_SQLITE_POOL_SIZE=2'
-  'N8N_CONCURRENCY_PRODUCTION_LIMIT=20'
+  "N8N_CONCURRENCY_PRODUCTION_LIMIT=$ProductionConcurrencyLimit"
   'EXECUTIONS_DATA_PRUNE=true'
   'EXECUTIONS_DATA_MAX_AGE=168'
   'EXECUTIONS_DATA_PRUNE_MAX_COUNT=10000'
@@ -507,6 +511,8 @@ Write-Host "Local health: http://127.0.0.1:$Port/healthz"
 Write-Host "Docker network: $NetworkName"
 Write-Host 'Cloudflare origin service: http://n8n:5678'
 Write-Host "Image service: $ImageServiceBaseUrl"
+if ($ImageDockerNetwork) { Write-Host "Image worker concurrency: $ImageWorkerConcurrency" }
+Write-Host "Production concurrency limit: $ProductionConcurrencyLimit"
 Write-Host ''
 Write-Host 'Import workflow JSON files, configure credentials, and publish workflows manually in n8n.' -ForegroundColor Yellow
 Write-Host 'This generated installer contains the owner password and callback secret. Delete it after deployment.' -ForegroundColor Yellow
