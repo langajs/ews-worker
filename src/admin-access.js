@@ -18,7 +18,7 @@ function canManageUser(auth, user) {
   if (!isUserManager(auth) || !user) return false;
   if (isSystemAdmin(auth)) return true;
   return user.id !== 'admin'
-    && user.role !== 'admin'
+    && user.role === 'user'
     && user.group_id === auth.group_id;
 }
 

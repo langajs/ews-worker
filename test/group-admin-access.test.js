@@ -34,9 +34,9 @@ test('only the default admin is the unrestricted system administrator', () => {
   assert.equal(isUserManager({ role: 'user', group_id: 'group-a' }), false);
 });
 
-test('group admins can manage only non-system users in their own group', () => {
+test('group admins can manage only ordinary users in their own group', () => {
   assert.equal(canManageUser(jstAdmin, { id: 'user-a', role: 'user', group_id: 'group-a' }), true);
-  assert.equal(canManageUser(jstAdmin, { id: 'manager-a', role: 'group_admin', group_id: 'group-a' }), true);
+  assert.equal(canManageUser(jstAdmin, { id: 'manager-a', role: 'group_admin', group_id: 'group-a' }), false);
   assert.equal(canManageUser(jstAdmin, { id: 'user-b', role: 'user', group_id: 'group-b' }), false);
   assert.equal(canManageUser(jstAdmin, { id: 'admin', role: 'admin', group_id: 'group-a' }), false);
   assert.equal(canManageUser(systemAdmin, { id: 'user-b', role: 'user', group_id: 'group-b' }), true);
@@ -47,6 +47,7 @@ test('group admins cannot manage their own lifecycle or credits', () => {
   const peer = { id: 'manager-peer', role: 'group_admin', group_id: 'group-a' };
   const user = { id: 'user-a', role: 'user', group_id: 'group-a' };
   assert.equal(canManageUserLifecycle(jstAdmin, self), false);
+  assert.equal(canManageUserLifecycle(jstAdmin, peer), false);
   assert.equal(canAdjustUserCredits(jstAdmin, self), false);
   assert.equal(canAdjustUserCredits(jstAdmin, peer), false);
   assert.equal(canManageUserLifecycle(jstAdmin, user), true);
@@ -141,6 +142,8 @@ test('group secret and user management integrations remain scoped', () => {
   assert.match(configPage, /updateGroupTemplates/);
   assert.match(userPage, /id="webhookTabs"/);
   assert.match(userPage, /value="group_admin"/);
+  assert.match(userPage, /protectedGroupAdmin=!management\.system_admin&&user\.role==='group_admin'/);
+  assert.match(userPage, /visibleUsers=management\.system_admin\?users:users\.filter/);
   assert.match(nav, /user-management\.html/);
   assert.match(nav, /role === 'group_admin'/);
 });
