@@ -4217,7 +4217,7 @@ async function handleUpload(request, env) {
   if (requestedUploadId && !/^[a-zA-Z0-9_-]{8,64}$/.test(requestedUploadId)) return error('upload_id 格式无效', 400);
   const task = await getTaskIndex(env, taskId);
   if (!task) return error('任务不存在', 404);
-  if (!isSystemAdmin(request.auth) && task.user_id !== request.auth?.username) return error('无权访问该任务', 403);
+  if (!canControlTask(request.auth, task)) return error('无权访问该任务', 403);
   if (isTaskExpired(task)) return error('任务缓存已过期', 410);
   const maxSize = folder === 'size-chart' ? 2 * 1024 * 1024 : 10 * 1024 * 1024;
   if (file.size > maxSize) return error(folder === 'size-chart' ? '尺码表文件不能超过 2MB' : '文件大小不能超过 10MB', 400);

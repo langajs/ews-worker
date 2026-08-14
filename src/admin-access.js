@@ -41,7 +41,7 @@ function canAccessTask(auth, task) {
 }
 
 function canControlTask(auth, task) {
-  return Boolean(task) && (isSystemAdmin(auth) || task.user_id === auth?.username);
+  return canAccessTask(auth, task);
 }
 
 function canGrantPlatformAccess(auth, requestedAccess) {

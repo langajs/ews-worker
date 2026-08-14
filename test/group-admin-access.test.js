@@ -60,15 +60,20 @@ test('group admin deletion refunds credits only for ordinary users', () => {
   assert.match(worker, /handleUpdateUserCredits[\s\S]*if \(isGroupAdmin\(request\.auth\)\)[\s\S]*transferUserCredits/);
 });
 
-test('group admins can access every task in their group and no task outside it', () => {
+test('group admins can access and control every task in their group and no task outside it', () => {
   assert.equal(canAccessTask(jstAdmin, { user_id: 'user-a', group_id: 'group-a' }), true);
   assert.equal(canAccessTask(jstAdmin, { user_id: 'manager-a', group_id: 'group-a' }), true);
   assert.equal(canAccessTask(jstAdmin, { user_id: 'manager-a', group_id: 'group-b' }), false);
   assert.equal(canAccessTask({ username: 'user-a', role: 'user', group_id: 'group-a' }, { user_id: 'user-b', group_id: 'group-a' }), false);
   assert.equal(canAccessTask(systemAdmin, { user_id: 'user-b', group_id: 'group-b' }), true);
-  assert.equal(canControlTask(jstAdmin, { user_id: 'user-a', group_id: 'group-a' }), false);
+  assert.equal(canControlTask(jstAdmin, { user_id: 'user-a', group_id: 'group-a' }), true);
   assert.equal(canControlTask(jstAdmin, { user_id: 'manager-a', group_id: 'group-a' }), true);
+  assert.equal(canControlTask(jstAdmin, { user_id: 'user-b', group_id: 'group-b' }), false);
+  assert.equal(canControlTask({ username: 'user-a', role: 'user', group_id: 'group-a' }, { user_id: 'user-b', group_id: 'group-a' }), false);
   assert.equal(canControlTask(systemAdmin, { user_id: 'user-b', group_id: 'group-b' }), true);
+
+  const worker = read('src/index.js');
+  assert.match(worker, /handleUpload[\s\S]*if \(!canControlTask\(request\.auth, task\)\) return error\('无权访问该任务', 403\)/);
 });
 
 test('workflow webhooks resolve in user, group, global priority order', () => {
